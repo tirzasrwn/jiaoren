@@ -37,7 +37,9 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                     if info.trim() == "mermaid" {
                         let id = diagram_id(&body);
                         diagrams.insert(id.clone(), body.trim().to_string());
-                        out.push_str(&format!("<mermaid id=\"{id}\">\n"));
+                        // Trailing blank line terminates the CommonMark HTML block so
+                        // a paragraph directly after the fence is not absorbed into it.
+                        out.push_str(&format!("<mermaid id=\"{id}\">\n\n"));
                     } else {
                         out.push_str(&oline);
                         out.push_str(&body);
@@ -173,5 +175,16 @@ mod tests {
         assert_eq!(p.diagrams.len(), 1);
         let id = diagram_id("graph TD;");
         assert!(p.markdown.contains(&format!("<mermaid id=\"{id}\">")));
+    }
+
+    #[test]
+    fn paragraph_after_mermaid_fence_survives() {
+        // A non-blank paragraph directly after the fence must not be swallowed by
+        // the placeholder's HTML block; the placeholder ends with a blank line.
+        let md = "```mermaid\ngraph TD; A-->B;\n```\nThis paragraph must survive.\n";
+        let p = prepare(md, Path::new("/x"));
+        let id = diagram_id("graph TD; A-->B;");
+        assert!(p.markdown.contains(&format!("<mermaid id=\"{id}\">\n\n")));
+        assert!(p.markdown.contains("This paragraph must survive."));
     }
 }

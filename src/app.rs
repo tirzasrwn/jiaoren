@@ -48,6 +48,31 @@ fn parent_dir(path: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
+/// Queue a render for `id`, unless it has already failed this session or is in flight.
+/// Returns true when a job was actually enqueued.
+fn enqueue_diagram(
+    failures: &HashMap<String, String>,
+    inflight: &mut HashSet<String>,
+    sources: &HashMap<String, String>,
+    queue: &Mutex<VecDeque<Job>>,
+    id: &str,
+    theme: Theme,
+) -> bool {
+    if failures.contains_key(id) || inflight.contains(id) {
+        return false;
+    }
+    if let Some(src) = sources.get(id) {
+        inflight.insert(id.to_string());
+        queue
+            .lock()
+            .unwrap()
+            .push_back((id.to_string(), src.clone(), theme));
+        true
+    } else {
+        false
+    }
+}
+
 /// Shared, interior-mutable state backing the markdown html hook and the worker pool.
 pub struct DiagramUi {
     renderer: Arc<Renderer>,
@@ -56,6 +81,7 @@ pub struct DiagramUi {
     zoom: f32,
     textures: HashMap<String, (egui::TextureHandle, [usize; 2])>,
     inflight: HashSet<String>,
+    failures: HashMap<String, String>,
     queue: Arc<Mutex<VecDeque<Job>>>,
     result_tx: mpsc::Sender<(String, Result<PathBuf, String>)>,
     result_rx: mpsc::Receiver<(String, Result<PathBuf, String>)>,
@@ -72,6 +98,7 @@ impl DiagramUi {
             zoom: 1.0,
             textures: HashMap::new(),
             inflight: HashSet::new(),
+            failures: HashMap::new(),
             queue: Arc::new(Mutex::new(VecDeque::new())),
             result_tx: tx,
             result_rx: rx,
@@ -81,24 +108,23 @@ impl DiagramUi {
 
     pub fn show(&mut self, ui: &mut egui::Ui, id: &str) {
         let col = ui.available_width();
+        if let Some(msg) = self.failures.get(id) {
+            let msg = msg.clone();
+            self.draw_error(ui, id, &msg);
+            return;
+        }
         match self.renderer.cached(id, self.theme) {
             Some(Ok(png)) => self.draw_png(ui, id, &png, col),
-            Some(Err(msg)) => {
-                ui.colored_label(egui::Color32::RED, format!("diagram error: {msg}"));
-                if let Some(src) = self.sources.get(id) {
-                    ui.code(src);
-                }
-            }
+            Some(Err(msg)) => self.draw_error(ui, id, &msg),
             None => {
-                if !self.inflight.contains(id) {
-                    if let Some(src) = self.sources.get(id) {
-                        self.inflight.insert(id.to_string());
-                        self.queue
-                            .lock()
-                            .unwrap()
-                            .push_back((id.to_string(), src.clone(), self.theme));
-                    }
-                }
+                enqueue_diagram(
+                    &self.failures,
+                    &mut self.inflight,
+                    &self.sources,
+                    &self.queue,
+                    id,
+                    self.theme,
+                );
                 self.maybe_spawn();
                 self.draw_placeholder(ui);
             }
@@ -107,10 +133,16 @@ impl DiagramUi {
 
     pub fn poll(&mut self, ctx: &egui::Context) {
         let mut got = false;
-        while let Ok((id, _result)) = self.result_rx.try_recv() {
+        while let Ok((id, result)) = self.result_rx.try_recv() {
             got = true;
             self.inflight.remove(&id);
             self.active_workers = self.active_workers.saturating_sub(1);
+            if let Err(msg) = result {
+                self.failures.insert(id, msg);
+            }
+        }
+        if !self.inflight.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         if got {
             self.maybe_spawn();
@@ -161,6 +193,13 @@ impl DiagramUi {
             );
         } else {
             ui.colored_label(egui::Color32::RED, "diagram: failed to load image");
+        }
+    }
+
+    fn draw_error(&self, ui: &mut egui::Ui, id: &str, msg: &str) {
+        ui.colored_label(egui::Color32::RED, format!("diagram error: {msg}"));
+        if let Some(src) = self.sources.get(id) {
+            ui.code(src);
         }
     }
 
@@ -262,6 +301,7 @@ impl App {
         d.sources = sources;
         d.textures.clear();
         d.inflight.clear();
+        d.failures.clear();
     }
 }
 
@@ -339,5 +379,68 @@ mod tests {
         std::fs::write(&bad, [0xff, 0xfe]).unwrap();
         assert!(read_doc(&bad).unwrap_err().contains("UTF-8"));
         let _ = std::fs::remove_file(&bad);
+    }
+
+    fn sources() -> HashMap<String, String> {
+        HashMap::from([("abc".to_string(), "graph TD; A-->B;".to_string())])
+    }
+
+    #[test]
+    fn enqueue_diagram_queues_once_then_skips_inflight() {
+        let failures = HashMap::new();
+        let mut inflight = HashSet::new();
+        let queue = Mutex::new(VecDeque::new());
+        assert!(enqueue_diagram(
+            &failures,
+            &mut inflight,
+            &sources(),
+            &queue,
+            "abc",
+            Theme::Light
+        ));
+        assert!(!enqueue_diagram(
+            &failures,
+            &mut inflight,
+            &sources(),
+            &queue,
+            "abc",
+            Theme::Light
+        ));
+        assert_eq!(queue.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn failed_id_is_never_requeued() {
+        // A failed render must not be queued again this session, even though the
+        // on-disk cache never got a png/err (.err is only written for diagram errors).
+        let failures = HashMap::from([("abc".to_string(), "chromium not found".to_string())]);
+        let mut inflight = HashSet::new();
+        let queue = Mutex::new(VecDeque::new());
+        assert!(!enqueue_diagram(
+            &failures,
+            &mut inflight,
+            &sources(),
+            &queue,
+            "abc",
+            Theme::Light
+        ));
+        assert!(inflight.is_empty());
+        assert!(queue.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn missing_source_is_not_queued() {
+        let failures = HashMap::new();
+        let mut inflight = HashSet::new();
+        let queue = Mutex::new(VecDeque::new());
+        assert!(!enqueue_diagram(
+            &failures,
+            &mut inflight,
+            &sources(),
+            &queue,
+            "unknown",
+            Theme::Light
+        ));
+        assert!(inflight.is_empty());
     }
 }
