@@ -568,8 +568,7 @@ pub fn draw(ui: &mut egui::Ui, runs: &[Run], column: f32) {
 }
 
 /// Left-aligned variant of [`draw`]: same wrapping, splitting and painting, but
-/// gaps never stretch and rows hug the left edge.
-#[allow(dead_code)] // table cells consume it in the next task
+/// gaps never stretch and rows hug the left edge. Used by table cells.
 pub fn draw_left(ui: &mut egui::Ui, runs: &[Run], column: f32) {
     paint(ui, runs, column, false);
 }
@@ -611,11 +610,21 @@ fn paint(ui: &mut egui::Ui, runs: &[Run], column: f32, justify: bool) {
     let used_height = lines.len() as f32 * row_h;
     // Reserve the widest line's natural width so a lone char wider than the
     // column stays reachable by horizontal pan instead of being clipped.
-    let reserved = lines.iter().map(|line| natural_of(line)).fold(column, f32::max);
+    // Left-aligned mode paints inside a fixed-width cell, so it reserves exactly
+    // the column and clips: a single over-wide glyph must not widen the table.
+    let reserved = if justify {
+        lines.iter().map(|line| natural_of(line)).fold(column, f32::max)
+    } else {
+        column
+    };
     let (_, rect) = ui.allocate_space(egui::vec2(reserved, used_height));
+    let mut painter = ui.painter().clone();
+    if !justify {
+        let clip = egui::Rect::from_min_size(rect.min, egui::vec2(column, used_height));
+        painter.set_clip_rect(ui.clip_rect().intersect(clip));
+    }
     let left = rect.left();
     let top = rect.top();
-    let painter = ui.painter().clone();
     let split_words: Vec<bool> = words.iter().map(|w| w.split).collect();
 
     for (row, line) in lines.iter().enumerate() {

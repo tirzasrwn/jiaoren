@@ -103,8 +103,11 @@ document cannot exfiltrate data or load remote resources during rendering.
 - Body paragraphs are justified by a built-in layout: bold/italic/code/strike/
   links are supported, but a paragraph containing an image or raw HTML falls
   back to plain (left-aligned) rendering.
-- A single token wider than the column (a very long URL) overflows and is
-  clipped at the window edge.
+- Long tokens (paths, URLs, identifiers) break at separators (`/`, `-`, `_`,
+  `:`, `.`, `,`, `;`, `?`, `&`, `=`, `\`) and, failing those, at a hard
+  character budget, in paragraphs and table cells alike. Table cells always
+  stay inside the reading column; a cell holding an image or raw HTML still
+  renders through the library.
 
 ## Non-goals
 

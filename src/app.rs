@@ -623,15 +623,33 @@ impl TableUi {
     }
 }
 
-/// Render one cell as its own little Markdown view, capped at `w` so text wraps
-/// and inline formatting (bold, code, links) still applies.
+/// Cells with images or raw HTML still need the library: our mini-parser cannot
+/// express them. Everything else (plain text, inline styles, code, links) goes
+/// through the token-splitting left-aligned painter so long paths wrap.
+fn cell_needs_library_fallback(md: &str) -> bool {
+    md.contains("![") || md.contains('<')
+}
+
+/// Render one cell, capped at `w` so text wraps and inline formatting (bold,
+/// code, links) still applies. Long tokens break at separators, so a cell never
+/// widens the grid past the reading column.
 fn render_cell(ui: &mut egui::Ui, w: f32, cell_md: &str, cache: &mut CommonMarkCache) {
     // A vertical scope reports the real content height back to the grid; a
     // zero-height `allocate_ui_with_layout` would collapse every row to 0 and
     // let wrapped text paint over the next row.
     ui.vertical(|ui| {
         ui.set_width(w);
-        CommonMarkViewer::new().show(ui, cache, cell_md);
+        if cell_needs_library_fallback(cell_md) {
+            CommonMarkViewer::new().show(ui, cache, cell_md);
+            return;
+        }
+        let runs = crate::justify::parse_inline(cell_md);
+        if runs.is_empty() {
+            // Keep an all-blank row from collapsing to zero height.
+            ui.add_space(ui.spacing().interact_size.y);
+            return;
+        }
+        crate::justify::draw_left(ui, &runs, w);
     });
 }
 
@@ -1101,6 +1119,14 @@ mod tests {
         assert_eq!(super::parse_paragraph_placeholder(r#"<mdpara id="abc">"#), Some("abc"));
         assert_eq!(super::parse_paragraph_placeholder(r#"<mdpara id="">"#), None);
         assert_eq!(super::parse_paragraph_placeholder(r#"<mdtable id="x">"#), None);
+    }
+
+    #[test]
+    fn cell_falls_back_only_for_images_and_html() {
+        assert!(super::cell_needs_library_fallback("see ![x](a.png)"));
+        assert!(super::cell_needs_library_fallback("a<br>b"));
+        assert!(!super::cell_needs_library_fallback("**bold** and `code`"));
+        assert!(!super::cell_needs_library_fallback("src/db/schema.ts:293-311"));
     }
 
     #[test]
