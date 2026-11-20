@@ -1,3 +1,5 @@
+mod doc;
+
 use std::path::PathBuf;
 
 pub struct Options {
