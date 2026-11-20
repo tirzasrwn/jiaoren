@@ -7,7 +7,7 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 use crate::doc::TableSpec;
 
-use super::geometry::table_column_widths;
+use super::geometry::{cap_column_widths, table_column_widths};
 
 /// Shared, interior-mutable state backing the `<mdtable>` render path in the
 /// html hook. Holds the parsed specs, a per-cell `CommonMarkCache` separate
@@ -18,7 +18,7 @@ pub(crate) struct TableUi {
     tables: HashMap<String, TableSpec>,
     cell_cache: CommonMarkCache,
     occurrences: HashMap<String, usize>,
-    widths: HashMap<String, (i32, i32, Vec<f32>)>,
+    widths: HashMap<String, (i32, i32, i32, Vec<f32>)>,
 }
 
 impl TableUi {
@@ -50,7 +50,10 @@ impl TableUi {
             Some(s) => s.clone(),
             None => return, // unknown id: draw nothing, never panic
         };
-        let ncols = spec.header.len();
+        let ncols = spec
+            .header
+            .len()
+            .max(spec.rows.iter().map(Vec::len).max().unwrap_or(0));
         if ncols == 0 {
             return;
         }
@@ -60,7 +63,7 @@ impl TableUi {
         let occurrence = current;
         let available = ui.available_width();
         let spacing = ui.spacing().item_spacing.x;
-        let widths = self.column_widths(ui, id, &spec, available, spacing);
+        let widths = self.column_widths(ui, id, &spec, ncols, available, spacing);
         // A distinct id per occurrence so two identical tables never share state.
         let grid_id = ui.id().with(("mdtable", id, occurrence));
         let body_row_height = ui.text_style_height(&egui::TextStyle::Body);
@@ -70,12 +73,14 @@ impl TableUi {
         ui.vertical(|ui| {
             ui.add_space(table_pad(body_row_height));
             egui::Grid::new(grid_id).striped(true).show(ui, |ui| {
-                for (i, cell) in spec.header.iter().enumerate() {
+                for i in 0..ncols {
+                    let cell = spec.header.get(i).map_or("", String::as_str);
                     render_cell(ui, cell_width(&widths, i), cell, &mut self.cell_cache);
                 }
                 ui.end_row();
                 for row in &spec.rows {
-                    for (i, cell) in row.iter().enumerate() {
+                    for i in 0..ncols {
+                        let cell = row.get(i).map_or("", String::as_str);
                         render_cell(ui, cell_width(&widths, i), cell, &mut self.cell_cache);
                     }
                     ui.end_row();
@@ -86,39 +91,45 @@ impl TableUi {
     }
 
     /// Content-proportional widths for one table, cached by id and layout so
-    /// the text measurement runs only when the column width or DPI changes.
+    /// the text measurement runs only when the column width, DPI or zoom
+    /// changes.
     fn column_widths(
         &mut self,
         ui: &egui::Ui,
         id: &str,
         spec: &TableSpec,
+        ncols: usize,
         available: f32,
         spacing: f32,
     ) -> Vec<f32> {
         let available_key = available.round() as i32;
         let ppp_key = (ui.ctx().pixels_per_point() * 100.0).round() as i32;
-        if let Some((a, p, widths)) = self.widths.get(id) {
-            if *a == available_key && *p == ppp_key {
+        let body = egui::TextStyle::Body.resolve(ui.style());
+        let font_key = (body.size * 100.0).round() as i32;
+        if let Some((a, p, f, widths)) = self.widths.get(id) {
+            if *a == available_key && *p == ppp_key && *f == font_key {
                 return widths.clone();
             }
         }
-        let body = egui::TextStyle::Body.resolve(ui.style());
-        let cap = 0.6 * available;
-        let ncols = spec.header.len();
+        let target = (available - spacing * (ncols - 1) as f32).max(0.0);
+        let max = 0.6 * target;
         let desired: Vec<f32> = (0..ncols)
             .map(|i| {
                 spec.header
                     .get(i)
                     .into_iter()
                     .chain(spec.rows.iter().filter_map(|row| row.get(i)))
-                    .map(|md| measure(ui, md, &body))
+                    .map(|md| measure(ui, &visible_text(md), &body))
                     .fold(1.0_f32, f32::max)
-                    .min(cap)
+                    .min(max)
             })
             .collect();
         let widths = table_column_widths(&desired, available, spacing, 80.0);
-        self.widths
-            .insert(id.to_string(), (available_key, ppp_key, widths.clone()));
+        let widths = cap_column_widths(&widths, max);
+        self.widths.insert(
+            id.to_string(),
+            (available_key, ppp_key, font_key, widths.clone()),
+        );
         widths
     }
 }
@@ -129,11 +140,93 @@ pub(crate) fn table_pad(row_height: f32) -> f32 {
     row_height * 0.75
 }
 
-/// Single-line width of a cell's raw Markdown. Markup characters are counted,
-/// so this overestimates styled text slightly; it only steers the proportions.
-fn measure(ui: &egui::Ui, md: &str, font: &egui::FontId) -> f32 {
+/// Visible text of a cell, with Markdown markup removed before measuring:
+/// emphasis markers, backticks, HTML tags, and link/image targets. The raw
+/// cell text is still what gets rendered.
+fn visible_text(md: &str) -> String {
+    let mut out = String::with_capacity(md.len());
+    let mut i = 0;
+    while i < md.len() {
+        let rest = &md[i..];
+        let c = rest.chars().next().unwrap();
+        match c {
+            '\\' => {
+                if let Some(next) = rest[1..].chars().next() {
+                    out.push(next);
+                    i += 1 + next.len_utf8();
+                } else {
+                    i += 1;
+                }
+            }
+            '`' | '*' | '_' => i += 1,
+            '<' => {
+                if let Some(end) = rest.find('>') {
+                    i += end + 1;
+                } else {
+                    out.push('<');
+                    i += 1;
+                }
+            }
+            '!' if rest.starts_with("![") => {
+                if let Some((label, len)) = bracket(&rest[1..]) {
+                    out.push_str(&visible_text(label));
+                    i += 1 + len;
+                } else {
+                    out.push('!');
+                    i += 1;
+                }
+            }
+            '[' => {
+                if let Some((label, len)) = bracket(rest) {
+                    out.push_str(&visible_text(label));
+                    i += len;
+                } else {
+                    out.push('[');
+                    i += 1;
+                }
+            }
+            _ => {
+                out.push(c);
+                i += c.len_utf8();
+            }
+        }
+    }
+    out
+}
+
+/// `[label](target)` at the start of `s`: the label and bytes consumed.
+fn bracket(s: &str) -> Option<(&str, usize)> {
+    let mid = s[1..].find("](")? + 1;
+    let end = link_end(&s[mid + 2..])?;
+    Some((&s[1..mid], mid + 2 + end))
+}
+
+/// Byte index just past the closing `)` of a link target, balancing nested
+/// parentheses and ignoring those inside a quoted title.
+fn link_end(s: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_quote = false;
+    for (i, c) in s.char_indices() {
+        match c {
+            '"' => in_quote = !in_quote,
+            '(' if !in_quote => depth += 1,
+            ')' if !in_quote => {
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Single-line width of a cell's visible text. The measurement approximates
+/// what the painter will lay out; it only steers the column proportions.
+fn measure(ui: &egui::Ui, text: &str, font: &egui::FontId) -> f32 {
     ui.fonts_mut(|f| {
-        f.layout_no_wrap(md.to_owned(), font.clone(), egui::Color32::WHITE)
+        f.layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
             .size()
             .x
     })
@@ -184,6 +277,13 @@ mod tests {
     mod table {
         use super::super::cell_needs_library_fallback;
         use super::super::table_pad;
+        use super::super::visible_text;
+
+        #[test]
+        fn visible_text_drops_markup_for_measurement() {
+            let md = "**Bold** and `code`, [link text](https://x/y), ![alt text](i.png) <b>x</b>";
+            assert_eq!(visible_text(md), "Bold and code, link text, alt text x");
+        }
 
         #[test]
         fn table_pad_is_three_quarters_of_a_row() {

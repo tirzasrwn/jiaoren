@@ -15,8 +15,10 @@ pub(crate) fn content_column(available: f32, zoom: f32) -> f32 {
 }
 
 /// Widths proportional to each column's desired width, fitting `available`
-/// after `spacing` between columns, with a `min` floor.
-/// `desired` must be non-empty; values are clamped to >= 1.0 so no column starves.
+/// after `spacing` between columns, with a `min` floor. The floor shrinks when
+/// the space cannot fit `min` in every column, so the sum never exceeds the
+/// target. `desired` must be non-empty; values are clamped to >= 1.0 so no
+/// column starves.
 pub(crate) fn table_column_widths(
     desired: &[f32],
     available: f32,
@@ -27,9 +29,15 @@ pub(crate) fn table_column_widths(
     if n == 0 {
         return Vec::new();
     }
+    let raw_total = available - spacing * (n - 1) as f32;
+    let total = if raw_total.is_finite() && raw_total > 0.0 {
+        raw_total
+    } else {
+        0.0
+    };
     let min = if min.is_finite() { min.max(0.0) } else { 0.0 };
-    let total = available - spacing * (n - 1) as f32;
-    if !total.is_finite() || total < min * n as f32 {
+    let min = min.min(total / n as f32);
+    if total == 0.0 {
         return vec![min; n];
     }
     let desire: Vec<f32> = desired
@@ -62,6 +70,50 @@ pub(crate) fn table_column_widths(
                 .iter()
                 .zip(&fixed)
                 .map(|(d, f)| if *f { min } else { d * scale })
+                .collect();
+        }
+    }
+}
+
+/// Cap each width at `max`, redistributing the excess over the columns still
+/// below the cap. The input sum is preserved when at least one column can grow;
+/// if every column reaches the cap the result is simply `max` for each.
+pub(crate) fn cap_column_widths(widths: &[f32], max: f32) -> Vec<f32> {
+    let n = widths.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let max = if max.is_finite() { max.max(0.0) } else { 0.0 };
+    let total: f32 = widths.iter().map(|w| w.max(0.0)).sum();
+    let mut fixed = vec![false; n];
+    loop {
+        let fixed_sum = max * fixed.iter().filter(|f| **f).count() as f32;
+        let active_sum: f32 = widths
+            .iter()
+            .zip(&fixed)
+            .filter(|(_, f)| !**f)
+            .map(|(w, _)| w.max(0.0))
+            .sum();
+        if active_sum <= 0.0 {
+            return widths
+                .iter()
+                .zip(&fixed)
+                .map(|(w, f)| if *f { max } else { w.max(0.0) })
+                .collect();
+        }
+        let scale = (total - fixed_sum) / active_sum;
+        let mut changed = false;
+        for (i, w) in widths.iter().enumerate() {
+            if !fixed[i] && w.max(0.0) * scale > max {
+                fixed[i] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            return widths
+                .iter()
+                .zip(&fixed)
+                .map(|(w, f)| if *f { max } else { w.max(0.0) * scale })
                 .collect();
         }
     }
@@ -139,11 +191,20 @@ mod tests {
         }
 
         #[test]
-        fn table_widths_overflow_when_min_cannot_fit() {
-            assert_eq!(
-                table_column_widths(&[1.0; 5], 100.0, 8.0, 80.0),
-                vec![80.0; 5]
-            );
+        fn table_widths_shrink_floor_when_min_cannot_fit() {
+            let w = table_column_widths(&[1.0; 5], 100.0, 8.0, 80.0);
+            let floor = (100.0 - 8.0 * 4.0) / 5.0;
+            assert!(w.iter().all(|x| (*x - floor).abs() < 0.01));
+            assert!(w.iter().sum::<f32>() <= 68.0 + 0.01);
+        }
+
+        #[test]
+        fn table_widths_cap_redistributes_surplus() {
+            let w = table_column_widths(&[2000.0, 100.0], 900.0, 8.0, 80.0);
+            let capped = cap_column_widths(&w, 0.6 * 892.0);
+            assert!(capped[0] <= 0.6 * 892.0 + 0.01);
+            assert!(capped[1] > 80.0);
+            assert!((capped[0] + capped[1] - 892.0).abs() < 0.01);
         }
 
         #[test]
