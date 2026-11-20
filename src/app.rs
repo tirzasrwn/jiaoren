@@ -4,8 +4,11 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
+use egui::{Key, Modifiers};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
+use notify::{RecursiveMode, Watcher};
 
 use crate::doc::{prepare, Prepared};
 use crate::mermaid::{find_chromium, Renderer, Theme};
@@ -49,6 +52,20 @@ fn parent_dir(path: &Path) -> &Path {
     path.parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
+}
+
+/// Whether a filesystem event path refers to the open document.
+fn same_file(event: &Path, doc: &Path) -> bool {
+    if event == doc {
+        return true;
+    }
+    if event.file_name() != doc.file_name() {
+        return false;
+    }
+    // Compare absolute forms; canonicalization may fail if the file was just
+    // deleted, in which case a matching file name is good enough.
+    let abs = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    abs(event) == abs(doc)
 }
 
 /// Queue a render for `id` in `theme`, unless it has already failed this session
@@ -119,7 +136,7 @@ impl DiagramUi {
             return;
         }
         match self.renderer.cached(id, self.theme) {
-            Some(Ok(png)) => self.draw_png(ui, id, &png, col),
+            Some(Ok(png)) => self.draw_png(ui, id, &png, self.theme, col),
             Some(Err(msg)) => self.draw_error(ui, id, &msg),
             None => {
                 let enqueued = enqueue_diagram(
@@ -134,7 +151,17 @@ impl DiagramUi {
                 if enqueued {
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
                 }
-                self.draw_placeholder(ui);
+                // On a theme switch keep the old theme's image on screen until
+                // the new render arrives; never flash a placeholder.
+                let other = match self.theme {
+                    Theme::Light => Theme::Dark,
+                    Theme::Dark => Theme::Light,
+                };
+                if let Some(Ok(png)) = self.renderer.cached(id, other) {
+                    self.draw_png(ui, id, &png, other, col);
+                } else {
+                    self.draw_placeholder(ui);
+                }
             }
         }
     }
@@ -174,8 +201,8 @@ impl DiagramUi {
         }
     }
 
-    fn draw_png(&mut self, ui: &mut egui::Ui, id: &str, png: &Path, col: f32) {
-        let key = format!("{id}-{}", self.theme.as_str());
+    fn draw_png(&mut self, ui: &mut egui::Ui, id: &str, png: &Path, theme: Theme, col: f32) {
+        let key = format!("{id}-{}", theme.as_str());
         if !self.textures.contains_key(&key) {
             if let Ok(bytes) = std::fs::read(png) {
                 if let Ok(img) = image::load_from_memory(&bytes) {
@@ -191,14 +218,17 @@ impl DiagramUi {
                 }
             }
         }
-        if let Some((tex, _)) = self.textures.get(&key) {
-            // PNGs are rasterized at 2x; show them at the intended SVG size,
-            // scaled by zoom and capped to the content column.
-            ui.add(
-                egui::Image::new(tex)
-                    .fit_to_original_size(0.5 * self.zoom)
-                    .max_width(col),
-            );
+        if let Some((tex, size)) = self.textures.get(&key) {
+            // PNGs are rasterized at 2x; show at the intended SVG size scaled by
+            // zoom, capped to the column when zoom is at or below 1.0.
+            let base_w = size[0] as f32 * 0.5;
+            let base_h = size[1] as f32 * 0.5;
+            let (mut w, mut h) = (base_w * self.zoom, base_h * self.zoom);
+            if self.zoom <= 1.0 && w > col {
+                let s = col / w;
+                (w, h) = (w * s, h * s);
+            }
+            ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(w, h)));
         } else {
             ui.colored_label(egui::Color32::RED, "diagram: failed to load image");
         }
@@ -225,8 +255,72 @@ impl DiagramUi {
     }
 }
 
+/// Keys pressed on the keyboard, with no egui Context dependency (unit-testable).
+#[derive(Default)]
+pub struct KeyState {
+    pub last_g: Option<Instant>,
+}
+
+/// A viewer action produced by a key press.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Action {
+    ScrollLines(f32),
+    ScrollPages(f32),
+    Top,
+    Bottom,
+    ZoomIn,
+    ZoomOut,
+    Fit,
+    ToggleTheme,
+    Reload,
+    Quit,
+}
+
+/// How long a first `g` waits for a second one.
+const GG_WINDOW: Duration = Duration::from_millis(500);
+
+/// Map one pressed key to an [`Action`]. Pure: no egui context, no I/O.
+pub fn apply_key(
+    state: &mut KeyState,
+    key: Key,
+    modifiers: Modifiers,
+    now: Instant,
+) -> Option<Action> {
+    match key {
+        Key::J | Key::ArrowDown => Some(Action::ScrollLines(1.0)),
+        Key::K | Key::ArrowUp => Some(Action::ScrollLines(-1.0)),
+        Key::D => Some(Action::ScrollPages(0.5)),
+        Key::U => Some(Action::ScrollPages(-0.5)),
+        Key::Space => Some(Action::ScrollPages(1.0)),
+        Key::B => Some(Action::ScrollPages(-1.0)),
+        Key::Plus | Key::Equals => Some(Action::ZoomIn),
+        Key::Minus => Some(Action::ZoomOut),
+        Key::A => Some(Action::Fit),
+        Key::T => Some(Action::ToggleTheme),
+        Key::R => Some(Action::Reload),
+        Key::Q | Key::Escape => Some(Action::Quit),
+        Key::G => {
+            // Shift+G (bottom) is immediate; a lone `g` starts the gg window.
+            if modifiers.shift {
+                state.last_g = None;
+                return Some(Action::Bottom);
+            }
+            match state.last_g.take() {
+                Some(t) if now.duration_since(t) < GG_WINDOW => Some(Action::Top),
+                // A `g` after the window has elapsed: nothing to pair with, so
+                // treat it as a standalone jump to the bottom.
+                Some(_) => Some(Action::Bottom),
+                None => {
+                    state.last_g = Some(now);
+                    None
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
 pub struct App {
-    #[allow(dead_code)] // consumed by live reload (Task 5)
     pub path: PathBuf,
     pub prepared: Prepared,
     pub renderer: Renderer,
@@ -237,6 +331,14 @@ pub struct App {
     diagrams: Rc<RefCell<DiagramUi>>,
     html_fn: Box<dyn Fn(&mut egui::Ui, &str)>,
     scroll_y: f32,
+    keys: KeyState,
+    // Held to keep the filesystem watch alive; never read directly.
+    #[allow(dead_code)]
+    watcher: Option<notify::RecommendedWatcher>,
+    watch_rx: Option<mpsc::Receiver<notify::Event>>,
+    pending_reload: Option<Instant>,
+    last_mtime: Option<SystemTime>,
+    last_poll: Instant,
 }
 
 impl App {
@@ -275,6 +377,26 @@ impl App {
             })
         };
 
+        let dir = parent_dir(&path).to_path_buf();
+        let (tx, rx) = mpsc::channel();
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(ev) = res {
+                let _ = tx.send(ev);
+            }
+        })
+        .ok();
+        let watch_rx = match watcher.as_mut() {
+            Some(w) => match w.watch(&dir, RecursiveMode::NonRecursive) {
+                Ok(()) => Some(rx),
+                Err(_) => {
+                    watcher = None;
+                    None
+                }
+            },
+            None => None,
+        };
+        let last_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+
         App {
             path,
             prepared,
@@ -286,10 +408,15 @@ impl App {
             diagrams,
             html_fn,
             scroll_y: 0.0,
+            keys: KeyState::default(),
+            watcher,
+            watch_rx,
+            pending_reload: None,
+            last_mtime,
+            last_poll: Instant::now(),
         }
     }
 
-    #[allow(dead_code)] // consumed by live reload (Task 5)
     pub fn load(&mut self) {
         match read_doc(&self.path) {
             Ok(text) => {
@@ -300,7 +427,6 @@ impl App {
         }
     }
 
-    #[allow(dead_code)] // consumed by live reload (Task 5)
     pub fn reload(&mut self) {
         self.load();
         self.cache = CommonMarkCache::default();
@@ -311,14 +437,95 @@ impl App {
         d.inflight.clear();
         d.failures.clear();
     }
+
+    /// Drive live reload: drain watcher events (or poll mtime when the watcher
+    /// is unavailable), debounce 100 ms, then reload once.
+    fn watch_tick(&mut self, ctx: &egui::Context) {
+        // Keep the event loop waking so watcher events (which arrive while the
+        // UI is idle) get drained even when the user does nothing.
+        ctx.request_repaint_after(Duration::from_millis(100));
+        let now = Instant::now();
+        if let Some(rx) = &self.watch_rx {
+            while let Ok(ev) = rx.try_recv() {
+                // Ignore read access events (our own reads fire them); react to
+                // content/name changes only.
+                if matches!(ev.kind, notify::EventKind::Access(_)) {
+                    continue;
+                }
+                if ev.paths.iter().any(|p| same_file(p, &self.path)) {
+                    self.pending_reload = Some(now);
+                }
+            }
+        } else if now.duration_since(self.last_poll) >= Duration::from_millis(500) {
+            self.last_poll = now;
+            if let Ok(meta) = std::fs::metadata(&self.path) {
+                if let Ok(m) = meta.modified() {
+                    match self.last_mtime {
+                        Some(prev) if prev != m => self.pending_reload = Some(now),
+                        _ => {}
+                    }
+                    self.last_mtime = Some(m);
+                }
+            }
+        }
+        if let Some(t) = self.pending_reload {
+            if now.duration_since(t) >= Duration::from_millis(100) {
+                self.pending_reload = None;
+                self.reload();
+                ctx.request_repaint();
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+        }
+    }
 }
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.diagrams.borrow_mut().poll(ctx);
+        self.watch_tick(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Turn this frame's key presses into viewer actions.
+        let now = Instant::now();
+        let mut acts: Vec<Action> = Vec::new();
+        ui.input(|i| {
+            for ev in &i.events {
+                if let egui::Event::Key {
+                    key,
+                    modifiers,
+                    pressed: true,
+                    ..
+                } = ev
+                {
+                    if let Some(a) = apply_key(&mut self.keys, *key, *modifiers, now) {
+                        acts.push(a);
+                    }
+                }
+            }
+        });
+        let page_h = ui.available_height();
+        for act in acts {
+            match act {
+                Action::ScrollLines(f) => self.scroll_y = (self.scroll_y + f * 40.0).max(0.0),
+                Action::ScrollPages(f) => self.scroll_y = (self.scroll_y + f * page_h).max(0.0),
+                Action::Top => self.scroll_y = 0.0,
+                Action::Bottom => self.scroll_y = f32::MAX,
+                Action::ZoomIn => self.zoom = (self.zoom * 1.1).min(3.0),
+                Action::ZoomOut => self.zoom = (self.zoom / 1.1).max(0.5),
+                Action::Fit => self.zoom = 1.0,
+                Action::ToggleTheme => {
+                    self.theme = match self.theme {
+                        Theme::Light => Theme::Dark,
+                        Theme::Dark => Theme::Light,
+                    }
+                }
+                Action::Reload => self.reload(),
+                Action::Quit => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
+            }
+        }
+
         {
             let mut d = self.diagrams.borrow_mut();
             d.theme = self.theme;
@@ -326,6 +533,14 @@ impl eframe::App for App {
         }
 
         egui::CentralPanel::default().show(ui, |ui| {
+            // Scale text with zoom so text and diagrams stay consistent.
+            let z = self.zoom;
+            let styles = ui.style().text_styles.clone();
+            ui.style_mut().text_styles = styles
+                .into_iter()
+                .map(|(kind, font)| (kind, egui::FontId::new(font.size * z, font.family)))
+                .collect();
+
             if self.renderer.chromium.is_none() {
                 ui.colored_label(
                     egui::Color32::YELLOW,
@@ -358,7 +573,8 @@ impl eframe::App for App {
                         });
                     });
                 });
-            self.scroll_y = output.state.offset.y;
+            let max_y = (output.content_size.y - output.inner_rect.height()).max(0.0);
+            self.scroll_y = output.state.offset.y.clamp(0.0, max_y);
         });
     }
 }
@@ -478,5 +694,39 @@ mod tests {
             Theme::Light
         ));
         assert!(inflight.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    #[test]
+    fn j_and_k_scroll_lines() {
+        let mut s = KeyState::default();
+        let now = std::time::Instant::now();
+        assert!(matches!(apply_key(&mut s, Key::J, Modifiers::NONE, now), Some(Action::ScrollLines(v)) if v > 0.0));
+        assert!(matches!(apply_key(&mut s, Key::K, Modifiers::NONE, now), Some(Action::ScrollLines(v)) if v < 0.0));
+    }
+
+    #[test]
+    fn double_g_jumps_to_top_only() {
+        let mut s = KeyState::default();
+        let t0 = std::time::Instant::now();
+        assert_eq!(apply_key(&mut s, Key::G, Modifiers::NONE, t0), None);
+        assert_eq!(apply_key(&mut s, Key::G, Modifiers::NONE, t0 + std::time::Duration::from_millis(200)), Some(Action::Top));
+        assert_eq!(apply_key(&mut s, Key::G, Modifiers::NONE, t0 + std::time::Duration::from_millis(700)), None);
+        assert_eq!(apply_key(&mut s, Key::G, Modifiers::NONE, t0 + std::time::Duration::from_millis(2300)), Some(Action::Bottom));
+    }
+
+    #[test]
+    fn t_r_q_map_to_actions() {
+        let mut s = KeyState::default();
+        let now = std::time::Instant::now();
+        assert_eq!(apply_key(&mut s, Key::T, Modifiers::NONE, now), Some(Action::ToggleTheme));
+        assert_eq!(apply_key(&mut s, Key::R, Modifiers::NONE, now), Some(Action::Reload));
+        assert_eq!(apply_key(&mut s, Key::Q, Modifiers::NONE, now), Some(Action::Quit));
+        assert_eq!(apply_key(&mut s, Key::Space, Modifiers::NONE, now), Some(Action::ScrollPages(1.0)));
+        assert_eq!(apply_key(&mut s, Key::A, Modifiers::NONE, now), Some(Action::Fit));
     }
 }
