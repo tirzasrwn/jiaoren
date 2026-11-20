@@ -1,18 +1,21 @@
-#![allow(dead_code)] // consumed by app.rs in later tasks
-
 use std::collections::HashMap;
 use std::path::Path;
 
+#[allow(dead_code)] // fields consumed by app.rs in later tasks
 pub struct Prepared {
+    #[allow(dead_code)] // read by app.rs render pass
     pub markdown: String,
+    #[allow(dead_code)] // read by app.rs render pass
     pub diagrams: HashMap<String, String>,
 }
 
+#[allow(dead_code)] // consumed by app.rs in later tasks
 pub fn diagram_id(source: &str) -> String {
     let hex = blake3::hash(source.trim().as_bytes()).to_hex();
     hex.as_str()[..16].to_string()
 }
 
+#[allow(dead_code)] // consumed by app.rs in later tasks
 pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
     let mut out = String::with_capacity(md.len());
     let mut diagrams = HashMap::new();
@@ -135,5 +138,40 @@ mod tests {
         assert!(out.contains("![a](file:///docs/img/x.png)"));
         assert!(out.contains("![b](/abs.png)"));
         assert!(out.contains("![c](https://h/c.png)"));
+    }
+
+    #[test]
+    fn unclosed_mermaid_fence_at_eof_keeps_content() {
+        // Data-loss guard: unclosed fence must be emitted as ordinary fenced text.
+        let md = "text\n\n```mermaid\ngraph TD; A-->B;";
+        let p = prepare(md, Path::new("/docs"));
+        assert!(p.diagrams.is_empty());
+        assert!(p.markdown.contains("```mermaid"));
+        assert!(p.markdown.contains("graph TD; A-->B;"));
+    }
+
+    #[test]
+    fn tilde_mermaid_fences_extract() {
+        let md = "~~~mermaid\ngraph TD;\n~~~\n";
+        let p = prepare(md, Path::new("/x"));
+        assert_eq!(p.diagrams.len(), 1);
+        assert!(p.markdown.contains("<mermaid"));
+    }
+
+    #[test]
+    fn extracts_two_diagrams() {
+        let md = "```mermaid\nA\n```\n\n```mermaid\nB\n```\n";
+        let p = prepare(md, Path::new("/x"));
+        assert_eq!(p.diagrams.len(), 2);
+        assert!(!p.markdown.contains("```"));
+    }
+
+    #[test]
+    fn handles_crlf_input() {
+        let md = "```mermaid\r\ngraph TD;\r\n```\r\n";
+        let p = prepare(md, Path::new("/x"));
+        assert_eq!(p.diagrams.len(), 1);
+        let id = diagram_id("graph TD;");
+        assert!(p.markdown.contains(&format!("<mermaid id=\"{id}\">")));
     }
 }
