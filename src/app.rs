@@ -736,6 +736,7 @@ impl App {
                     markdown: String::new(),
                     diagrams: HashMap::new(),
                     tables: HashMap::new(),
+                    paragraphs: HashMap::new(),
                 },
             ),
         };

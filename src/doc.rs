@@ -11,6 +11,8 @@ pub struct Prepared {
     pub diagrams: HashMap<String, String>,
     #[allow(dead_code)] // rendered by app.rs in a later task
     pub tables: HashMap<String, TableSpec>,
+    #[allow(dead_code)] // rendered by app.rs in a later task
+    pub paragraphs: HashMap<String, String>,
 }
 
 /// A top-level GFM table, parsed out of the Markdown before rendering.
@@ -38,10 +40,67 @@ pub fn table_id(spec: &TableSpec) -> String {
 }
 
 #[allow(dead_code)] // consumed by app.rs in later tasks
+pub fn paragraph_id(source: &str) -> String {
+    let hex = blake3::hash(source.trim().as_bytes()).to_hex();
+    hex.as_str()[..16].to_string()
+}
+
+/// True when `line` may open or continue a top-level paragraph: it starts at
+/// column 0, is non-blank, and carries no block marker the library must own.
+pub fn is_paragraph_start(line: &str) -> bool {
+    let t = line.trim_end_matches(['\r', '\n', ' ', '\t']);
+    let first = match t.chars().next() {
+        Some(c) => c,
+        None => return false,
+    };
+    if first == ' ' || first == '\t' {
+        return false; // indented: code block, list continuation, ...
+    }
+    if open_fence(t).is_some() || is_thematic_break(t) {
+        return false;
+    }
+    match first {
+        '#' | '>' | '<' => return false,
+        '-' | '*' | '+' => {
+            let rest = &t[1..];
+            if rest.is_empty() || rest.starts_with([' ', '\t']) {
+                return false; // bullet (or a lone marker)
+            }
+        }
+        _ => {}
+    }
+    // Ordered list marker: digits then `.`/`)` then space (or end of line).
+    let digits = t.bytes().take_while(u8::is_ascii_digit).count();
+    if digits > 0 && digits < t.len() {
+        let next = t.as_bytes()[digits];
+        if matches!(next, b'.' | b')')
+            && (digits + 1 == t.len()
+                || matches!(t.as_bytes()[digits + 1], b' ' | b'\t' | b'\r'))
+        {
+            return false;
+        }
+    }
+    // ponytail: pipe lines stay with the library (table detection ran first and
+    // rejected this one) so an inline `|` is never half-claimed.
+    !t.contains('|')
+}
+
+fn is_thematic_break(t: &str) -> bool {
+    let marks: Vec<char> = t.chars().filter(|c| !c.is_whitespace()).collect();
+    match marks.first() {
+        Some(&m) if matches!(m, '-' | '*' | '_') => {
+            marks.len() >= 3 && marks.iter().all(|&c| c == m)
+        }
+        _ => false,
+    }
+}
+
+#[allow(dead_code)] // consumed by app.rs in later tasks
 pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
     let mut out = String::with_capacity(md.len());
     let mut diagrams = HashMap::new();
     let mut tables = HashMap::new();
+    let mut paragraphs = HashMap::new();
     // (fence char, run length, info string, verbatim open line)
     let mut open: Option<(char, usize, String, String)> = None;
     let mut body = String::new();
@@ -97,6 +156,31 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         }
                     }
                     // Not a table (or malformed delimiter): emit as before.
+                    // A paragraph is claimed only after table detection, so the
+                    // two never cover the same lines.
+                    if is_paragraph_start(line) {
+                        let mut j = i + 1;
+                        while j < lines.len() && is_paragraph_start(lines[j]) {
+                            j += 1;
+                        }
+                        // CRLF safe: each line is trimmed at its end, then joined.
+                        let joined = lines[i..j]
+                            .iter()
+                            .map(|l| l.trim_end())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let source = rewrite_images(&joined, doc_dir);
+                        let id = paragraph_id(&source);
+                        paragraphs.insert(id.clone(), source);
+                        if !out.is_empty() && !out.ends_with("\n\n") {
+                            out.push('\n');
+                        }
+                        // Same trailing blank line as tables: keeps a following
+                        // paragraph out of the placeholder's HTML block.
+                        out.push_str(&format!("<mdpara id=\"{id}\">\n\n"));
+                        i = j;
+                        continue;
+                    }
                     out.push_str(&rewrite_images(line, doc_dir));
                     i += 1;
                 }
@@ -133,6 +217,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
         markdown: out,
         diagrams,
         tables,
+        paragraphs,
     }
 }
 
@@ -337,7 +422,9 @@ mod tests {
     #[test]
     fn rewrites_relative_images_only() {
         let md = "![a](img/x.png) ![b](/abs.png) ![c](https://h/c.png)";
-        let out = prepare(md, Path::new("/docs")).markdown;
+        let p = prepare(md, Path::new("/docs"));
+        // An image-only line is a paragraph now; its source is rewritten.
+        let out = p.paragraphs.values().next().unwrap();
         assert!(out.contains("![a](file:///docs/img/x.png)"));
         assert!(out.contains("![b](/abs.png)"));
         assert!(out.contains("![c](https://h/c.png)"));
@@ -346,7 +433,8 @@ mod tests {
     #[test]
     fn balanced_parens_and_title_in_image_targets() {
         let md = "![a](x(1).png \"caption\") ![b](a#b.png)";
-        let out = prepare(md, Path::new("/docs")).markdown;
+        let p = prepare(md, Path::new("/docs"));
+        let out = p.paragraphs.values().next().unwrap();
         assert!(out.contains("![a](file:///docs/x(1).png)"));
         assert!(out.contains("![b](file:///docs/a%23b.png)"));
     }
@@ -402,7 +490,10 @@ mod tests {
         let p = prepare(md, Path::new("/x"));
         let id = diagram_id("graph TD; A-->B;");
         assert!(p.markdown.contains(&format!("<mermaid id=\"{id}\">\n\n")));
-        assert!(p.markdown.contains("This paragraph must survive."));
+        assert!(p
+            .paragraphs
+            .values()
+            .any(|src| src == "This paragraph must survive."));
     }
 
     #[test]
@@ -442,7 +533,7 @@ mod tests {
         let p = prepare(md, Path::new("/d"));
         assert_eq!(p.tables.len(), 1);
         assert!(p.markdown.contains("# h"));
-        assert!(p.markdown.contains("after"));
+        assert!(p.paragraphs.values().any(|src| src == "after"));
         assert!(!p.markdown.contains("| a |"));
     }
 
@@ -539,6 +630,88 @@ mod tests {
     fn placeholder_after_paragraph_gets_blank_line() {
         let md = "intro\n| a | b |\n|---|---|\n| 1 | 2 |\n";
         let p = prepare(md, Path::new("/d"));
-        assert!(p.markdown.contains("intro\n\n<mdtable"));
+        // Both neighbours survive: the paragraph placeholder also ends with a
+        // blank line, so the table placeholder starts its own HTML block.
+        assert!(p.paragraphs.values().any(|s| s == "intro"));
+        assert!(p.markdown.contains("<mdpara"));
+        assert!(p.markdown.contains("<mdtable id="));
+    }
+
+    #[test]
+    fn extracts_a_top_level_paragraph() {
+        let md = "# h\n\nHello *world*, this is a paragraph.\nStill the same paragraph.\n\n- list\n";
+        let p = prepare(md, Path::new("/d"));
+        assert_eq!(p.paragraphs.len(), 1);
+        let id = p.paragraphs.keys().next().unwrap();
+        assert!(p.markdown.contains(&format!("<mdpara id=\"{id}\">")));
+        assert!(p.markdown.contains("- list"));
+        assert!(!p.markdown.contains("world\", this is a paragraph"));
+    }
+
+    #[test]
+    fn skips_lists_quotes_headings_and_fences() {
+        let md = "- item one\n\n> quote\n\n## h\n\n```\ncode\n```\n";
+        assert!(prepare(md, Path::new("/d")).paragraphs.is_empty());
+    }
+
+    #[test]
+    fn keeps_blank_line_separation() {
+        let md = "first para\n\nsecond para\n";
+        let p = prepare(md, Path::new("/d"));
+        assert_eq!(p.paragraphs.len(), 2);
+        assert!(p.markdown.ends_with("\n"));
+    }
+
+    #[test]
+    fn paragraph_at_eof_without_trailing_newline() {
+        let p = prepare("# h\n\nlast line", Path::new("/d"));
+        assert_eq!(p.paragraphs.len(), 1);
+        assert_eq!(p.paragraphs.values().next().unwrap(), "last line");
+        assert!(p.markdown.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn paragraph_directly_after_heading_and_after_table() {
+        let md = "## h\nbody right after\n\n| a |\n|---|\n| 1 |\nafter table\n";
+        let p = prepare(md, Path::new("/d"));
+        assert_eq!(p.tables.len(), 1);
+        assert_eq!(p.paragraphs.len(), 2);
+        assert!(p.paragraphs.values().any(|s| s == "body right after"));
+        assert!(p.paragraphs.values().any(|s| s == "after table"));
+        assert!(p.markdown.contains("## h"));
+        assert!(!p.markdown.contains("body right after"));
+    }
+
+    #[test]
+    fn crlf_paragraph_extracts() {
+        let md = "alpha beta\r\ngamma\r\n\r\ndelta\r\n";
+        let p = prepare(md, Path::new("/d"));
+        assert_eq!(p.paragraphs.len(), 2);
+        assert!(p.paragraphs.values().any(|s| s == "alpha beta\ngamma"));
+        assert!(p.paragraphs.values().any(|s| s == "delta"));
+    }
+
+    #[test]
+    fn paragraph_id_is_stable_and_content_sensitive() {
+        assert_eq!(paragraph_id("a b"), paragraph_id("a b"));
+        assert_ne!(paragraph_id("a b"), paragraph_id("a c"));
+        assert_eq!(paragraph_id("x").len(), 16);
+    }
+
+    #[test]
+    fn thematic_break_and_indented_line_are_not_paragraphs() {
+        let md = "---\n\n***\n\n  indented\n";
+        assert!(prepare(md, Path::new("/d")).paragraphs.is_empty());
+    }
+
+    #[test]
+    fn list_and_heading_end_a_paragraph_run() {
+        let md = "para\n- item\n\npara2\n# h\n";
+        let p = prepare(md, Path::new("/d"));
+        assert_eq!(p.paragraphs.len(), 2);
+        assert!(p.paragraphs.values().any(|s| s == "para"));
+        assert!(p.paragraphs.values().any(|s| s == "para2"));
+        assert!(p.markdown.contains("- item"));
+        assert!(p.markdown.contains("# h"));
     }
 }
