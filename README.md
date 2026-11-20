@@ -83,7 +83,9 @@ spacing above and below as a table. Click a diagram to open it in a dimmed
 overlay: `+`/`-` or the wheel zoom (1×–3×), `h`/`l`/`j`/`k`, the scroll bars and
 mouse drag pan (both axes), and `Esc`, `q`, `Ctrl+C` or a click outside closes
 it. `q` and `Ctrl+C` only close the overlay; `Ctrl+C` with no overlay open quits
-mdview.
+mdview. On Linux the window backend reports `Ctrl+C` as egui's `Event::Copy`
+rather than `Key::C`; `Cmd+C` on macOS and `Ctrl+Insert` also map to `Copy`, so
+they quit too when no overlay is open.
 
 ## Cache
 

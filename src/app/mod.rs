@@ -24,7 +24,7 @@ mod table;
 
 use diagram::DiagramUi;
 use geometry::{bottom_pad, content_column};
-use keys::{apply_key, Action, KeyState};
+use keys::{apply_key, quit_suppressed, Action, KeyState};
 use list::ListUi;
 use placeholder::{parse, Placeholder};
 use table::TableUi;
@@ -336,8 +336,22 @@ impl eframe::App for App {
         // The popup owns the keyboard and the wheel while it is open; the
         // document behind it must not scroll or react to `t`, `r`, `q`, `0`.
         let popup_open = self.diagrams.borrow().popup.is_some();
+        let mut popup_closed_at = self.diagrams.borrow().popup_closed_at;
         // Turn this frame's key presses into viewer actions.
         let now = Instant::now();
+        let input_time = ui.input(|i| i.time);
+        // X autorepeat starts after ~660 ms, outlasting the 0.30 s guard, so
+        // keep the guard alive while the Ctrl that closed the popup is held.
+        // After release the normal 0.30 s window applies.
+        if self.diagrams.borrow().popup_closed_with_ctrl {
+            if ui.input(|i| i.modifiers.ctrl || i.modifiers.command) {
+                self.diagrams.borrow_mut().popup_closed_at = Some(input_time);
+                popup_closed_at = Some(input_time);
+            } else {
+                self.diagrams.borrow_mut().popup_closed_with_ctrl = false;
+            }
+        }
+        let suppress_quit = quit_suppressed(input_time, popup_closed_at);
         let mut acts: Vec<Action> = Vec::new();
         if !popup_open {
             ui.input(|i| {
@@ -350,16 +364,23 @@ impl eframe::App for App {
                         ..
                     } = ev
                     {
-                        // An `Esc` held to close the popup keeps repeating; only
-                        // a fresh press may quit. Otherwise closing the overlay
-                        // quits the app on the next repeat.
-                        if *key == egui::Key::Escape && *repeat {
+                        // A held `q`/`Esc` keeps repeating after it closed the
+                        // popup; only a fresh press may quit.
+                        if *repeat && matches!(*key, egui::Key::Q | egui::Key::Escape) {
+                            continue;
+                        }
+                        // The next repeat of the Ctrl+C that closed the popup
+                        // must not quit either.
+                        if suppress_quit
+                            && *key == egui::Key::C
+                            && (modifiers.command || modifiers.ctrl)
+                        {
                             continue;
                         }
                         if let Some(a) = apply_key(&mut self.keys, *key, *modifiers, now) {
                             acts.push(a);
                         }
-                    } else if matches!(ev, egui::Event::Copy) {
+                    } else if !suppress_quit && matches!(ev, egui::Event::Copy) {
                         // winit reports Ctrl+C as `Copy` rather than `Key::C`.
                         acts.push(Action::Quit);
                     }

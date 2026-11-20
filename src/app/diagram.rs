@@ -122,6 +122,13 @@ pub(crate) struct DiagramUi {
     pub(crate) scroll_adjust: f32,
     /// The zoom overlay, when a diagram was clicked open.
     pub(crate) popup: Option<PopupState>,
+    /// Input time when the overlay last closed. Document keys ignore quit input
+    /// for a short window after this, so a held `q`/`Ctrl+C` cannot close the
+    /// overlay and then immediately quit the app on its next repeat.
+    pub(crate) popup_closed_at: Option<f64>,
+    /// Whether the overlay closed on `Ctrl+C`. Extends the guard above while
+    /// that same Ctrl press is still held (X autorepeat starts after ~660 ms).
+    pub(crate) popup_closed_with_ctrl: bool,
     /// Set when `popup` was opened this frame, so the opening click is not also
     /// read as a click on the dimmed background that would close it again.
     popup_fresh: bool,
@@ -153,6 +160,8 @@ impl DiagramUi {
             scroll_y: 0.0,
             scroll_adjust: 0.0,
             popup: None,
+            popup_closed_at: None,
+            popup_closed_with_ctrl: false,
             popup_fresh: false,
         }
     }
@@ -448,6 +457,7 @@ impl DiagramUi {
     /// mouse drag pan, and a click on the dimmed background closes. The
     /// document behind it does not scroll.
     pub(crate) fn draw_popup(&mut self, ctx: &egui::Context, column: f32) {
+        let input_time = ctx.input(|i| i.time);
         let (id, mut zoom, mut pan) = match self.popup.as_ref() {
             Some(p) => (p.id.clone(), p.zoom, p.pan),
             None => return,
@@ -500,6 +510,8 @@ impl DiagramUi {
             });
         if esc || quit_key || ctrl_c {
             self.popup = None;
+            self.popup_closed_at = Some(input_time);
+            self.popup_closed_with_ctrl = ctrl_c;
             // Keep the same press from reaching the document next frame: a held
             // `q`/`Ctrl+C` would otherwise quit right after closing the overlay.
             ctx.input_mut(|i| {
@@ -656,6 +668,8 @@ impl DiagramUi {
             .is_some_and(|pos| panel.contains(pos));
         if dimmed && !fresh && !inside_panel {
             self.popup = None;
+            self.popup_closed_at = Some(input_time);
+            self.popup_closed_with_ctrl = false;
         }
     }
 

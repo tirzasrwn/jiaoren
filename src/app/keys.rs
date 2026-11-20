@@ -44,6 +44,17 @@ pub enum Action {
 /// How long a first `g` waits for a second one.
 const GG_WINDOW: Duration = Duration::from_millis(500);
 
+/// Window after the diagram popup closes during which the next quit-triggering
+/// event is ignored. A held `Ctrl+C` is handled by extending this guard while
+/// the Ctrl key stays down (see `popup_closed_with_ctrl`).
+const QUIT_SUPPRESS_WINDOW: f64 = 0.30;
+
+/// Whether quit input at input time `now` belongs to the press that just closed
+/// the popup. Pure, so the guard is unit-testable.
+pub fn quit_suppressed(now: f64, closed_at: Option<f64>) -> bool {
+    closed_at.is_some_and(|t| now - t < QUIT_SUPPRESS_WINDOW)
+}
+
 /// Map one pressed key to an [`Action`]. Pure: no egui context, no I/O.
 pub fn apply_key(
     state: &mut KeyState,
@@ -213,6 +224,13 @@ mod tests {
                 apply_key(&mut s, Key::Num0, Modifiers::NONE, now),
                 Some(Action::ResetZoom)
             );
+        }
+
+        #[test]
+        fn quit_is_suppressed_only_just_after_popup_closes() {
+            assert!(!quit_suppressed(10.0, None));
+            assert!(quit_suppressed(10.1, Some(10.0)));
+            assert!(!quit_suppressed(10.4, Some(10.0)));
         }
 
         #[test]
