@@ -105,9 +105,13 @@ document cannot exfiltrate data or load remote resources during rendering.
   back to plain (left-aligned) rendering.
 - Long tokens (paths, URLs, identifiers) break at separators (`/`, `-`, `_`,
   `:`, `.`, `,`, `;`, `?`, `&`, `=`, `\`) and, failing those, at a hard
-  character budget, in paragraphs and table cells alike. Table cells always
-  stay inside the reading column; a cell holding an image or raw HTML still
-  renders through the library.
+  character budget, in paragraphs and table cells alike. Cells wrap and break
+  at separators too, but a token too wide for a cell — including one split
+  across styled runs like `src/**db**/x` — is clipped inside that cell instead
+  of widening the table. A cell holding an image or raw HTML still renders
+  through the library.
+- `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&#39;`, `&apos;` and `&nbsp;` are decoded
+  in paragraphs and cells; other HTML entities show literally.
 
 ## Non-goals
 

@@ -51,6 +51,17 @@ pub fn parse_inline(md: &str) -> Vec<Run> {
             continue;
         }
 
+        if c == '&' {
+            if let Some((decoded, len)) = decode_entity(rest) {
+                text.push(decoded);
+                i += len;
+                continue;
+            }
+            text.push('&');
+            i += 1;
+            continue;
+        }
+
         if c == '`' {
             if let Some(end) = rest[1..].find('`') {
                 flush_text(&mut runs, &mut text);
@@ -169,6 +180,27 @@ fn flush_text(runs: &mut Vec<Run>, text: &mut String) {
             kind: RunKind::Text,
         });
     }
+}
+
+/// Decode the handful of HTML entities the library used to handle, plus the
+/// non-breaking space (rendered as a normal space: no visual line break is
+/// wanted in cells). Returns the decoded char and the bytes consumed; unknown
+/// entities start with `:` and stay literal.
+fn decode_entity(s: &str) -> Option<(char, usize)> {
+    for (name, ch) in [
+        ("&amp;", '&'),
+        ("&lt;", '<'),
+        ("&gt;", '>'),
+        ("&quot;", '"'),
+        ("&#39;", '\''),
+        ("&apos;", '\''),
+        ("&nbsp;", ' '),
+    ] {
+        if s.starts_with(name) {
+            return Some((ch, name.len()));
+        }
+    }
+    None
 }
 
 /// A delimiter run may open only when the next character is neither whitespace
@@ -789,6 +821,21 @@ mod tests {
         let runs = parse_inline("**a*b*c**");
         assert_eq!(runs.iter().map(|r| r.text.as_str()).collect::<String>(), "abc");
         assert!(runs.iter().any(|r| r.kind == RunKind::BoldItalic && r.text == "b"));
+    }
+
+    #[test]
+    fn decodes_html_entities_in_text_runs() {
+        let joined = |s: &str| {
+            parse_inline(s)
+                .iter()
+                .map(|r| r.text.as_str())
+                .collect::<String>()
+        };
+        assert_eq!(joined("AT&amp;T"), "AT&T");
+        assert_eq!(joined("&lt;b&gt;"), "<b>");
+        assert_eq!(joined("a&nbsp;b"), "a b");
+        assert_eq!(joined("&quot;q&quot; &#39;s&#39; &apos;t&apos;"), "\"q\" 's' 't'");
+        assert_eq!(joined("&bogus; &amp"), "&bogus; &amp");
     }
 
     #[test]
