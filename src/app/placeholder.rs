@@ -1,20 +1,22 @@
 //! Detection of the HTML placeholders the Markdown render hook replaces:
-//! `<mdpara id="…">`, `<mdtable id="…">` and `<mermaid id="…">`.
+//! `<mdpara id="…">`, `<mdtable id="…">`, `<mdlist id="…">` and `<mermaid id="…">`.
 
 /// One placeholder found in the hook's HTML, holding the referenced id.
 pub(crate) enum Placeholder<'a> {
     Mermaid(&'a str),
+    List(&'a str),
     Table(&'a str),
     Paragraph(&'a str),
 }
 
 /// Parse `html` as exactly one placeholder. Checked in hook dispatch order:
-/// paragraph, table, mermaid. Whitespace around the tag is ignored; trailing
-/// attributes and empty ids are rejected.
+/// paragraph, table, list, mermaid. Whitespace around the tag is ignored;
+/// trailing attributes and empty ids are rejected.
 pub(crate) fn parse(html: &str) -> Option<Placeholder<'_>> {
     parse_kind(html, "<mdpara")
         .map(Placeholder::Paragraph)
         .or_else(|| parse_kind(html, "<mdtable").map(Placeholder::Table))
+        .or_else(|| parse_kind(html, "<mdlist").map(Placeholder::List))
         .or_else(|| parse_kind(html, "<mermaid").map(Placeholder::Mermaid))
 }
 
@@ -78,6 +80,21 @@ mod tests {
             assert!(matches!(
                 parse("\n<mdtable id=\"abc\">\t"),
                 Some(Placeholder::Table("abc"))
+            ));
+        }
+
+        #[test]
+        fn parses_list_placeholder_ids() {
+            assert!(matches!(
+                parse(r#"<mdlist id="abc">"#),
+                Some(Placeholder::List("abc"))
+            ));
+            assert!(parse(r#"<mdlist id="">"#).is_none());
+            assert!(parse(r#"<mdlist id="x">"#).is_some_and(|p| matches!(p, Placeholder::List(_))));
+            assert!(parse(r#"<mdlist id="x" extra>"#).is_none());
+            assert!(matches!(
+                parse(" <mdlist id=\"abc\"> "),
+                Some(Placeholder::List("abc"))
             ));
         }
 

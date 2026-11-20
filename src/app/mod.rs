@@ -17,6 +17,7 @@ use crate::mermaid::{find_chromium, Renderer, Theme};
 mod diagram;
 mod geometry;
 mod keys;
+mod list;
 mod placeholder;
 mod raster;
 mod table;
@@ -24,6 +25,7 @@ mod table;
 use diagram::DiagramUi;
 use geometry::{bottom_pad, content_column};
 use keys::{apply_key, Action, KeyState};
+use list::ListUi;
 use placeholder::{parse, Placeholder};
 use table::TableUi;
 
@@ -137,6 +139,7 @@ pub(crate) struct App {
     cache: CommonMarkCache,
     diagrams: Rc<RefCell<DiagramUi>>,
     tables: Rc<RefCell<TableUi>>,
+    lists: Rc<RefCell<ListUi>>,
     paragraphs: Rc<RefCell<ParagraphUi>>,
     html_fn: HtmlFn,
     scroll_y: f32,
@@ -186,14 +189,17 @@ impl App {
             theme,
         )));
         let tables = Rc::new(RefCell::new(TableUi::new(prepared.tables.clone())));
+        let lists = Rc::new(RefCell::new(ListUi::new(prepared.lists.clone())));
         let paragraphs = Rc::new(RefCell::new(ParagraphUi::new(prepared.paragraphs.clone())));
         let html_fn: HtmlFn = {
             let d = Rc::clone(&diagrams);
             let t = Rc::clone(&tables);
+            let l = Rc::clone(&lists);
             let p = Rc::clone(&paragraphs);
             Box::new(move |ui: &mut egui::Ui, html: &str| match parse(html) {
                 Some(Placeholder::Paragraph(id)) => p.borrow_mut().show(ui, id),
                 Some(Placeholder::Table(id)) => t.borrow_mut().show(ui, id),
+                Some(Placeholder::List(id)) => l.borrow_mut().show(ui, id),
                 Some(Placeholder::Mermaid(id)) => d.borrow_mut().show(ui, id),
                 None => {}
             })
@@ -234,6 +240,7 @@ impl App {
             cache: CommonMarkCache::default(),
             diagrams,
             tables,
+            lists,
             paragraphs,
             html_fn,
             scroll_y: 0.0,
@@ -267,6 +274,7 @@ impl App {
         let sources = self.prepared.diagrams.clone();
         self.diagrams.borrow_mut().reset_for_reload(sources);
         self.tables.borrow_mut().reset(self.prepared.tables.clone());
+        self.lists.borrow_mut().reset(self.prepared.lists.clone());
         self.paragraphs
             .borrow_mut()
             .reset(self.prepared.paragraphs.clone());
@@ -414,6 +422,7 @@ impl eframe::App for App {
                             let cache = &mut self.cache;
                             let md = &self.prepared.markdown;
                             self.tables.borrow_mut().begin_frame();
+                            self.lists.borrow_mut().begin_frame(col);
                             self.paragraphs.borrow_mut().begin_frame(col);
                             CommonMarkViewer::new()
                                 .max_image_width(Some(col as usize))

@@ -46,7 +46,6 @@ pub struct Prepared {
     /// Parsed tables keyed by [`table_id`].
     pub tables: HashMap<String, TableSpec>,
     /// Parsed list blocks keyed by [`list_id`].
-    #[allow(dead_code, reason = "rendered by app/list.rs in Task 2")]
     pub lists: HashMap<String, ListSpec>,
     /// Paragraph Markdown keyed by [`paragraph_id`].
     pub paragraphs: HashMap<String, String>,

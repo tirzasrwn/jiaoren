@@ -82,7 +82,7 @@ impl TableUi {
 
 /// Vertical breathing room above and below a table: three quarters of a body
 /// row reads as balanced without pushing tables apart from their captions.
-fn table_pad(row_height: f32) -> f32 {
+pub(crate) fn table_pad(row_height: f32) -> f32 {
     row_height * 0.75
 }
 

@@ -603,11 +603,60 @@ fn layout(ui: &egui::Ui, text: &str, format: &TextFormat) -> Arc<Galley> {
     ui.fonts_mut(|f| f.layout_job(job))
 }
 
+/// The glyph drawn to the left of an indented block of text, such as a list
+/// item's marker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Marker {
+    /// `•`, a top-level bullet.
+    Bullet,
+    /// `◦`, a nested bullet.
+    Hollow,
+    /// `{n}.`, an ordered item keeping its source number.
+    Number(u64),
+    /// `☑` or `☐`, a task box.
+    Task(bool),
+}
+
+impl Marker {
+    /// The text painted for this marker.
+    pub fn label(self) -> String {
+        match self {
+            Marker::Bullet => "•".to_string(),
+            Marker::Hollow => "◦".to_string(),
+            Marker::Number(n) => format!("{n}."),
+            Marker::Task(true) => "☑".to_string(),
+            Marker::Task(false) => "☐".to_string(),
+        }
+    }
+}
+
+/// Left offset of a list item's marker: two spaces per nesting level, capped at
+/// five levels so a deep list never eats the reading column.
+pub fn list_indent(depth: u8, space_width: f32) -> f32 {
+    depth.min(5) as f32 * 2.0 * space_width
+}
+
 /// Paint `runs` as a fully justified paragraph in a `column`-wide slot starting
 /// at the current cursor. Every line but the last (and any line without a
 /// stretchable gap) is spread so its right edge lands on `cursor.left() + column`.
 pub fn draw(ui: &mut egui::Ui, runs: &[Run], column: f32) {
     paint(ui, runs, column, true);
+}
+
+/// Justified variant with a hanging indent: the marker sits at `indent` and the
+/// text starts one marker width plus one space later, so wrapped lines align
+/// under the item's text. `column` is the whole block width.
+pub fn draw_indented(ui: &mut egui::Ui, runs: &[Run], column: f32, indent: f32, marker: Marker) {
+    let column = column.max(0.0);
+    let space = space_width(ui);
+    let galley = layout(ui, &marker.label(), &marker_format(ui));
+    let marker_width = galley.size().x;
+    let offset = indent + marker_width + space;
+    let text_width = (column - offset).max(0.0);
+    if text_width <= 0.0 {
+        return;
+    }
+    paint_at(ui, runs, text_width, true, offset, Some((indent, galley)));
 }
 
 /// Left-aligned variant of [`draw`]: same wrapping, splitting and painting, but
@@ -617,24 +666,63 @@ pub fn draw_left(ui: &mut egui::Ui, runs: &[Run], column: f32) {
 }
 
 fn paint(ui: &mut egui::Ui, runs: &[Run], column: f32, justify: bool) {
+    paint_at(ui, runs, column, justify, 0.0, None);
+}
+
+fn body_font(ui: &egui::Ui) -> FontId {
+    ui.style()
+        .text_styles
+        .get(&TextStyle::Body)
+        .cloned()
+        .unwrap_or_else(|| FontId::proportional(14.0))
+}
+
+pub(crate) fn space_width(ui: &egui::Ui) -> f32 {
+    ui.fonts_mut(|f| {
+        f.layout_no_wrap(" ".to_string(), body_font(ui), Color32::PLACEHOLDER)
+            .size()
+            .x
+    })
+}
+
+fn marker_format(ui: &egui::Ui) -> TextFormat {
+    TextFormat {
+        font_id: body_font(ui),
+        color: ui.visuals().text_color(),
+        ..Default::default()
+    }
+}
+
+/// The paragraph painter, with an optional hanging indent: `offset` shifts every
+/// row's text right of the allocated `rect`, and `marker` (x, galley) is painted
+/// once at the first row.
+fn paint_at(
+    ui: &mut egui::Ui,
+    runs: &[Run],
+    column: f32,
+    justify: bool,
+    offset: f32,
+    marker: Option<(f32, Arc<Galley>)>,
+) {
     let column = column.max(0.0);
     if column <= 0.0 {
         return;
     }
-    let body = ui
-        .style()
-        .text_styles
-        .get(&TextStyle::Body)
-        .cloned()
-        .unwrap_or_else(|| FontId::proportional(14.0));
+    let body = body_font(ui);
     let row_h = ui.fonts_mut(|f| f.row_height(&body));
-    let space = ui
-        .fonts_mut(|f| f.layout_no_wrap(" ".to_string(), body.clone(), Color32::PLACEHOLDER))
-        .size()
-        .x;
+    let space = space_width(ui);
 
     let words = split_overwide(ui, build_words(ui, runs), column);
     if words.is_empty() {
+        // An empty item still shows its marker and keeps its row.
+        if let Some((x, galley)) = marker {
+            let (_, rect) = ui.allocate_space(egui::vec2(offset + column, row_h));
+            ui.painter().galley(
+                Pos2::new(rect.left() + x, rect.top()),
+                galley,
+                ui.visuals().text_color(),
+            );
+        }
         return;
     }
     let widths: Vec<f32> = words.iter().map(|w| w.width).collect();
@@ -663,14 +751,21 @@ fn paint(ui: &mut egui::Ui, runs: &[Run], column: f32, justify: bool) {
     } else {
         column
     };
-    let (_, rect) = ui.allocate_space(egui::vec2(reserved, used_height));
+    let (_, rect) = ui.allocate_space(egui::vec2(offset + reserved, used_height));
     let mut painter = ui.painter().clone();
     if !justify {
         let clip = egui::Rect::from_min_size(rect.min, egui::vec2(column, used_height));
         painter.set_clip_rect(ui.clip_rect().intersect(clip));
     }
-    let left = rect.left();
+    let left = rect.left() + offset;
     let top = rect.top();
+    if let Some((x, galley)) = marker {
+        painter.galley(
+            Pos2::new(rect.left() + x, top),
+            galley,
+            ui.visuals().text_color(),
+        );
+    }
     let split_words: Vec<bool> = words.iter().map(|w| w.split).collect();
 
     for (row, line) in lines.iter().enumerate() {
@@ -913,6 +1008,26 @@ mod tests {
                 wrap_words(&[60.0, 60.0], &[0.0, 0.0], 100.0),
                 vec![vec![0], vec![1]]
             );
+        }
+    }
+
+    mod marker {
+        use super::super::*;
+
+        #[test]
+        fn labels_match_the_marker_kind() {
+            assert_eq!(Marker::Bullet.label(), "•");
+            assert_eq!(Marker::Hollow.label(), "◦");
+            assert_eq!(Marker::Number(3).label(), "3.");
+            assert_eq!(Marker::Task(true).label(), "☑");
+            assert_eq!(Marker::Task(false).label(), "☐");
+        }
+
+        #[test]
+        fn indent_steps_two_spaces_per_level_and_stops_at_five() {
+            assert_eq!(list_indent(0, 8.0), 0.0);
+            assert_eq!(list_indent(2, 8.0), 32.0);
+            assert_eq!(list_indent(9, 8.0), 80.0);
         }
     }
 

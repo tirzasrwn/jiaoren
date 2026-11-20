@@ -103,6 +103,12 @@ document cannot exfiltrate data or load remote resources during rendering.
 - Body paragraphs are justified by a built-in layout: bold/italic/code/strike/
   links are supported, but a paragraph containing an image or raw HTML falls
   back to plain (left-aligned) rendering.
+- List items render justified with a hanging indent for `-`/`*`/`+`, `1.`/`1)`
+  and `[ ]`/`[x]` markers; a list block containing an image or raw HTML falls
+  back to the library whole. An item is one paragraph: continuation lines are
+  joined, and a blank line ends the block, so a second paragraph inside an item
+  renders as a separate block-level paragraph. `3. [x]` renders as an unnumbered
+  task box because the ordered number is dropped when the task suffix wins.
 - Long tokens (paths, URLs, identifiers) break at separators (`/`, `-`, `_`,
   `:`, `.`, `,`, `;`, `?`, `&`, `=`, `\`) and, failing those, at a hard
   character budget, in paragraphs and table cells alike. Cells wrap and break
