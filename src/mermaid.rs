@@ -149,6 +149,10 @@ impl Renderer {
         let tmp = PathBuf::from(format!("{}.tmp", self.mermaid_js.display()));
         let status = Command::new("curl")
             .arg("-fsSL")
+            .arg("--connect-timeout")
+            .arg("5")
+            .arg("--max-time")
+            .arg("60")
             .arg("-o")
             .arg(&tmp)
             .arg("https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.min.js")
@@ -159,7 +163,7 @@ impl Renderer {
             Ok(())
         } else {
             let _ = fs::remove_file(&tmp);
-            Err("failed to download mermaid.min.js".to_string())
+            Err("failed to download mermaid.min.js (network needed on first run only; set MDVIEW_MERMAID_JS to use an existing copy)".to_string())
         }
     }
 }
