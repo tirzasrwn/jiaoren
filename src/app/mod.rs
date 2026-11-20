@@ -333,24 +333,29 @@ impl eframe::App for App {
             apply_theme(ui.ctx(), self.theme);
             self.applied_theme = Some(self.theme);
         }
+        // The popup owns the keyboard and the wheel while it is open; the
+        // document behind it must not scroll or react to `t`, `r`, `q`, `0`.
+        let popup_open = self.diagrams.borrow().popup.is_some();
         // Turn this frame's key presses into viewer actions.
         let now = Instant::now();
         let mut acts: Vec<Action> = Vec::new();
-        ui.input(|i| {
-            for ev in &i.events {
-                if let egui::Event::Key {
-                    key,
-                    modifiers,
-                    pressed: true,
-                    ..
-                } = ev
-                {
-                    if let Some(a) = apply_key(&mut self.keys, *key, *modifiers, now) {
-                        acts.push(a);
+        if !popup_open {
+            ui.input(|i| {
+                for ev in &i.events {
+                    if let egui::Event::Key {
+                        key,
+                        modifiers,
+                        pressed: true,
+                        ..
+                    } = ev
+                    {
+                        if let Some(a) = apply_key(&mut self.keys, *key, *modifiers, now) {
+                            acts.push(a);
+                        }
                     }
                 }
-            }
-        });
+            });
+        }
         let page_h = ui.available_height();
         for act in acts {
             match act {
@@ -384,6 +389,8 @@ impl eframe::App for App {
             d.scroll_y = self.scroll_y;
         }
 
+        // The reading column this frame, reused by the popup after the document.
+        let mut column = 0.0;
         egui::CentralPanel::default().show(ui, |ui| {
             // Scale text with zoom so text and diagrams stay consistent.
             let z = self.zoom;
@@ -406,33 +413,42 @@ impl eframe::App for App {
             let viewport_h = ui.available_height();
             let scroll_y = self.scroll_y;
             let scroll_x = self.scroll_x;
-            let output = egui::ScrollArea::both()
+            let mut scroll = egui::ScrollArea::both()
                 .auto_shrink([false, false])
                 .vertical_scroll_offset(scroll_y)
-                .horizontal_scroll_offset(scroll_x)
-                .show(ui, |ui| {
-                    let available = ui.available_width();
-                    let col = content_column(available, z);
-                    let indent = ((available - col) * 0.5).max(0.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(indent);
-                        ui.vertical(|ui| {
-                            ui.set_width(col);
-                            let html_fn = &self.html_fn;
-                            let cache = &mut self.cache;
-                            let md = &self.prepared.markdown;
-                            self.tables.borrow_mut().begin_frame();
-                            self.lists.borrow_mut().begin_frame(col);
-                            self.paragraphs.borrow_mut().begin_frame(col);
-                            self.diagrams.borrow_mut().begin_frame(col);
-                            CommonMarkViewer::new()
-                                .max_image_width(Some(col as usize))
-                                .render_html_fn(Some(&**html_fn))
-                                .show(ui, cache, md);
-                        });
-                    });
-                    ui.add_space(bottom_pad(viewport_h));
+                .horizontal_scroll_offset(scroll_x);
+            if popup_open {
+                // Freeze the document while the overlay is up.
+                scroll = scroll.scroll_source(egui::scroll_area::ScrollSource {
+                    scroll_bar: true,
+                    drag: egui::scroll_area::DragScroll::Never,
+                    mouse_wheel: false,
                 });
+            }
+            let output = scroll.show(ui, |ui| {
+                let available = ui.available_width();
+                let col = content_column(available, z);
+                column = col;
+                let indent = ((available - col) * 0.5).max(0.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(indent);
+                    ui.vertical(|ui| {
+                        ui.set_width(col);
+                        let html_fn = &self.html_fn;
+                        let cache = &mut self.cache;
+                        let md = &self.prepared.markdown;
+                        self.tables.borrow_mut().begin_frame();
+                        self.lists.borrow_mut().begin_frame(col);
+                        self.paragraphs.borrow_mut().begin_frame(col);
+                        self.diagrams.borrow_mut().begin_frame(col);
+                        CommonMarkViewer::new()
+                            .max_image_width(Some(col as usize))
+                            .render_html_fn(Some(&**html_fn))
+                            .show(ui, cache, md);
+                    });
+                });
+                ui.add_space(bottom_pad(viewport_h));
+            });
             let max_y = (output.content_size.y - output.inner_rect.height()).max(0.0);
             let max_x = (output.content_size.x - output.inner_rect.width()).max(0.0);
             let adjust = std::mem::take(&mut self.diagrams.borrow_mut().scroll_adjust);
@@ -448,6 +464,8 @@ impl eframe::App for App {
                 ui.ctx().request_repaint();
             }
         });
+        // Drawn last so the foreground overlay sits above the document.
+        self.diagrams.borrow_mut().draw_popup(ui.ctx(), column);
     }
 }
 

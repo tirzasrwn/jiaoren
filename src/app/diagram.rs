@@ -9,7 +9,8 @@ use std::thread;
 use crate::mermaid::{parse_svg_size, Renderer, Theme};
 
 use super::geometry::{
-    bucket_for_scale, bucket_scale, diagram_display_size, raster_key, reanchor, RasterKey,
+    bucket_for_scale, bucket_scale, diagram_display_size, popup_zoom_step, raster_key, reanchor,
+    RasterKey,
 };
 use super::lock;
 use super::raster::{rasterize, Raster, RasterJob};
@@ -50,6 +51,37 @@ fn enqueue_diagram(
     }
 }
 
+/// Outcome of looking up (and, when needed, queuing) the raster for a drawn
+/// diagram size: the best ready texture at or below the needed bucket, the
+/// error of a failed raster, or nothing ready yet.
+enum RasterDraw {
+    Ready(egui::TextureHandle),
+    Failed(String),
+    Pending,
+}
+
+/// An open click-to-zoom overlay: which diagram, how far zoomed in, and how far
+/// panned (the scroll area's offset, restored each frame).
+pub(crate) struct PopupState {
+    pub(crate) id: String,
+    pub(crate) zoom: f32,
+    pan: egui::Vec2,
+}
+
+/// Paint the grey "rendering diagram…" box used by the inline placeholder and
+/// the popup while its first raster is still queued.
+fn draw_placeholder_box(ui: &egui::Ui, rect: egui::Rect) {
+    ui.painter()
+        .rect_filled(rect, 0.0, egui::Color32::from_gray(40));
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "rendering diagram…",
+        egui::FontId::proportional(16.0),
+        egui::Color32::from_gray(180),
+    );
+}
+
 /// Last drawn placeholder for a diagram, in screen coordinates.
 #[derive(Clone, Copy)]
 struct Placeholder {
@@ -86,6 +118,11 @@ pub(crate) struct DiagramUi {
     pub(crate) scroll_y: f32,
     /// Scroll offset change to apply after this frame's layout.
     pub(crate) scroll_adjust: f32,
+    /// The zoom overlay, when a diagram was clicked open.
+    pub(crate) popup: Option<PopupState>,
+    /// Set when `popup` was opened this frame, so the opening click is not also
+    /// read as a click on the dimmed background that would close it again.
+    popup_fresh: bool,
 }
 
 impl DiagramUi {
@@ -113,6 +150,8 @@ impl DiagramUi {
             placeholders: HashMap::new(),
             scroll_y: 0.0,
             scroll_adjust: 0.0,
+            popup: None,
+            popup_fresh: false,
         }
     }
 
@@ -129,6 +168,15 @@ impl DiagramUi {
         // frees the GPU textures.
         self.rasters.clear();
         lock(&self.raster_queue).clear();
+        // A popup whose diagram is gone with the new document closes.
+        if self
+            .popup
+            .as_ref()
+            .is_some_and(|p| !self.sources.contains_key(&p.id))
+        {
+            self.popup = None;
+        }
+        self.popup_fresh = false;
     }
 
     /// Record the document's reading column once per frame, before the viewer
@@ -264,17 +312,28 @@ impl DiagramUi {
         }
     }
 
-    fn draw_svg(&mut self, ui: &mut egui::Ui, id: &str, svg: &Path, theme: Theme) {
-        let (iw, ih) = self.intrinsic(id, theme, svg).unwrap_or((640.0, 320.0));
-        let ppp = ui.ctx().pixels_per_point();
-        let (dw, dh) = diagram_display_size((iw, ih), self.column, self.zoom);
+    /// The texture that covers drawing `id` at `display_width` points: request
+    /// the exact bucket lazily, then return the sharpest ready raster at or
+    /// below it. A smaller ready raster is still returned (mildly blurred)
+    /// while the sharper one renders, so the caller never draws a blank frame.
+    fn raster_for(
+        &mut self,
+        ctx: &egui::Context,
+        id: &str,
+        svg: &Path,
+        theme: Theme,
+        intrinsic: (f32, f32),
+        display_width: f32,
+    ) -> RasterDraw {
+        let (iw, ih) = intrinsic;
+        let ppp = ctx.pixels_per_point();
         // The raster must cover the drawn size at display density, not the
-        // SVG's intrinsic CSS size: a small diagram is drawn 1:1, a wide one is
-        // capped to the column and still gets a raster that matches.
-        let bucket = bucket_for_scale(dw * ppp / iw, iw, ih);
+        // SVG's intrinsic CSS size: a small diagram drawn large still gets a
+        // raster that matches.
+        let bucket = bucket_for_scale(display_width * ppp / iw, iw, ih);
         let key = raster_key(id, theme, bucket, ppp);
-        // Request the exact bucket lazily (only when this size needs it); the
-        // `Pending` marker keeps the same key from being queued twice.
+        // Request lazily (only when this size needs it); the `Pending` marker
+        // keeps the same key from being queued twice.
         if !self.rasters.contains_key(&key) {
             let scale = bucket_scale(bucket, ppp);
             self.rasters.insert(key.clone(), Raster::Pending);
@@ -286,47 +345,215 @@ impl DiagramUi {
                 scale,
             });
             self.maybe_spawn();
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(50));
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
-        // Draw the best ready bucket at or below the needed one: a smaller
-        // ready raster is shown (mildly blurred) until the sharper one lands.
         let mut failed: Option<String> = None;
         for b in (1..=bucket).rev() {
             match self.rasters.get(&raster_key(id, theme, b, ppp)) {
-                Some(Raster::Ready(tex)) => {
-                    let tex = tex.clone();
-                    let response = ui
-                        .allocate_ui_with_layout(
-                            egui::vec2(self.column, dh),
-                            egui::Layout::top_down(egui::Align::Center),
-                            |ui| {
-                                ui.add(
-                                    egui::Image::from_texture(&tex)
-                                        .fit_to_exact_size(egui::vec2(dw, dh)),
-                                )
-                            },
-                        )
-                        .inner;
-                    if let Some(ph) = self.placeholders.remove(id) {
-                        let delta = response.rect.height() - ph.height;
-                        if delta != 0.0 {
-                            let new_scroll =
-                                reanchor(self.scroll_y, ph.viewport_top, ph.top, delta);
-                            self.scroll_adjust += new_scroll - self.scroll_y;
-                            ui.ctx().request_repaint();
-                        }
-                    }
-                    return;
-                }
+                Some(Raster::Ready(tex)) => return RasterDraw::Ready(tex.clone()),
                 Some(Raster::Failed(msg)) if failed.is_none() => failed = Some(msg.clone()),
                 _ => {}
             }
         }
-        if let Some(msg) = failed {
-            self.draw_error(ui, id, &msg);
-        } else {
-            self.draw_placeholder(ui, id);
+        match failed {
+            Some(msg) => RasterDraw::Failed(msg),
+            None => RasterDraw::Pending,
+        }
+    }
+
+    fn draw_svg(&mut self, ui: &mut egui::Ui, id: &str, svg: &Path, theme: Theme) {
+        let (iw, ih) = self.intrinsic(id, theme, svg).unwrap_or((640.0, 320.0));
+        let (dw, dh) = diagram_display_size((iw, ih), self.column, self.zoom);
+        let draw = self.raster_for(ui.ctx(), id, svg, theme, (iw, ih), dw);
+        match draw {
+            RasterDraw::Ready(tex) => {
+                let response = ui
+                    .allocate_ui_with_layout(
+                        egui::vec2(self.column, dh),
+                        egui::Layout::top_down(egui::Align::Center),
+                        |ui| {
+                            ui.add(
+                                egui::Image::from_texture(&tex)
+                                    .fit_to_exact_size(egui::vec2(dw, dh))
+                                    .sense(egui::Sense::click()),
+                            )
+                        },
+                    )
+                    .inner;
+                if response.clicked() {
+                    self.popup = Some(PopupState {
+                        id: id.to_string(),
+                        zoom: 1.0,
+                        pan: egui::Vec2::ZERO,
+                    });
+                    self.popup_fresh = true;
+                    ui.ctx().request_repaint();
+                }
+                if let Some(ph) = self.placeholders.remove(id) {
+                    let delta = response.rect.height() - ph.height;
+                    if delta != 0.0 {
+                        let new_scroll = reanchor(self.scroll_y, ph.viewport_top, ph.top, delta);
+                        self.scroll_adjust += new_scroll - self.scroll_y;
+                        ui.ctx().request_repaint();
+                    }
+                }
+            }
+            RasterDraw::Failed(msg) => self.draw_error(ui, id, &msg),
+            RasterDraw::Pending => self.draw_placeholder(ui, id),
+        }
+    }
+
+    /// Draw the zoom overlay for the clicked diagram. Its own input handling:
+    /// `Esc` closes, wheel/`+`/`-` zoom, `h`/`l`/`j`/`k` pan, and a click on the
+    /// dimmed background closes. The document behind it does not scroll.
+    pub(crate) fn draw_popup(&mut self, ctx: &egui::Context, column: f32) {
+        let (id, mut zoom, mut pan) = match self.popup.as_ref() {
+            Some(p) => (p.id.clone(), p.zoom, p.pan),
+            None => return,
+        };
+        let theme = self.theme;
+        let svg = match self.renderer.cached(&id, theme) {
+            Some(Ok(svg)) => svg,
+            // The diagram vanished (reload): drop the overlay rather than
+            // drawing an empty frame.
+            _ => {
+                self.popup = None;
+                return;
+            }
+        };
+        let (esc, plus, minus, wheel_up, wheel_down, h, l, j, k) = ctx.input(|i| {
+            // Read wheel notches, not `smooth_scroll_delta`: the smoothed value
+            // spans many frames and would multiply one notch into many steps.
+            let (mut up, mut down) = (false, false);
+            for event in &i.events {
+                if let egui::Event::MouseWheel { delta, .. } = event {
+                    up |= delta.y > 0.0;
+                    down |= delta.y < 0.0;
+                }
+            }
+            (
+                i.key_pressed(egui::Key::Escape),
+                i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals),
+                i.key_pressed(egui::Key::Minus),
+                up,
+                down,
+                i.key_pressed(egui::Key::H),
+                i.key_pressed(egui::Key::L),
+                i.key_pressed(egui::Key::J),
+                i.key_pressed(egui::Key::K),
+            )
+        });
+        if esc {
+            self.popup = None;
+            return;
+        }
+        let steps = i32::from(plus || wheel_up) - i32::from(minus || wheel_down);
+        zoom = popup_zoom_step(zoom, steps);
+        pan += egui::vec2(
+            if l {
+                40.0
+            } else if h {
+                -40.0
+            } else {
+                0.0
+            },
+            if j {
+                40.0
+            } else if k {
+                -40.0
+            } else {
+                0.0
+            },
+        );
+
+        let (iw, ih) = self.intrinsic(&id, theme, &svg).unwrap_or((640.0, 320.0));
+        let (base_w, base_h) = diagram_display_size((iw, ih), column, self.zoom);
+        let (dw, dh) = (base_w * zoom, base_h * zoom);
+        let draw = self.raster_for(ctx, &id, &svg, theme, (iw, ih), dw);
+
+        let screen = ctx.content_rect();
+        let margin = 24.0;
+        let avail =
+            (screen.size() - egui::vec2(2.0 * margin, 2.0 * margin)).max(egui::vec2(64.0, 64.0));
+        let pad = 10.0;
+        let view = (avail - egui::vec2(2.0 * pad, 2.0 * pad)).max(egui::vec2(1.0, 1.0));
+        let view_w = dw.min(view.x);
+        let view_h = dh.min(view.y);
+
+        // The frame hugs the image (up to the window's margin); both are
+        // centred, so the dim background stays visible around the panel.
+        let panel = egui::Rect::from_center_size(
+            screen.center(),
+            egui::vec2(view_w + 2.0 * pad, view_h + 2.0 * pad),
+        );
+        let (dimmed, offset) = egui::Area::new(egui::Id::new("mdview-diagram-popup"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen.min)
+            .constrain(false)
+            .fade_in(false)
+            .show(ctx, |ui| {
+                let response = ui.allocate_rect(screen, egui::Sense::click());
+                ui.painter()
+                    .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(160));
+                // An explicit rect each frame: an auto-sized `Area` would keep
+                // the first frame's panel size and clip the zoomed image.
+                let offset = ui
+                    .scope_builder(egui::UiBuilder::new().max_rect(panel), |ui| {
+                        let frame = egui::Frame::new()
+                            .fill(ui.visuals().window_fill)
+                            .stroke(ui.visuals().window_stroke)
+                            .inner_margin(pad);
+                        frame
+                            .show(ui, |ui| {
+                                egui::ScrollArea::both()
+                                    .id_salt("mdview-diagram-popup-scroll")
+                                    .max_width(view_w)
+                                    .max_height(view_h)
+                                    .auto_shrink([false, false])
+                                    // The wheel zooms; panning is keys and bars.
+                                    .scroll_source(egui::scroll_area::ScrollSource {
+                                        scroll_bar: true,
+                                        drag: egui::scroll_area::DragScroll::Never,
+                                        mouse_wheel: false,
+                                    })
+                                    .scroll_offset(pan)
+                                    .show(ui, |ui| {
+                                        ui.add_space(((view_h - dh) * 0.5).max(0.0));
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(((view_w - dw) * 0.5).max(0.0));
+                                            match &draw {
+                                                RasterDraw::Ready(tex) => {
+                                                    ui.add(
+                                                        egui::Image::from_texture(tex)
+                                                            .fit_to_exact_size(egui::vec2(dw, dh))
+                                                            .sense(egui::Sense::click()),
+                                                    );
+                                                }
+                                                _ => {
+                                                    let (rect, _) = ui.allocate_exact_size(
+                                                        egui::vec2(dw, dh),
+                                                        egui::Sense::click(),
+                                                    );
+                                                    draw_placeholder_box(ui, rect);
+                                                }
+                                            }
+                                        });
+                                    })
+                                    .state
+                                    .offset
+                            })
+                            .inner
+                    })
+                    .inner;
+                (response.clicked(), offset)
+            })
+            .inner;
+
+        pan = offset;
+        self.popup = Some(PopupState { id, zoom, pan });
+        let fresh = std::mem::take(&mut self.popup_fresh);
+        if dimmed && !fresh {
+            self.popup = None;
         }
     }
 
@@ -367,15 +594,7 @@ impl DiagramUi {
                 viewport_top,
             },
         );
-        ui.painter()
-            .rect_filled(rect, 0.0, egui::Color32::from_gray(40));
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "rendering diagram…",
-            egui::FontId::proportional(16.0),
-            egui::Color32::from_gray(180),
-        );
+        draw_placeholder_box(ui, rect);
     }
 }
 

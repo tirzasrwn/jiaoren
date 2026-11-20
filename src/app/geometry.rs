@@ -166,6 +166,16 @@ pub(crate) fn bucket_for_scale(scale: f32, iw: f32, ih: f32) -> u16 {
     bucket as u16
 }
 
+/// Zoom factor in the diagram popup after one step: `0.25` per step, clamped to
+/// `1.0..=3.0`. Non-finite input resets to `1.0` so the overlay never draws a
+/// NaN-sized image.
+pub(crate) fn popup_zoom_step(zoom: f32, delta: i32) -> f32 {
+    if !zoom.is_finite() {
+        return 1.0;
+    }
+    (zoom + delta as f32 * 0.25).clamp(1.0, 3.0)
+}
+
 /// Pixel scale for `bucket` at a given display density. Textures are rendered
 /// at `bucket × pixels_per_point` texels per SVG unit.
 pub(crate) fn bucket_scale(bucket: u16, pixels_per_point: f32) -> f32 {
@@ -339,6 +349,16 @@ mod tests {
             assert_eq!(bucket_for_scale(f32::NAN, 87.0, 160.0), 1);
             assert_eq!(bucket_for_scale(f32::INFINITY, 87.0, 160.0), 1);
             assert_eq!(bucket_for_scale(1.0, 0.0, 160.0), 1);
+        }
+
+        #[test]
+        fn popup_zoom_steps_by_quarter_and_clamps() {
+            assert_eq!(popup_zoom_step(1.0, 1), 1.25);
+            assert_eq!(popup_zoom_step(3.0, 1), 3.0);
+            assert_eq!(popup_zoom_step(1.0, -1), 1.0);
+            assert_eq!(popup_zoom_step(2.0, -2), 1.5);
+            assert_eq!(popup_zoom_step(2.875, 1), 3.0);
+            assert_eq!(popup_zoom_step(f32::NAN, 1), 1.0);
         }
 
         #[test]
