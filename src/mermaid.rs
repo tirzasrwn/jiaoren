@@ -171,7 +171,6 @@ fn dirs_cache() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir())
 }
 
-#[allow(dead_code)] // consumed by app.rs in later tasks
 pub fn find_chromium() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("MDVIEW_CHROMIUM") {
         let p = PathBuf::from(p);
@@ -335,7 +334,6 @@ fn px_value(raw: &str) -> Option<f32> {
 /// Natural size of an SVG: `width`/`height` attributes in px, falling back to
 /// the viewBox's 3rd/4th numbers. `None` when neither is present or parsable;
 /// never panics on malformed input.
-#[allow(dead_code)] // consumed by app.rs in Task 2
 pub fn parse_svg_size(svg: &str) -> Option<(f32, f32)> {
     let start = svg.find("<svg")?;
     let tag = &svg[start..];
@@ -346,7 +344,7 @@ pub fn parse_svg_size(svg: &str) -> Option<(f32, f32)> {
         return Some((w, h));
     }
     let vb = tag_attr(tag, "viewBox")?;
-    let nums: Vec<&str> = vb.split_whitespace().collect();
+    let nums: Vec<&str> = vb.split(|c: char| c.is_whitespace() || c == ',').filter(|s| !s.is_empty()).collect();
     if nums.len() < 4 {
         return None;
     }
@@ -403,6 +401,18 @@ mod tests {
         assert_eq!(parse_svg_size(r#"<svg width="120" height="40" viewBox="0 0 120 40">"#), Some((120.0, 40.0)));
         assert_eq!(parse_svg_size(r#"<svg viewBox="0 0 120 40">"#), Some((120.0, 40.0)));
         assert_eq!(parse_svg_size("<svg>"), None);
+    }
+
+    #[test]
+    fn viewbox_accepts_comma_separators() {
+        assert_eq!(
+            parse_svg_size(r#"<svg viewBox="0,0,120,40">"#),
+            Some((120.0, 40.0))
+        );
+        assert_eq!(
+            parse_svg_size(r#"<svg viewBox="0, 0, 120, 40">"#),
+            Some((120.0, 40.0))
+        );
     }
 
     #[test]

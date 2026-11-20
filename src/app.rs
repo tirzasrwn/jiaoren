@@ -11,7 +11,7 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use notify::{RecursiveMode, Watcher};
 
 use crate::doc::{prepare, Prepared};
-use crate::mermaid::{find_chromium, Renderer, Theme};
+use crate::mermaid::{file_url, find_chromium, parse_svg_size, Renderer, Theme};
 
 /// A render job handed to a worker thread: (diagram id, mermaid source, theme).
 type Job = (String, String, Theme);
@@ -132,7 +132,9 @@ pub struct DiagramUi {
     sources: HashMap<String, String>,
     theme: Theme,
     zoom: f32,
-    textures: HashMap<String, (egui::TextureHandle, [usize; 2])>,
+    /// Intrinsic SVG size per diagram id (keyed `id-theme`); `None` when the
+    /// file has no parsable size, and absent until first read succeeds.
+    sizes: HashMap<String, Option<(f32, f32)>>,
     inflight: HashSet<String>,
     failures: HashMap<(String, &'static str), String>,
     queue: Arc<Mutex<VecDeque<Job>>>,
@@ -154,7 +156,7 @@ impl DiagramUi {
             sources,
             theme,
             zoom: 1.0,
-            textures: HashMap::new(),
+            sizes: HashMap::new(),
             inflight: HashSet::new(),
             failures: HashMap::new(),
             queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -171,7 +173,7 @@ impl DiagramUi {
     /// their `active_workers` slots until they report back in `poll`.
     fn reset_for_reload(&mut self, sources: HashMap<String, String>) {
         self.sources = sources;
-        self.textures.clear();
+        self.sizes.clear();
         self.inflight.clear();
         self.failures.clear();
         self.queue.lock().unwrap().clear();
@@ -179,14 +181,13 @@ impl DiagramUi {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, id: &str) {
-        let col = ui.available_width();
         if let Some(msg) = self.failures.get(&(id.to_string(), self.theme.as_str())) {
             let msg = msg.clone();
             self.draw_error(ui, id, &msg);
             return;
         }
         match self.renderer.cached(id, self.theme) {
-            Some(Ok(png)) => self.draw_png(ui, id, &png, self.theme, col),
+            Some(Ok(svg)) => self.draw_svg(ui, id, &svg, self.theme),
             Some(Err(msg)) => self.draw_error(ui, id, &msg),
             None => {
                 let enqueued = enqueue_diagram(
@@ -207,8 +208,8 @@ impl DiagramUi {
                     Theme::Light => Theme::Dark,
                     Theme::Dark => Theme::Light,
                 };
-                if let Some(Ok(png)) = self.renderer.cached(id, other) {
-                    self.draw_png(ui, id, &png, other, col);
+                if let Some(Ok(svg)) = self.renderer.cached(id, other) {
+                    self.draw_svg(ui, id, &svg, other);
                 } else {
                     self.draw_placeholder(ui, id);
                 }
@@ -251,53 +252,37 @@ impl DiagramUi {
         }
     }
 
-    fn draw_png(&mut self, ui: &mut egui::Ui, id: &str, png: &Path, theme: Theme, col: f32) {
+    /// Intrinsic SVG size for `id` in `theme`, reading the file once. A missing
+    /// file is not cached so a just-rendered diagram is picked up next frame.
+    fn intrinsic(&mut self, id: &str, theme: Theme, svg: &Path) -> Option<(f32, f32)> {
         let key = format!("{id}-{}", theme.as_str());
-        if !self.textures.contains_key(&key) {
-            if let Ok(bytes) = std::fs::read(png) {
-                // Task-1 shim: the cache now holds SVG; skip PNG decode for
-                // non-PNG bytes so nothing is drawn until Task 2 wires the
-                // SVG loader (upgrade path: egui_extras image loader).
-                if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-                    return;
-                }
-                if let Ok(img) = image::load_from_memory(&bytes) {
-                    let rgba = img.to_rgba8();
-                    let (w, h) = rgba.dimensions();
-                    let size = [w as usize, h as usize];
-                    let tex = ui.ctx().load_texture(
-                        format!("diagram-{key}"),
-                        egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
-                        egui::TextureOptions::LINEAR,
-                    );
-                    self.textures.insert(key.clone(), (tex, size));
-                }
-            }
+        if let Some(size) = self.sizes.get(&key) {
+            return *size;
         }
-        if let Some((tex, size)) = self.textures.get(&key) {
-            // PNGs are rasterized at 2x; show at the intended SVG size scaled by
-            // zoom, capped to the column when zoom is at or below 1.0.
-            let base_w = size[0] as f32 * 0.5;
-            let base_h = size[1] as f32 * 0.5;
-            let (mut w, mut h) = (base_w * self.zoom, base_h * self.zoom);
-            if self.zoom <= 1.0 && w > col {
-                let s = col / w;
-                (w, h) = (w * s, h * s);
+        match std::fs::read_to_string(svg) {
+            Ok(text) => {
+                let size = parse_svg_size(&text);
+                self.sizes.insert(key, size);
+                size
             }
-            let tex = tex.clone();
-            let response =
-                ui.add(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(w, h)));
-            if let Some(ph) = self.placeholders.remove(id) {
-                let delta = response.rect.height() - ph.height;
-                if delta != 0.0 {
-                    let new_scroll =
-                        reanchor(self.scroll_y, ph.viewport_top, ph.top, delta);
-                    self.scroll_adjust += new_scroll - self.scroll_y;
-                    ui.ctx().request_repaint();
-                }
+            Err(_) => None,
+        }
+    }
+
+    fn draw_svg(&mut self, ui: &mut egui::Ui, id: &str, svg: &Path, theme: Theme) {
+        let (w, h) = self.intrinsic(id, theme, svg).unwrap_or((640.0, 320.0));
+        let (w, h) = (w * self.zoom, h * self.zoom);
+        // The svg loader rasterizes at the requested size and caches per
+        // SizeHint, so zoom changes stay sharp rather than scaling a bitmap.
+        let uri = format!("file://{}", file_url(svg));
+        let response = ui.add(egui::Image::from_uri(uri).fit_to_exact_size(egui::vec2(w, h)));
+        if let Some(ph) = self.placeholders.remove(id) {
+            let delta = response.rect.height() - ph.height;
+            if delta != 0.0 {
+                let new_scroll = reanchor(self.scroll_y, ph.viewport_top, ph.top, delta);
+                self.scroll_adjust += new_scroll - self.scroll_y;
+                ui.ctx().request_repaint();
             }
-        } else {
-            ui.colored_label(egui::Color32::RED, "diagram: failed to load image");
         }
     }
 
@@ -309,7 +294,19 @@ impl DiagramUi {
     }
 
     fn draw_placeholder(&mut self, ui: &mut egui::Ui, id: &str) {
-        let (w, h) = (640.0 * self.zoom, 320.0 * self.zoom);
+        // Use the intrinsic size when a cached SVG (either theme) reveals it, so
+        // the placeholder occupies the same space the diagram will.
+        let other = match self.theme {
+            Theme::Light => Theme::Dark,
+            Theme::Dark => Theme::Light,
+        };
+        let path = self.renderer.svg_path(id, self.theme);
+        let other_path = self.renderer.svg_path(id, other);
+        let (w, h) = self
+            .intrinsic(id, self.theme, &path)
+            .or_else(|| self.intrinsic(id, other, &other_path))
+            .unwrap_or((640.0, 320.0));
+        let (w, h) = (w * self.zoom, h * self.zoom);
         let viewport_top = ui.clip_rect().top();
         let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
         self.placeholders.insert(
@@ -342,6 +339,7 @@ pub struct KeyState {
 pub enum Action {
     ScrollLines(f32),
     ScrollPages(f32),
+    ScrollCols(f32),
     Top,
     Bottom,
     ZoomIn,
@@ -365,6 +363,10 @@ pub fn apply_key(
     match key {
         Key::J | Key::ArrowDown => Some(Action::ScrollLines(1.0)),
         Key::K | Key::ArrowUp => Some(Action::ScrollLines(-1.0)),
+        Key::H => Some(Action::ScrollCols(-1.0)),
+        Key::L => Some(Action::ScrollCols(1.0)),
+        Key::ArrowLeft if modifiers.shift => Some(Action::ScrollCols(-1.0)),
+        Key::ArrowRight if modifiers.shift => Some(Action::ScrollCols(1.0)),
         Key::D => Some(Action::ScrollPages(0.5)),
         Key::U => Some(Action::ScrollPages(-0.5)),
         Key::Space => Some(Action::ScrollPages(1.0)),
@@ -406,6 +408,7 @@ pub struct App {
     diagrams: Rc<RefCell<DiagramUi>>,
     html_fn: Box<dyn Fn(&mut egui::Ui, &str)>,
     scroll_y: f32,
+    scroll_x: f32,
     applied_theme: Option<Theme>,
     keys: KeyState,
     // Held to keep the filesystem watch alive; never read directly.
@@ -496,6 +499,7 @@ impl App {
             diagrams,
             html_fn,
             scroll_y: 0.0,
+            scroll_x: 0.0,
             applied_theme: Some(theme),
             keys: KeyState::default(),
             watcher,
@@ -599,11 +603,15 @@ impl eframe::App for App {
             match act {
                 Action::ScrollLines(f) => self.scroll_y = (self.scroll_y + f * 40.0).max(0.0),
                 Action::ScrollPages(f) => self.scroll_y = (self.scroll_y + f * page_h).max(0.0),
+                Action::ScrollCols(f) => self.scroll_x = (self.scroll_x + f * 40.0).max(0.0),
                 Action::Top => self.scroll_y = 0.0,
                 Action::Bottom => self.scroll_y = f32::MAX,
                 Action::ZoomIn => self.zoom = (self.zoom * 1.1).min(3.0),
                 Action::ZoomOut => self.zoom = (self.zoom / 1.1).max(0.5),
-                Action::Fit => self.zoom = 1.0,
+                Action::Fit => {
+                    self.zoom = 1.0;
+                    self.scroll_x = 0.0;
+                }
                 Action::ToggleTheme => {
                     self.theme = match self.theme {
                         Theme::Light => Theme::Dark,
@@ -642,9 +650,11 @@ impl eframe::App for App {
             }
 
             let scroll_y = self.scroll_y;
-            let output = egui::ScrollArea::vertical()
+            let scroll_x = self.scroll_x;
+            let output = egui::ScrollArea::both()
                 .auto_shrink([false, false])
                 .vertical_scroll_offset(scroll_y)
+                .horizontal_scroll_offset(scroll_x)
                 .show(ui, |ui| {
                     let available = ui.available_width();
                     let col = (available - 64.0).min(900.0).max(0.0);
@@ -664,8 +674,10 @@ impl eframe::App for App {
                     });
                 });
             let max_y = (output.content_size.y - output.inner_rect.height()).max(0.0);
+            let max_x = (output.content_size.x - output.inner_rect.width()).max(0.0);
             let adjust = std::mem::take(&mut self.diagrams.borrow_mut().scroll_adjust);
             self.scroll_y = (output.state.offset.y + adjust).clamp(0.0, max_y);
+            self.scroll_x = output.state.offset.x.clamp(0.0, max_x);
             if adjust != 0.0 {
                 // Re-lay out next frame at the corrected offset.
                 ui.ctx().request_repaint();
@@ -892,6 +904,24 @@ mod key_tests {
         assert!(s.last_g.is_none());
         // The cleared state means the next `g` re-arms rather than going top.
         assert_eq!(apply_key(&mut s, Key::G, Modifiers::NONE, t0), None);
+    }
+
+    #[test]
+    fn h_and_l_pan_horizontally() {
+        let mut s = KeyState::default();
+        let now = std::time::Instant::now();
+        assert!(matches!(apply_key(&mut s, Key::H, Modifiers::NONE, now), Some(Action::ScrollCols(v)) if v < 0.0));
+        assert!(matches!(apply_key(&mut s, Key::L, Modifiers::NONE, now), Some(Action::ScrollCols(v)) if v > 0.0));
+    }
+
+    #[test]
+    fn shifted_arrows_pan_horizontally() {
+        let mut s = KeyState::default();
+        let now = std::time::Instant::now();
+        assert!(matches!(apply_key(&mut s, Key::ArrowLeft, Modifiers::SHIFT, now), Some(Action::ScrollCols(v)) if v < 0.0));
+        assert!(matches!(apply_key(&mut s, Key::ArrowRight, Modifiers::SHIFT, now), Some(Action::ScrollCols(v)) if v > 0.0));
+        // Unshifted arrows keep their vertical meaning.
+        assert!(matches!(apply_key(&mut s, Key::ArrowLeft, Modifiers::NONE, now), None));
     }
 
     #[test]
