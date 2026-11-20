@@ -27,6 +27,7 @@ use keys::{apply_key, Action, KeyState};
 use placeholder::{parse, Placeholder};
 use table::TableUi;
 
+/// Re-export of [`crate::doc::read_doc`] for the app's reload path.
 pub use crate::doc::read_doc;
 
 /// Lock a mutex, recovering the guard if a previous holder panicked. Poisoning
@@ -119,11 +120,18 @@ impl ParagraphUi {
 /// Renders an HTML placeholder through the diagram, table or paragraph UI.
 type HtmlFn = Box<dyn Fn(&mut egui::Ui, &str)>;
 
+/// The mdview window: document state, theme/zoom, scrolling, and the HTML
+/// render hook.
 pub(crate) struct App {
+    /// Path of the open document.
     pub path: PathBuf,
+    /// Pre-parsed document text and placeholders.
     pub prepared: Prepared,
+    /// Renderer shared with the diagram workers.
     pub renderer: Renderer,
+    /// Active colour theme.
     pub theme: Theme,
+    /// Text and diagram zoom factor.
     pub zoom: f32,
     error: Option<String>,
     cache: CommonMarkCache,
@@ -138,7 +146,7 @@ pub(crate) struct App {
     applied_theme: Option<Theme>,
     keys: KeyState,
     // Held to keep the filesystem watch alive; never read directly.
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "the watcher must stay alive for the callback to fire")]
     watcher: Option<notify::RecommendedWatcher>,
     watch_rx: Option<mpsc::Receiver<notify::Event>>,
     pending_reload: Option<Instant>,
@@ -147,6 +155,8 @@ pub(crate) struct App {
 }
 
 impl App {
+    /// Build the app for `path` from its already-read `text`, installing the
+    /// font and theme before the first frame.
     pub fn new(path: PathBuf, text: String, dark: bool, ctx: &egui::Context) -> Self {
         let theme = if dark { Theme::Dark } else { Theme::Light };
         // Once, before the first frame: FiraCode primary, egui defaults as fallback.
@@ -239,6 +249,7 @@ impl App {
         }
     }
 
+    /// Re-read the document, keeping the previous state if reading fails.
     pub fn load(&mut self) {
         match read_doc(&self.path) {
             Ok(text) => {
@@ -249,6 +260,7 @@ impl App {
         }
     }
 
+    /// Reload the document and rebuild every placeholder cache.
     pub fn reload(&mut self) {
         self.load();
         self.cache = CommonMarkCache::default();
@@ -431,38 +443,39 @@ impl eframe::App for App {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    mod read_doc {
+        use super::super::*;
 
-    #[test]
-    fn read_doc_reports_missing_dir_and_bad_utf8() {
-        assert!(read_doc(Path::new("/nope/missing.md"))
-            .unwrap_err()
-            .to_string()
-            .contains("cannot read"));
-        assert!(read_doc(Path::new("/tmp"))
-            .unwrap_err()
-            .to_string()
-            .contains("cannot read"));
-        let bad = std::env::temp_dir().join("mdview-bad-utf8.md");
-        std::fs::write(&bad, [0xff, 0xfe]).unwrap();
-        assert!(read_doc(&bad).unwrap_err().to_string().contains("UTF-8"));
-        let _ = std::fs::remove_file(&bad);
+        #[test]
+        fn read_doc_reports_missing_dir_and_bad_utf8() {
+            assert!(read_doc(Path::new("/nope/missing.md"))
+                .unwrap_err()
+                .to_string()
+                .contains("cannot read"));
+            assert!(read_doc(Path::new("/tmp"))
+                .unwrap_err()
+                .to_string()
+                .contains("cannot read"));
+            let bad = std::env::temp_dir().join("mdview-bad-utf8.md");
+            std::fs::write(&bad, [0xff, 0xfe]).unwrap();
+            assert!(read_doc(&bad).unwrap_err().to_string().contains("UTF-8"));
+            let _ = std::fs::remove_file(&bad);
+        }
     }
-}
 
-#[cfg(test)]
-mod theme_tests {
-    use super::{apply_theme, Theme};
+    mod theme {
+        use super::super::{apply_theme, Theme};
 
-    #[test]
-    fn applying_theme_updates_active_visuals() {
-        let ctx = egui::Context::default();
-        apply_theme(&ctx, Theme::Light);
-        assert_eq!(ctx.theme(), egui::Theme::Light);
-        assert!(!ctx.global_style().visuals.dark_mode);
-        apply_theme(&ctx, Theme::Dark);
-        assert_eq!(ctx.theme(), egui::Theme::Dark);
-        assert!(ctx.global_style().visuals.dark_mode);
+        #[test]
+        fn applying_theme_updates_active_visuals() {
+            let ctx = egui::Context::default();
+            apply_theme(&ctx, Theme::Light);
+            assert_eq!(ctx.theme(), egui::Theme::Light);
+            assert!(!ctx.global_style().visuals.dark_mode);
+            apply_theme(&ctx, Theme::Dark);
+            assert_eq!(ctx.theme(), egui::Theme::Dark);
+            assert!(ctx.global_style().visuals.dark_mode);
+        }
     }
 }
 

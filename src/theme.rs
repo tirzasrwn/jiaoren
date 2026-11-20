@@ -5,10 +5,12 @@ use std::sync::LazyLock;
 
 use crate::mermaid::Theme;
 
+/// An 8-bit-per-channel RGB colour.
 #[derive(Clone, Copy)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
 impl Rgb {
+    /// Format as an `#rrggbb` string, as mermaid's theme variables expect.
     pub fn to_hex(self) -> String {
         format!("#{:02x}{:02x}{:02x}", self.0, self.1, self.2)
     }
@@ -20,32 +22,54 @@ impl From<Rgb> for egui::Color32 {
     }
 }
 
-// Some roles (subtext, overlay, accent) are only consumed by the mermaid
-// theme variables; keep the full Catppuccin set here as the single source.
-#[allow(dead_code)]
+/// The Catppuccin colour roles shared by the window chrome and mermaid themes.
+// Some roles (subtext, accent) are only consumed by the mermaid theme
+// variables; keep the full Catppuccin set here as the single source.
+#[expect(dead_code, reason = "full Catppuccin role set kept as one source of truth")]
 pub struct Palette {
+    /// Window and diagram background.
     pub base: Rgb,
+    /// Slightly raised background.
     pub mantle: Rgb,
+    /// Inset background, used for code.
     pub crust: Rgb,
+    /// Primary text.
     pub text: Rgb,
+    /// Secondary text.
     pub subtext1: Rgb,
+    /// Tertiary text.
     pub subtext0: Rgb,
+    /// Strong overlay.
     pub overlay2: Rgb,
+    /// Borders and lines.
     pub overlay1: Rgb,
+    /// Faint overlay and widget strokes.
     pub overlay0: Rgb,
+    /// Active widget fill.
     pub surface2: Rgb,
+    /// Hovered widget fill.
     pub surface1: Rgb,
+    /// Inactive widget fill.
     pub surface0: Rgb,
+    /// Links.
     pub blue: Rgb,
+    /// Selection.
     pub lavender: Rgb,
+    /// Warnings and notes.
     pub yellow: Rgb,
+    /// Errors.
     pub red: Rgb,
+    /// Success.
     pub green: Rgb,
+    /// Accent colour.
     pub peach: Rgb,
+    /// Accent colour.
     pub mauve: Rgb,
+    /// Accent colour.
     pub teal: Rgb,
 }
 
+/// Catppuccin Latte (light).
 pub const LATTE: Palette = Palette {
     base: Rgb(0xef, 0xf1, 0xf5),
     mantle: Rgb(0xe6, 0xe9, 0xef),
@@ -69,6 +93,7 @@ pub const LATTE: Palette = Palette {
     teal: Rgb(0x17, 0x92, 0x99),
 };
 
+/// Catppuccin Macchiato (dark).
 pub const MACCHIATO: Palette = Palette {
     base: Rgb(0x24, 0x27, 0x3a),
     mantle: Rgb(0x1e, 0x20, 0x30),
@@ -92,6 +117,7 @@ pub const MACCHIATO: Palette = Palette {
     teal: Rgb(0x8b, 0xd5, 0xca),
 };
 
+/// Palette for `theme`.
 pub fn palette(theme: Theme) -> &'static Palette {
     match theme {
         Theme::Light => &LATTE,
@@ -99,6 +125,7 @@ pub fn palette(theme: Theme) -> &'static Palette {
     }
 }
 
+/// egui visuals derived from `theme`'s palette.
 pub fn visuals(theme: Theme) -> egui::Visuals {
     let p = palette(theme);
     let dark = matches!(theme, Theme::Dark);
@@ -153,6 +180,7 @@ fn mermaid_vars(p: &Palette) -> String {
     )
 }
 
+/// Mermaid `themeVariables` fragment (without outer braces) for `theme`.
 pub fn mermaid_variables(theme: Theme) -> &'static str {
     match theme {
         Theme::Light => MERMAID_VARS[0].as_str(),
@@ -162,34 +190,36 @@ pub fn mermaid_variables(theme: Theme) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    mod theme {
+        use super::super::*;
 
-    #[test]
-    fn palettes_carry_the_documented_base_and_text() {
-        assert_eq!(palette(Theme::Light).base.0, 0xef);
-        assert_eq!(palette(Theme::Light).base.to_hex(), "#eff1f5");
-        assert_eq!(palette(Theme::Dark).base.to_hex(), "#24273a");
-        assert_eq!(palette(Theme::Dark).text.to_hex(), "#cad3f5");
-    }
+        #[test]
+        fn palettes_carry_the_documented_base_and_text() {
+            assert_eq!(palette(Theme::Light).base.0, 0xef);
+            assert_eq!(palette(Theme::Light).base.to_hex(), "#eff1f5");
+            assert_eq!(palette(Theme::Dark).base.to_hex(), "#24273a");
+            assert_eq!(palette(Theme::Dark).text.to_hex(), "#cad3f5");
+        }
 
-    #[test]
-    fn visuals_are_light_for_latte_and_dark_for_macchiato() {
-        let l = visuals(Theme::Light);
-        assert!(!l.dark_mode);
-        assert_eq!(l.panel_fill, palette(Theme::Light).base.into());
-        let d = visuals(Theme::Dark);
-        assert!(d.dark_mode);
-        assert_eq!(d.panel_fill, palette(Theme::Dark).base.into());
-    }
+        #[test]
+        fn visuals_are_light_for_latte_and_dark_for_macchiato() {
+            let l = visuals(Theme::Light);
+            assert!(!l.dark_mode);
+            assert_eq!(l.panel_fill, palette(Theme::Light).base.into());
+            let d = visuals(Theme::Dark);
+            assert!(d.dark_mode);
+            assert_eq!(d.panel_fill, palette(Theme::Dark).base.into());
+        }
 
-    #[test]
-    fn mermaid_variables_use_their_palette_and_differ() {
-        let l = mermaid_variables(Theme::Light);
-        let d = mermaid_variables(Theme::Dark);
-        assert!(l.contains(&palette(Theme::Light).base.to_hex()));
-        assert!(l.contains(&palette(Theme::Light).text.to_hex()));
-        assert!(d.contains(&palette(Theme::Dark).base.to_hex()));
-        assert!(d.contains(&palette(Theme::Dark).text.to_hex()));
-        assert_ne!(l, d);
+        #[test]
+        fn mermaid_variables_use_their_palette_and_differ() {
+            let l = mermaid_variables(Theme::Light);
+            let d = mermaid_variables(Theme::Dark);
+            assert!(l.contains(&palette(Theme::Light).base.to_hex()));
+            assert!(l.contains(&palette(Theme::Light).text.to_hex()));
+            assert!(d.contains(&palette(Theme::Dark).base.to_hex()));
+            assert!(d.contains(&palette(Theme::Dark).text.to_hex()));
+            assert_ne!(l, d);
+        }
     }
 }

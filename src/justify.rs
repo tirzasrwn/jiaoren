@@ -12,18 +12,28 @@ use egui::{
 /// One styled piece of a paragraph.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Run {
+    /// The visible characters of this piece.
     pub text: String,
+    /// How the text is styled.
     pub kind: RunKind,
 }
 
+/// Inline style of a [`Run`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum RunKind {
+    /// Plain body text.
     Text,
+    /// Bold text.
     Bold,
+    /// Italic text.
     Italic,
+    /// Text that is both bold and italic.
     BoldItalic,
+    /// Inline code span.
     Code,
+    /// Struck-through text.
     Strike,
+    /// Link text, carrying the target URL.
     Link(String),
 }
 
@@ -520,7 +530,9 @@ fn build_words(ui: &egui::Ui, runs: &[Run]) -> Vec<Word> {
     words
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Lay out one text fragment and append it to the current word, opening a new
+/// word when none is in progress.
+#[expect(clippy::too_many_arguments, reason = "one fragment needs font, colours, text and run context")]
 fn push_frag(
     ui: &egui::Ui,
     words: &mut Vec<Word>,
@@ -780,187 +792,201 @@ fn paint_frag(ui: &egui::Ui, painter: &egui::Painter, pos: Pos2, frag: &Frag) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    mod parse {
+        use super::super::*;
 
-    #[test]
-    fn parses_the_supported_inline_styles() {
-        let runs = parse_inline("a **b** c *d* e `f` g ~~h~~ [i](https://x)");
-        assert!(runs.iter().any(|r| r.kind == RunKind::Bold && r.text == "b"));
-        assert!(runs.iter().any(|r| r.kind == RunKind::Italic && r.text == "d"));
-        assert!(runs.iter().any(|r| r.kind == RunKind::Code && r.text == "f"));
-        assert!(runs.iter().any(|r| r.kind == RunKind::Strike && r.text == "h"));
-        assert!(runs.iter().any(|r| r.kind == RunKind::Link("https://x".into()) && r.text == "i"));
-    }
+        #[test]
+        fn parses_the_supported_inline_styles() {
+            let runs = parse_inline("a **b** c *d* e `f` g ~~h~~ [i](https://x)");
+            assert!(runs.iter().any(|r| r.kind == RunKind::Bold && r.text == "b"));
+            assert!(runs.iter().any(|r| r.kind == RunKind::Italic && r.text == "d"));
+            assert!(runs.iter().any(|r| r.kind == RunKind::Code && r.text == "f"));
+            assert!(runs.iter().any(|r| r.kind == RunKind::Strike && r.text == "h"));
+            assert!(runs.iter().any(|r| r.kind == RunKind::Link("https://x".into()) && r.text == "i"));
+        }
 
-    #[test]
-    fn leaves_unbalanced_markers_literal() {
-        let runs = parse_inline("a **b");
-        assert_eq!(runs.iter().map(|r| r.text.as_str()).collect::<String>(), "a **b");
-    }
+        #[test]
+        fn leaves_unbalanced_markers_literal() {
+            let runs = parse_inline("a **b");
+            assert_eq!(runs.iter().map(|r| r.text.as_str()).collect::<String>(), "a **b");
+        }
 
-    #[test]
-    fn escapes_markers_and_code_wins_over_emphasis() {
-        let runs = parse_inline(r"a \*b\* `**c**`");
-        assert!(!runs.iter().any(|r| matches!(r.kind, RunKind::Italic | RunKind::Bold)));
-        let joined = runs.iter().map(|r| r.text.as_str()).collect::<String>();
-        assert_eq!(joined, "a *b* **c**");
-        assert!(runs.iter().any(|r| r.kind == RunKind::Code && r.text == "**c**"));
-    }
+        #[test]
+        fn escapes_markers_and_code_wins_over_emphasis() {
+            let runs = parse_inline(r"a \*b\* `**c**`");
+            assert!(!runs.iter().any(|r| matches!(r.kind, RunKind::Italic | RunKind::Bold)));
+            let joined = runs.iter().map(|r| r.text.as_str()).collect::<String>();
+            assert_eq!(joined, "a *b* **c**");
+            assert!(runs.iter().any(|r| r.kind == RunKind::Code && r.text == "**c**"));
+        }
 
-    #[test]
-    fn delimiters_need_flanking_and_underscores_stay_intraword() {
-        for s in ["2 * 3 * 4", "snake_case_name", "foo__bar__baz", "a_b"] {
-            let runs = parse_inline(s);
-            assert_eq!(runs.iter().map(|r| r.text.as_str()).collect::<String>(), s);
-            assert!(runs.iter().all(|r| r.kind == RunKind::Text), "{s}");
+        #[test]
+        fn delimiters_need_flanking_and_underscores_stay_intraword() {
+            for s in ["2 * 3 * 4", "snake_case_name", "foo__bar__baz", "a_b"] {
+                let runs = parse_inline(s);
+                assert_eq!(runs.iter().map(|r| r.text.as_str()).collect::<String>(), s);
+                assert!(runs.iter().all(|r| r.kind == RunKind::Text), "{s}");
+            }
+        }
+
+        #[test]
+        fn bold_with_inner_italics_keeps_every_character() {
+            let runs = parse_inline("**a*b*c**");
+            assert_eq!(runs.iter().map(|r| r.text.as_str()).collect::<String>(), "abc");
+            assert!(runs.iter().any(|r| r.kind == RunKind::BoldItalic && r.text == "b"));
+        }
+
+        #[test]
+        fn decodes_html_entities_in_text_runs() {
+            let joined = |s: &str| {
+                parse_inline(s)
+                    .iter()
+                    .map(|r| r.text.as_str())
+                    .collect::<String>()
+            };
+            assert_eq!(joined("AT&amp;T"), "AT&T");
+            assert_eq!(joined("&lt;b&gt;"), "<b>");
+            assert_eq!(joined("a&nbsp;b"), "a b");
+            assert_eq!(joined("&quot;q&quot; &#39;s&#39; &apos;t&apos;"), "\"q\" 's' 't'");
+            assert_eq!(joined("&bogus; &amp"), "&bogus; &amp");
+        }
+
+        #[test]
+        fn emphasis_search_skips_code_spans() {
+            let runs = parse_inline("**use `a**b` here**");
+            assert_eq!(
+                runs.iter().map(|r| r.text.as_str()).collect::<String>(),
+                "use a**b here"
+            );
+            assert!(runs.iter().any(|r| r.kind == RunKind::Code && r.text == "a**b"));
+            assert!(!runs
+                .iter()
+                .any(|r| r.kind != RunKind::Code && r.text.contains('*')));
+        }
+
+        #[test]
+        fn triple_marker_is_bold_italic() {
+            let runs = parse_inline("***both***");
+            assert_eq!(runs, vec![Run {
+                text: "both".into(),
+                kind: RunKind::BoldItalic,
+            }]);
         }
     }
 
-    #[test]
-    fn bold_with_inner_italics_keeps_every_character() {
-        let runs = parse_inline("**a*b*c**");
-        assert_eq!(runs.iter().map(|r| r.text.as_str()).collect::<String>(), "abc");
-        assert!(runs.iter().any(|r| r.kind == RunKind::BoldItalic && r.text == "b"));
+    mod wrap {
+        use super::super::*;
+
+        #[test]
+        fn wraps_greedily() {
+            let widths = vec![30.0, 30.0, 30.0, 30.0];
+            let gaps = vec![0.0, 10.0, 10.0, 10.0];
+            let lines = wrap_words(&widths, &gaps, 100.0);
+            // 30 + 10 + 30 = 70 fits; adding the third word needs 110 > 100.
+            assert_eq!(lines, vec![vec![0, 1], vec![2, 3]]);
+        }
+
+        #[test]
+        fn an_overwide_word_gets_its_own_line() {
+            let lines = wrap_words(&[30.0, 200.0, 30.0], &[0.0, 10.0, 10.0], 100.0);
+            assert_eq!(lines, vec![vec![0], vec![1], vec![2]]);
+        }
+
+        #[test]
+        fn glued_words_share_a_line_break_budget() {
+            assert_eq!(
+                wrap_words(&[60.0, 60.0], &[0.0, 0.0], 100.0),
+                vec![vec![0], vec![1]]
+            );
+        }
     }
 
-    #[test]
-    fn decodes_html_entities_in_text_runs() {
-        let joined = |s: &str| {
-            parse_inline(s)
-                .iter()
-                .map(|r| r.text.as_str())
-                .collect::<String>()
-        };
-        assert_eq!(joined("AT&amp;T"), "AT&T");
-        assert_eq!(joined("&lt;b&gt;"), "<b>");
-        assert_eq!(joined("a&nbsp;b"), "a b");
-        assert_eq!(joined("&quot;q&quot; &#39;s&#39; &apos;t&apos;"), "\"q\" 's' 't'");
-        assert_eq!(joined("&bogus; &amp"), "&bogus; &amp");
+    mod paint {
+        use super::super::*;
+
+        #[test]
+        fn lines_touching_a_split_token_are_not_stretched() {
+            let split = [false, true, true, false];
+            assert!(touches_split(&split, &[1, 2], None)); // holds split pieces
+            assert!(touches_split(&split, &[0], Some(&[1]))); // next line starts it
+            assert!(!touches_split(&split, &[0], Some(&[3])));
+            assert_eq!(justified_grow(true, false, 50.0, 1, true), 0.0);
+            assert_eq!(justified_grow(true, false, 50.0, 2, false), 25.0);
+            assert_eq!(justified_grow(true, true, 50.0, 2, false), 0.0); // last line
+            assert_eq!(justified_grow(false, false, 50.0, 2, false), 0.0); // draw_left
+        }
     }
 
-    #[test]
-    fn emphasis_search_skips_code_spans() {
-        let runs = parse_inline("**use `a**b` here**");
-        assert_eq!(
-            runs.iter().map(|r| r.text.as_str()).collect::<String>(),
-            "use a**b here"
-        );
-        assert!(runs.iter().any(|r| r.kind == RunKind::Code && r.text == "a**b"));
-        assert!(!runs
-            .iter()
-            .any(|r| r.kind != RunKind::Code && r.text.contains('*')));
-    }
+    mod split {
+        use super::super::*;
 
-    #[test]
-    fn triple_marker_is_bold_italic() {
-        let runs = parse_inline("***both***");
-        assert_eq!(runs, vec![Run {
-            text: "both".into(),
-            kind: RunKind::BoldItalic,
-        }]);
-    }
-
-    #[test]
-    fn wraps_greedily() {
-        let widths = vec![30.0, 30.0, 30.0, 30.0];
-        let gaps = vec![0.0, 10.0, 10.0, 10.0];
-        let lines = wrap_words(&widths, &gaps, 100.0);
-        // 30 + 10 + 30 = 70 fits; adding the third word needs 110 > 100.
-        assert_eq!(lines, vec![vec![0, 1], vec![2, 3]]);
-    }
-
-    #[test]
-    fn an_overwide_word_gets_its_own_line() {
-        let lines = wrap_words(&[30.0, 200.0, 30.0], &[0.0, 10.0, 10.0], 100.0);
-        assert_eq!(lines, vec![vec![0], vec![1], vec![2]]);
-    }
-
-    #[test]
-    fn glued_words_share_a_line_break_budget() {
-        assert_eq!(
-            wrap_words(&[60.0, 60.0], &[0.0, 0.0], 100.0),
-            vec![vec![0], vec![1]]
-        );
-    }
-
-    #[test]
-    fn lines_touching_a_split_token_are_not_stretched() {
-        let split = [false, true, true, false];
-        assert!(touches_split(&split, &[1, 2], None)); // holds split pieces
-        assert!(touches_split(&split, &[0], Some(&[1]))); // next line starts it
-        assert!(!touches_split(&split, &[0], Some(&[3])));
-        assert_eq!(justified_grow(true, false, 50.0, 1, true), 0.0);
-        assert_eq!(justified_grow(true, false, 50.0, 2, false), 25.0);
-        assert_eq!(justified_grow(true, true, 50.0, 2, false), 0.0); // last line
-        assert_eq!(justified_grow(false, false, 50.0, 2, false), 0.0); // draw_left
-    }
-
-    #[test]
-    fn splits_prefer_separators_and_lose_nothing() {
-        let m = |s: &str| s.chars().count() as f32 * 10.0; // fake measure
-        let parts = split_token("src/db/schema.ts:293-311", 100.0, &m);
-        assert!(parts.len() > 1);
-        assert_eq!(parts.concat(), "src/db/schema.ts:293-311");
-        assert!(parts.iter().all(|p| m(p) <= 100.0));
-    }
-
-    #[test]
-    fn hard_splits_when_no_separator_and_terminates() {
-        let m = |s: &str| s.chars().count() as f32 * 10.0;
-        for n in [300, 500] {
-            let word = "a".repeat(n);
-            let parts = split_token(&word, 100.0, &m);
-            assert_eq!(parts.concat(), word);
+        #[test]
+        fn splits_prefer_separators_and_lose_nothing() {
+            let m = |s: &str| s.chars().count() as f32 * 10.0; // fake measure
+            let parts = split_token("src/db/schema.ts:293-311", 100.0, &m);
+            assert!(parts.len() > 1);
+            assert_eq!(parts.concat(), "src/db/schema.ts:293-311");
             assert!(parts.iter().all(|p| m(p) <= 100.0));
         }
-    }
 
-    #[test]
-    fn keeps_whole_tokens_that_fit_and_splits_slash_runs() {
-        let m = |s: &str| s.chars().count() as f32 * 10.0;
-        assert_eq!(split_token("abcdefghij", 100.0, &m), vec!["abcdefghij"]);
-        assert_eq!(split_token("alpha/", 60.0, &m), vec!["alpha/"]);
-        let parts = split_token("//////////", 30.0, &m);
-        assert_eq!(parts.concat(), "//////////");
-        assert!(parts.iter().all(|p| m(p) <= 30.0));
-    }
+        #[test]
+        fn hard_splits_when_no_separator_and_terminates() {
+            let m = |s: &str| s.chars().count() as f32 * 10.0;
+            for n in [300, 500] {
+                let word = "a".repeat(n);
+                let parts = split_token(&word, 100.0, &m);
+                assert_eq!(parts.concat(), word);
+                assert!(parts.iter().all(|p| m(p) <= 100.0));
+            }
+        }
 
-    #[test]
-    fn breaks_after_separator_not_before() {
-        let m = |s: &str| s.chars().count() as f32 * 10.0;
-        let parts = split_token("alpha/beta/gamma", 60.0, &m);
-        assert_eq!(parts, vec!["alpha/", "beta/", "gamma"]);
-    }
+        #[test]
+        fn keeps_whole_tokens_that_fit_and_splits_slash_runs() {
+            let m = |s: &str| s.chars().count() as f32 * 10.0;
+            assert_eq!(split_token("abcdefghij", 100.0, &m), vec!["abcdefghij"]);
+            assert_eq!(split_token("alpha/", 60.0, &m), vec!["alpha/"]);
+            let parts = split_token("//////////", 30.0, &m);
+            assert_eq!(parts.concat(), "//////////");
+            assert!(parts.iter().all(|p| m(p) <= 30.0));
+        }
 
-    #[test]
-    fn skips_a_separator_that_leaves_the_piece_less_than_half_full() {
-        let m = |s: &str| s.chars().count() as f32 * 10.0;
-        let word = format!("a-{}", "b".repeat(40));
-        let parts = split_token(&word, 100.0, &m);
-        assert_eq!(parts[0], "a-bbbbbbbb");
-        assert_eq!(parts.concat(), word);
-    }
+        #[test]
+        fn breaks_after_separator_not_before() {
+            let m = |s: &str| s.chars().count() as f32 * 10.0;
+            let parts = split_token("alpha/beta/gamma", 60.0, &m);
+            assert_eq!(parts, vec!["alpha/", "beta/", "gamma"]);
+        }
 
-    #[test]
-    fn measures_only_short_prefixes_for_huge_tokens() {
-        let longest = std::cell::Cell::new(0usize);
-        let m = |s: &str| {
-            longest.set(longest.get().max(s.chars().count()));
-            s.chars().count() as f32 * 10.0
-        };
-        let word = "a/".repeat(50_000);
-        let parts = split_token(&word, 100.0, &m);
-        assert_eq!(parts.concat(), word);
-        assert!(longest.get() <= 11, "measured {} chars", longest.get());
-    }
+        #[test]
+        fn skips_a_separator_that_leaves_the_piece_less_than_half_full() {
+            let m = |s: &str| s.chars().count() as f32 * 10.0;
+            let word = format!("a-{}", "b".repeat(40));
+            let parts = split_token(&word, 100.0, &m);
+            assert_eq!(parts[0], "a-bbbbbbbb");
+            assert_eq!(parts.concat(), word);
+        }
 
-    #[test]
-    fn splits_multibyte_without_panicking() {
-        let m = |s: &str| s.chars().count() as f32 * 10.0;
-        let word = "数据库查询接口超长标识符😀😀😀";
-        let parts = split_token(word, 40.0, &m);
-        assert_eq!(parts.concat(), word);
-        assert!(parts.iter().all(|p| m(p) <= 40.0), "{parts:?}");
-        assert_eq!(parts[0].chars().count(), 4);
+        #[test]
+        fn measures_only_short_prefixes_for_huge_tokens() {
+            let longest = std::cell::Cell::new(0usize);
+            let m = |s: &str| {
+                longest.set(longest.get().max(s.chars().count()));
+                s.chars().count() as f32 * 10.0
+            };
+            let word = "a/".repeat(50_000);
+            let parts = split_token(&word, 100.0, &m);
+            assert_eq!(parts.concat(), word);
+            assert!(longest.get() <= 11, "measured {} chars", longest.get());
+        }
+
+        #[test]
+        fn splits_multibyte_without_panicking() {
+            let m = |s: &str| s.chars().count() as f32 * 10.0;
+            let word = "数据库查询接口超长标识符😀😀😀";
+            let parts = split_token(word, 40.0, &m);
+            assert_eq!(parts.concat(), word);
+            assert!(parts.iter().all(|p| m(p) <= 40.0), "{parts:?}");
+            assert_eq!(parts[0].chars().count(), 4);
+        }
     }
 }

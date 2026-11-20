@@ -104,13 +104,15 @@ fn render_cell(ui: &mut egui::Ui, w: f32, cell_md: &str, cache: &mut CommonMarkC
 
 #[cfg(test)]
 mod tests {
-    use super::cell_needs_library_fallback;
+    mod table {
+        use super::super::cell_needs_library_fallback;
 
-    #[test]
-    fn cell_falls_back_only_for_images_and_html() {
-        assert!(cell_needs_library_fallback("see ![x](a.png)"));
-        assert!(cell_needs_library_fallback("a<br>b"));
-        assert!(!cell_needs_library_fallback("**bold** and `code`"));
-        assert!(!cell_needs_library_fallback("src/db/schema.ts:293-311"));
+        #[test]
+        fn cell_falls_back_only_for_images_and_html() {
+            assert!(cell_needs_library_fallback("see ![x](a.png)"));
+            assert!(cell_needs_library_fallback("a<br>b"));
+            assert!(!cell_needs_library_fallback("**bold** and `code`"));
+            assert!(!cell_needs_library_fallback("src/db/schema.ts:293-311"));
+        }
     }
 }

@@ -339,141 +339,143 @@ impl DiagramUi {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    mod diagram {
+        use super::super::*;
 
-    fn sources() -> HashMap<String, String> {
-        HashMap::from([("abc".to_string(), "graph TD; A-->B;".to_string())])
-    }
+        fn sources() -> HashMap<String, String> {
+            HashMap::from([("abc".to_string(), "graph TD; A-->B;".to_string())])
+        }
 
-    #[test]
-    fn lock_recovers_poisoned_mutex_and_keeps_queued_work() {
-        let queue = Mutex::new(VecDeque::new());
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = queue.lock().unwrap();
-            panic!("poison the queue");
-        }));
-        assert!(queue.is_poisoned());
-        let failures = HashMap::new();
-        let mut inflight = HashSet::new();
-        assert!(enqueue_diagram(
-            &failures,
-            &mut inflight,
-            &sources(),
-            &queue,
-            "abc",
-            Theme::Light
-        ));
-        assert_eq!(lock(&queue).len(), 1);
-    }
+        #[test]
+        fn lock_recovers_poisoned_mutex_and_keeps_queued_work() {
+            let queue = Mutex::new(VecDeque::new());
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = queue.lock().unwrap();
+                panic!("poison the queue");
+            }));
+            assert!(queue.is_poisoned());
+            let failures = HashMap::new();
+            let mut inflight = HashSet::new();
+            assert!(enqueue_diagram(
+                &failures,
+                &mut inflight,
+                &sources(),
+                &queue,
+                "abc",
+                Theme::Light
+            ));
+            assert_eq!(lock(&queue).len(), 1);
+        }
 
-    #[test]
-    fn enqueue_diagram_queues_once_then_skips_inflight() {
-        let failures = HashMap::new();
-        let mut inflight = HashSet::new();
-        let queue = Mutex::new(VecDeque::new());
-        // A successful enqueue signals "must repaint" (returns true).
-        assert!(enqueue_diagram(
-            &failures,
-            &mut inflight,
-            &sources(),
-            &queue,
-            "abc",
-            Theme::Light
-        ));
-        assert!(!enqueue_diagram(
-            &failures,
-            &mut inflight,
-            &sources(),
-            &queue,
-            "abc",
-            Theme::Light
-        ));
-        assert_eq!(queue.lock().unwrap().len(), 1);
-    }
+        #[test]
+        fn enqueue_diagram_queues_once_then_skips_inflight() {
+            let failures = HashMap::new();
+            let mut inflight = HashSet::new();
+            let queue = Mutex::new(VecDeque::new());
+            // A successful enqueue signals "must repaint" (returns true).
+            assert!(enqueue_diagram(
+                &failures,
+                &mut inflight,
+                &sources(),
+                &queue,
+                "abc",
+                Theme::Light
+            ));
+            assert!(!enqueue_diagram(
+                &failures,
+                &mut inflight,
+                &sources(),
+                &queue,
+                "abc",
+                Theme::Light
+            ));
+            assert_eq!(queue.lock().unwrap().len(), 1);
+        }
 
-    #[test]
-    fn failed_id_is_never_requeued() {
-        // A failed render must not be queued again this session, even though the
-        // on-disk cache never got a png/err (.err is only written for diagram errors).
-        let failures =
-            HashMap::from([(("abc".to_string(), "light"), "chromium not found".to_string())]);
-        let mut inflight = HashSet::new();
-        let queue = Mutex::new(VecDeque::new());
-        assert!(!enqueue_diagram(
-            &failures,
-            &mut inflight,
-            &sources(),
-            &queue,
-            "abc",
-            Theme::Light
-        ));
-        assert!(inflight.is_empty());
-        assert!(queue.lock().unwrap().is_empty());
-    }
+        #[test]
+        fn failed_id_is_never_requeued() {
+            // A failed render must not be queued again this session, even though the
+            // on-disk cache never got a png/err (.err is only written for diagram errors).
+            let failures =
+                HashMap::from([(("abc".to_string(), "light"), "chromium not found".to_string())]);
+            let mut inflight = HashSet::new();
+            let queue = Mutex::new(VecDeque::new());
+            assert!(!enqueue_diagram(
+                &failures,
+                &mut inflight,
+                &sources(),
+                &queue,
+                "abc",
+                Theme::Light
+            ));
+            assert!(inflight.is_empty());
+            assert!(queue.lock().unwrap().is_empty());
+        }
 
-    #[test]
-    fn failure_is_theme_scoped() {
-        // A Light-mode failure must not suppress the same id under Dark.
-        let failures =
-            HashMap::from([(("abc".to_string(), "light"), "boom".to_string())]);
-        let mut inflight = HashSet::new();
-        let queue = Mutex::new(VecDeque::new());
-        assert!(!enqueue_diagram(
-            &failures,
-            &mut inflight,
-            &sources(),
-            &queue,
-            "abc",
-            Theme::Light
-        ));
-        assert!(enqueue_diagram(
-            &failures,
-            &mut inflight,
-            &sources(),
-            &queue,
-            "abc",
-            Theme::Dark
-        ));
-        assert_eq!(queue.lock().unwrap().len(), 1);
-    }
+        #[test]
+        fn failure_is_theme_scoped() {
+            // A Light-mode failure must not suppress the same id under Dark.
+            let failures =
+                HashMap::from([(("abc".to_string(), "light"), "boom".to_string())]);
+            let mut inflight = HashSet::new();
+            let queue = Mutex::new(VecDeque::new());
+            assert!(!enqueue_diagram(
+                &failures,
+                &mut inflight,
+                &sources(),
+                &queue,
+                "abc",
+                Theme::Light
+            ));
+            assert!(enqueue_diagram(
+                &failures,
+                &mut inflight,
+                &sources(),
+                &queue,
+                "abc",
+                Theme::Dark
+            ));
+            assert_eq!(queue.lock().unwrap().len(), 1);
+        }
 
-    #[test]
-    fn missing_source_is_not_queued() {
-        let failures = HashMap::new();
-        let mut inflight = HashSet::new();
-        let queue = Mutex::new(VecDeque::new());
-        assert!(!enqueue_diagram(
-            &failures,
-            &mut inflight,
-            &sources(),
-            &queue,
-            "unknown",
-            Theme::Light
-        ));
-        assert!(inflight.is_empty());
-    }
+        #[test]
+        fn missing_source_is_not_queued() {
+            let failures = HashMap::new();
+            let mut inflight = HashSet::new();
+            let queue = Mutex::new(VecDeque::new());
+            assert!(!enqueue_diagram(
+                &failures,
+                &mut inflight,
+                &sources(),
+                &queue,
+                "unknown",
+                Theme::Light
+            ));
+            assert!(inflight.is_empty());
+        }
 
-    #[test]
-    fn reload_drops_queued_jobs() {
-        let d = std::env::temp_dir().join(format!("mdview-reload-{}", std::process::id()));
-        let r = Arc::new(Renderer {
-            chromium: None,
-            mermaid_js: d.join("mermaid.min.js"),
-            cache_dir: d,
-        });
-        let mut ui = DiagramUi::new(r, sources(), Theme::Light);
-        assert!(enqueue_diagram(
-            &ui.failures,
-            &mut ui.inflight,
-            &ui.sources,
-            &ui.queue,
-            "abc",
-            Theme::Light
-        ));
-        assert_eq!(ui.queue.lock().unwrap().len(), 1);
-        ui.reset_for_reload(HashMap::new());
-        assert!(ui.queue.lock().unwrap().is_empty());
-        assert!(ui.inflight.is_empty());
-        assert!(ui.sources.is_empty());
+        #[test]
+        fn reload_drops_queued_jobs() {
+            let d = std::env::temp_dir().join(format!("mdview-reload-{}", std::process::id()));
+            let r = Arc::new(Renderer {
+                chromium: None,
+                mermaid_js: d.join("mermaid.min.js"),
+                cache_dir: d,
+            });
+            let mut ui = DiagramUi::new(r, sources(), Theme::Light);
+            assert!(enqueue_diagram(
+                &ui.failures,
+                &mut ui.inflight,
+                &ui.sources,
+                &ui.queue,
+                "abc",
+                Theme::Light
+            ));
+            assert_eq!(ui.queue.lock().unwrap().len(), 1);
+            ui.reset_for_reload(HashMap::new());
+            assert!(ui.queue.lock().unwrap().is_empty());
+            assert!(ui.inflight.is_empty());
+            assert!(ui.sources.is_empty());
+        }
     }
 }

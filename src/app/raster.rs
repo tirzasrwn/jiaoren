@@ -62,20 +62,22 @@ pub(crate) fn rasterize(
 
 #[cfg(test)]
 mod tests {
-    use super::rasterize;
+    mod raster {
+        use super::super::rasterize;
 
-    #[test]
-    fn rasterize_produces_scaled_premultiplied_rgba() {
-        // A 10x5 red rect rendered at scale 2 must be a 20x10 opaque red image.
-        let p = std::env::temp_dir().join(format!("mdview-raster-{}.svg", std::process::id()));
-        std::fs::write(
-            &p,
-            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 5"><rect width="10" height="5" fill="#ff0000"/></svg>"##,
-        )
-        .unwrap();
-        let img = rasterize(&p, 10.0, 5.0, 2.0).unwrap();
-        assert_eq!(img.size, [20, 10]);
-        assert_eq!(img.pixels[0], egui::Color32::from_rgba_premultiplied(255, 0, 0, 255));
-        let _ = std::fs::remove_file(&p);
+        #[test]
+        fn rasterize_produces_scaled_premultiplied_rgba() {
+            // A 10x5 red rect rendered at scale 2 must be a 20x10 opaque red image.
+            let p = std::env::temp_dir().join(format!("mdview-raster-{}.svg", std::process::id()));
+            std::fs::write(
+                &p,
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 5"><rect width="10" height="5" fill="#ff0000"/></svg>"##,
+            )
+            .unwrap();
+            let img = rasterize(&p, 10.0, 5.0, 2.0).unwrap();
+            assert_eq!(img.size, [20, 10]);
+            assert_eq!(img.pixels[0], egui::Color32::from_rgba_premultiplied(255, 0, 0, 255));
+            let _ = std::fs::remove_file(&p);
+        }
     }
 }

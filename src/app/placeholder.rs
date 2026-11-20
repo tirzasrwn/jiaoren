@@ -43,54 +43,56 @@ fn parse_kind<'a>(html: &'a str, prefix: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, Placeholder};
+    mod placeholder {
+        use super::super::{parse, Placeholder};
 
-    #[test]
-    fn parses_placeholder_ids() {
-        assert!(matches!(
-            parse(r#"<mermaid id="abc123">"#),
-            Some(Placeholder::Mermaid("abc123"))
-        ));
-        assert!(parse("<div>hi</div>").is_none());
-        assert!(parse(r#"<mermaid id="">"#).is_none());
-        // Trailing attributes and junk after the tag are rejected.
-        assert!(parse(r#"<mermaid id="x" data-y="1">"#).is_none());
-        assert!(parse(r#"<mermaidx id="x">"#).is_none());
-        // Surrounding whitespace is ignored.
-        assert!(matches!(
-            parse("  <mermaid id=\"abc\">  \n"),
-            Some(Placeholder::Mermaid("abc"))
-        ));
-    }
+        #[test]
+        fn parses_placeholder_ids() {
+            assert!(matches!(
+                parse(r#"<mermaid id="abc123">"#),
+                Some(Placeholder::Mermaid("abc123"))
+            ));
+            assert!(parse("<div>hi</div>").is_none());
+            assert!(parse(r#"<mermaid id="">"#).is_none());
+            // Trailing attributes and junk after the tag are rejected.
+            assert!(parse(r#"<mermaid id="x" data-y="1">"#).is_none());
+            assert!(parse(r#"<mermaidx id="x">"#).is_none());
+            // Surrounding whitespace is ignored.
+            assert!(matches!(
+                parse("  <mermaid id=\"abc\">  \n"),
+                Some(Placeholder::Mermaid("abc"))
+            ));
+        }
 
-    #[test]
-    fn parses_table_placeholder_ids() {
-        assert!(matches!(
-            parse(r#"<mdtable id="abc">"#),
-            Some(Placeholder::Table("abc"))
-        ));
-        assert!(parse(r#"<mdtable id="">"#).is_none());
-        assert!(parse(r#"<mermaid id="x">"#).is_some_and(|p| matches!(p, Placeholder::Mermaid(_))));
-        assert!(parse(r#"<mdtable id="x" class="t">"#).is_none());
-        assert!(matches!(
-            parse("\n<mdtable id=\"abc\">\t"),
-            Some(Placeholder::Table("abc"))
-        ));
-    }
+        #[test]
+        fn parses_table_placeholder_ids() {
+            assert!(matches!(
+                parse(r#"<mdtable id="abc">"#),
+                Some(Placeholder::Table("abc"))
+            ));
+            assert!(parse(r#"<mdtable id="">"#).is_none());
+            assert!(parse(r#"<mermaid id="x">"#).is_some_and(|p| matches!(p, Placeholder::Mermaid(_))));
+            assert!(parse(r#"<mdtable id="x" class="t">"#).is_none());
+            assert!(matches!(
+                parse("\n<mdtable id=\"abc\">\t"),
+                Some(Placeholder::Table("abc"))
+            ));
+        }
 
-    #[test]
-    fn parses_paragraph_placeholder_ids() {
-        assert!(matches!(
-            parse(r#"<mdpara id="abc">"#),
-            Some(Placeholder::Paragraph("abc"))
-        ));
-        assert!(parse(r#"<mdpara id="">"#).is_none());
-        assert!(parse(r#"<mdtable id="x">"#).is_some_and(|p| matches!(p, Placeholder::Table(_))));
-        assert!(parse(r#"<mdpara id="x" oops>"#).is_none());
-        assert!(parse("").is_none());
-        assert!(matches!(
-            parse(" <mdpara id=\"abc\"> "),
-            Some(Placeholder::Paragraph("abc"))
-        ));
+        #[test]
+        fn parses_paragraph_placeholder_ids() {
+            assert!(matches!(
+                parse(r#"<mdpara id="abc">"#),
+                Some(Placeholder::Paragraph("abc"))
+            ));
+            assert!(parse(r#"<mdpara id="">"#).is_none());
+            assert!(parse(r#"<mdtable id="x">"#).is_some_and(|p| matches!(p, Placeholder::Table(_))));
+            assert!(parse(r#"<mdpara id="x" oops>"#).is_none());
+            assert!(parse("").is_none());
+            assert!(matches!(
+                parse(" <mdpara id=\"abc\"> "),
+                Some(Placeholder::Paragraph("abc"))
+            ));
+        }
     }
 }

@@ -76,36 +76,38 @@ pub fn install(ctx: &egui::Context) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    mod fonts {
+        use super::super::*;
 
-    #[test]
-    fn finds_the_regular_face_on_this_machine() {
-        let defs = load().expect("FiraCode Nerd Font is installed under ~/.fonts");
-        assert!(defs.font_data.keys().any(|k| k.contains("FiraCode")));
-        assert_eq!(
-            defs.families[&egui::FontFamily::Proportional]
-                .first()
-                .unwrap(),
-            "FiraCodeNerdFont-Regular"
-        );
-        assert_eq!(
-            defs.families[&egui::FontFamily::Monospace]
-                .first()
-                .unwrap(),
-            "FiraCodeNerdFont-Regular"
-        );
-    }
+        #[test]
+        fn finds_the_regular_face_on_this_machine() {
+            let defs = load().expect("FiraCode Nerd Font is installed under ~/.fonts");
+            assert!(defs.font_data.keys().any(|k| k.contains("FiraCode")));
+            assert_eq!(
+                defs.families[&egui::FontFamily::Proportional]
+                    .first()
+                    .unwrap(),
+                "FiraCodeNerdFont-Regular"
+            );
+            assert_eq!(
+                defs.families[&egui::FontFamily::Monospace]
+                    .first()
+                    .unwrap(),
+                "FiraCodeNerdFont-Regular"
+            );
+        }
 
-    #[test]
-    fn missing_files_return_none_instead_of_panicking() {
-        assert!(load_from_dir(std::path::Path::new("/nonexistent/fonts")).is_none());
-    }
+        #[test]
+        fn missing_files_return_none_instead_of_panicking() {
+            assert!(load_from_dir(std::path::Path::new("/nonexistent/fonts")).is_none());
+        }
 
-    #[test]
-    fn bold_face_is_listed_after_regular() {
-        let defs = load().expect("font installed");
-        let mono = &defs.families[&egui::FontFamily::Monospace];
-        assert_eq!(mono[0], "FiraCodeNerdFont-Regular");
-        assert_eq!(mono[1], "FiraCodeNerdFont-Bold");
+        #[test]
+        fn bold_face_is_listed_after_regular() {
+            let defs = load().expect("font installed");
+            let mono = &defs.families[&egui::FontFamily::Monospace];
+            assert_eq!(mono[0], "FiraCodeNerdFont-Regular");
+            assert_eq!(mono[1], "FiraCodeNerdFont-Bold");
+        }
     }
 }

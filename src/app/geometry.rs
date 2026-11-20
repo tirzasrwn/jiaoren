@@ -59,6 +59,7 @@ pub(crate) fn bucket_scale(bucket: u8, pixels_per_point: f32) -> f32 {
     bucket as f32 * pixels_per_point
 }
 
+/// Build the [`RasterKey`] for `id` at `bucket` and display density.
 pub(crate) fn raster_key(
     id: &str,
     theme: Theme,
@@ -75,64 +76,66 @@ pub(crate) fn raster_key(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    mod geometry {
+        use super::super::*;
 
-    #[test]
-    fn column_grows_with_zoom() {
-        assert_eq!(content_column(1800.0, 1.0), 900.0);
-        assert_eq!(content_column(1800.0, 2.0), 1736.0);
-        assert_eq!(content_column(1800.0, 3.0), 1736.0);
-        assert_eq!(content_column(600.0, 1.0), 536.0);
-        assert_eq!(content_column(1800.0, 0.5), 450.0);
-        assert_eq!(content_column(40.0, 1.0), 0.0);
-    }
+        #[test]
+        fn column_grows_with_zoom() {
+            assert_eq!(content_column(1800.0, 1.0), 900.0);
+            assert_eq!(content_column(1800.0, 2.0), 1736.0);
+            assert_eq!(content_column(1800.0, 3.0), 1736.0);
+            assert_eq!(content_column(600.0, 1.0), 536.0);
+            assert_eq!(content_column(1800.0, 0.5), 450.0);
+            assert_eq!(content_column(40.0, 1.0), 0.0);
+        }
 
-    #[test]
-    fn column_width_leaves_room_for_spacing() {
-        assert!((column_widths(900.0, 8.0, 3) - 294.666_7).abs() < 0.01);
-        assert_eq!(column_widths(100.0, 8.0, 10), 80.0);
-    }
+        #[test]
+        fn column_width_leaves_room_for_spacing() {
+            assert!((column_widths(900.0, 8.0, 3) - 294.666_7).abs() < 0.01);
+            assert_eq!(column_widths(100.0, 8.0, 10), 80.0);
+        }
 
-    #[test]
-    fn bottom_pad_is_half_the_viewport() {
-        assert_eq!(bottom_pad(800.0), 400.0);
-        assert_eq!(bottom_pad(0.0), 0.0);
-    }
+        #[test]
+        fn bottom_pad_is_half_the_viewport() {
+            assert_eq!(bottom_pad(800.0), 400.0);
+            assert_eq!(bottom_pad(0.0), 0.0);
+        }
 
-    #[test]
-    fn placeholder_above_viewport_is_reanchored() {
-        assert_eq!(reanchor(500.0, 100.0, 50.0, 200.0), 700.0);
-    }
+        #[test]
+        fn placeholder_above_viewport_is_reanchored() {
+            assert_eq!(reanchor(500.0, 100.0, 50.0, 200.0), 700.0);
+        }
 
-    #[test]
-    fn placeholder_below_viewport_is_not_reanchored() {
-        assert_eq!(reanchor(500.0, 100.0, 400.0, 200.0), 500.0);
-    }
+        #[test]
+        fn placeholder_below_viewport_is_not_reanchored() {
+            assert_eq!(reanchor(500.0, 100.0, 400.0, 200.0), 500.0);
+        }
 
-    #[test]
-    fn partially_visible_placeholder_is_reanchored() {
-        // Top above the fold, bottom still visible.
-        assert_eq!(reanchor(500.0, 100.0, 50.0, -120.0), 380.0);
-    }
+        #[test]
+        fn partially_visible_placeholder_is_reanchored() {
+            // Top above the fold, bottom still visible.
+            assert_eq!(reanchor(500.0, 100.0, 50.0, -120.0), 380.0);
+        }
 
-    #[test]
-    fn zero_and_negative_delta_are_clamped() {
-        assert_eq!(reanchor(500.0, 100.0, 50.0, 0.0), 500.0);
-        assert_eq!(reanchor(50.0, 100.0, 20.0, -100.0), 0.0);
-    }
+        #[test]
+        fn zero_and_negative_delta_are_clamped() {
+            assert_eq!(reanchor(500.0, 100.0, 50.0, 0.0), 500.0);
+            assert_eq!(reanchor(50.0, 100.0, 20.0, -100.0), 0.0);
+        }
 
-    #[test]
-    fn buckets_cover_the_zoom() {
-        assert_eq!(bucket_for(0.5), 1);
-        assert_eq!(bucket_for(1.0), 1);
-        assert_eq!(bucket_for(1.4), 2);
-        assert_eq!(bucket_for(2.6), 3);
-        assert_eq!(bucket_for(3.0), 3);
-    }
+        #[test]
+        fn buckets_cover_the_zoom() {
+            assert_eq!(bucket_for(0.5), 1);
+            assert_eq!(bucket_for(1.0), 1);
+            assert_eq!(bucket_for(1.4), 2);
+            assert_eq!(bucket_for(2.6), 3);
+            assert_eq!(bucket_for(3.0), 3);
+        }
 
-    #[test]
-    fn bucket_scale_multiplies_by_dpi() {
-        assert_eq!(bucket_scale(2, 1.0), 2.0);
-        assert_eq!(bucket_scale(1, 1.25), 1.25);
+        #[test]
+        fn bucket_scale_multiplies_by_dpi() {
+            assert_eq!(bucket_scale(2, 1.0), 2.0);
+            assert_eq!(bucket_scale(1, 1.25), 1.25);
+        }
     }
 }

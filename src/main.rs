@@ -10,11 +10,14 @@ mod theme;
 
 use std::path::PathBuf;
 
+/// Parsed command-line options.
 pub struct Options {
     path: PathBuf,
     dark: bool,
 }
 
+/// Parse `--dark` and the single document path. Any usage error returns the
+/// message the caller prints before exiting with status 2.
 pub fn parse_args(args: &[String]) -> Result<Options, String> {
     const USAGE: &str = "usage: mdview [--dark] <file.md>";
     let mut dark = false;
@@ -73,24 +76,26 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    mod parse_args {
+        use super::super::*;
 
-    fn a(v: &[&str]) -> Vec<String> { v.iter().map(|s| s.to_string()).collect() }
+        fn a(v: &[&str]) -> Vec<String> { v.iter().map(|s| s.to_string()).collect() }
 
-    #[test]
-    fn parses_path_and_dark_flag() {
-        let o = parse_args(&a(&["--dark", "doc.md"])).unwrap();
-        assert_eq!(o.path, PathBuf::from("doc.md"));
-        assert!(o.dark);
-    }
+        #[test]
+        fn parses_path_and_dark_flag() {
+            let o = parse_args(&a(&["--dark", "doc.md"])).unwrap();
+            assert_eq!(o.path, PathBuf::from("doc.md"));
+            assert!(o.dark);
+        }
 
-    #[test]
-    fn rejects_missing_arg() {
-        assert!(parse_args(&a(&[])).is_err());
-    }
+        #[test]
+        fn rejects_missing_arg() {
+            assert!(parse_args(&a(&[])).is_err());
+        }
 
-    #[test]
-    fn rejects_two_paths() {
-        assert!(parse_args(&a(&["a.md", "b.md"])).is_err());
+        #[test]
+        fn rejects_two_paths() {
+            assert!(parse_args(&a(&["a.md", "b.md"])).is_err());
+        }
     }
 }

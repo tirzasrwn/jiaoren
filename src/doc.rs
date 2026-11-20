@@ -36,32 +36,35 @@ pub fn read_doc(path: &Path) -> Result<String, DocError> {
     })
 }
 
-#[allow(dead_code)] // fields consumed by app.rs in later tasks
+/// A Markdown document split into the library-rendered text and the
+/// placeholders extracted from it.
 pub struct Prepared {
-    #[allow(dead_code)] // read by app.rs render pass
+    /// Markdown with diagrams, tables and paragraphs replaced by placeholders.
     pub markdown: String,
-    #[allow(dead_code)] // read by app.rs render pass
+    /// Mermaid source keyed by [`diagram_id`].
     pub diagrams: HashMap<String, String>,
-    #[allow(dead_code)] // rendered by app.rs in a later task
+    /// Parsed tables keyed by [`table_id`].
     pub tables: HashMap<String, TableSpec>,
-    #[allow(dead_code)] // rendered by app.rs in a later task
+    /// Paragraph Markdown keyed by [`paragraph_id`].
     pub paragraphs: HashMap<String, String>,
 }
 
 /// A top-level GFM table, parsed out of the Markdown before rendering.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableSpec {
+    /// Header cells, trimmed.
     pub header: Vec<String>,
+    /// Data rows; short rows are padded with empty cells, long rows kept.
     pub rows: Vec<Vec<String>>,
 }
 
-#[allow(dead_code)] // consumed by app.rs in later tasks
+/// Stable 16-hex-character id for a mermaid diagram source.
 pub fn diagram_id(source: &str) -> String {
     let hex = blake3::hash(source.trim().as_bytes()).to_hex();
     hex.as_str()[..16].to_string()
 }
 
-#[allow(dead_code)] // consumed by app.rs in later tasks
+/// Stable 16-hex-character id for a table's header and cell contents.
 pub fn table_id(spec: &TableSpec) -> String {
     let mut canon = spec.header.join("\u{1f}");
     for row in &spec.rows {
@@ -72,7 +75,7 @@ pub fn table_id(spec: &TableSpec) -> String {
     hex.as_str()[..16].to_string()
 }
 
-#[allow(dead_code)] // consumed by app.rs in later tasks
+/// Stable 16-hex-character id for a paragraph's rewritten Markdown source.
 pub fn paragraph_id(source: &str) -> String {
     let hex = blake3::hash(source.trim().as_bytes()).to_hex();
     hex.as_str()[..16].to_string()
@@ -160,7 +163,8 @@ fn strip_hanging_indent(line: &str) -> &str {
     &line[n.min(3)..]
 }
 
-#[allow(dead_code)] // consumed by app.rs in later tasks
+/// Extract mermaid fences, GFM tables and top-level paragraphs from `md`,
+/// rewriting relative image links against `doc_dir`.
 pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
     let mut out = String::with_capacity(md.len());
     let mut diagrams = HashMap::new();
@@ -474,386 +478,404 @@ fn rewrite_images(mut rest: &str, doc_dir: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    mod fences {
+        use super::super::*;
 
-    #[test]
-    fn extracts_mermaid_and_leaves_other_code() {
-        let md = "text\n\n```mermaid\ngraph TD; A-->B;\n```\n\n```rust\nfn x() {}\n```\n";
-        let p = prepare(md, Path::new("/docs"));
-        assert_eq!(p.diagrams.len(), 1);
-        let id = diagram_id("graph TD; A-->B;");
-        assert!(p.markdown.contains(&format!("<mermaid id=\"{id}\">")));
-        assert!(p.markdown.contains("```rust\nfn x() {}"));
-        assert!(!p.markdown.contains("```mermaid"));
-    }
+        #[test]
+        fn extracts_mermaid_and_leaves_other_code() {
+            let md = "text\n\n```mermaid\ngraph TD; A-->B;\n```\n\n```rust\nfn x() {}\n```\n";
+            let p = prepare(md, Path::new("/docs"));
+            assert_eq!(p.diagrams.len(), 1);
+            let id = diagram_id("graph TD; A-->B;");
+            assert!(p.markdown.contains(&format!("<mermaid id=\"{id}\">")));
+            assert!(p.markdown.contains("```rust\nfn x() {}"));
+            assert!(!p.markdown.contains("```mermaid"));
+        }
 
-    #[test]
-    fn id_is_stable_and_content_sensitive() {
-        assert_eq!(diagram_id("graph TD; A-->B;"), diagram_id("graph TD; A-->B;"));
-        assert_ne!(diagram_id("graph TD; A-->B;"), diagram_id("graph TD; A-->C;"));
-        assert_eq!(diagram_id("x").len(), 16);
-    }
+        #[test]
+        fn id_is_stable_and_content_sensitive() {
+            assert_eq!(diagram_id("graph TD; A-->B;"), diagram_id("graph TD; A-->B;"));
+            assert_ne!(diagram_id("graph TD; A-->B;"), diagram_id("graph TD; A-->C;"));
+            assert_eq!(diagram_id("x").len(), 16);
+        }
 
-    #[test]
-    fn rewrites_relative_images_only() {
-        let md = "![a](img/x.png) ![b](/abs.png) ![c](https://h/c.png)";
-        let p = prepare(md, Path::new("/docs"));
-        // An image-only line is a paragraph now; its source is rewritten.
-        let out = p.paragraphs.values().next().unwrap();
-        assert!(out.contains("![a](file:///docs/img/x.png)"));
-        assert!(out.contains("![b](/abs.png)"));
-        assert!(out.contains("![c](https://h/c.png)"));
-    }
+        #[test]
+        fn mermaid_fence_matches_first_info_token() {
+            let md = "```mermaid title=\"x\"\ngraph TD; A-->B;\n```\n";
+            let p = prepare(md, Path::new("/x"));
+            assert_eq!(p.diagrams.len(), 1);
+            assert!(p.markdown.contains("<mermaid"));
+        }
 
-    #[test]
-    fn balanced_parens_and_title_in_image_targets() {
-        let md = "![a](x(1).png \"caption\") ![b](a#b.png)";
-        let p = prepare(md, Path::new("/docs"));
-        let out = p.paragraphs.values().next().unwrap();
-        assert!(out.contains("![a](file:///docs/x(1).png)"));
-        assert!(out.contains("![b](file:///docs/a%23b.png)"));
-    }
+        #[test]
+        fn unclosed_mermaid_fence_at_eof_keeps_content() {
+            // Data-loss guard: unclosed fence must be emitted as ordinary fenced text.
+            let md = "text\n\n```mermaid\ngraph TD; A-->B;";
+            let p = prepare(md, Path::new("/docs"));
+            assert!(p.diagrams.is_empty());
+            assert!(p.markdown.contains("```mermaid"));
+            assert!(p.markdown.contains("graph TD; A-->B;"));
+        }
 
-    #[test]
-    fn mermaid_fence_matches_first_info_token() {
-        let md = "```mermaid title=\"x\"\ngraph TD; A-->B;\n```\n";
-        let p = prepare(md, Path::new("/x"));
-        assert_eq!(p.diagrams.len(), 1);
-        assert!(p.markdown.contains("<mermaid"));
-    }
+        #[test]
+        fn tilde_mermaid_fences_extract() {
+            let md = "~~~mermaid\ngraph TD;\n~~~\n";
+            let p = prepare(md, Path::new("/x"));
+            assert_eq!(p.diagrams.len(), 1);
+            assert!(p.markdown.contains("<mermaid"));
+        }
 
-    #[test]
-    fn unclosed_mermaid_fence_at_eof_keeps_content() {
-        // Data-loss guard: unclosed fence must be emitted as ordinary fenced text.
-        let md = "text\n\n```mermaid\ngraph TD; A-->B;";
-        let p = prepare(md, Path::new("/docs"));
-        assert!(p.diagrams.is_empty());
-        assert!(p.markdown.contains("```mermaid"));
-        assert!(p.markdown.contains("graph TD; A-->B;"));
-    }
+        #[test]
+        fn extracts_two_diagrams() {
+            let md = "```mermaid\nA\n```\n\n```mermaid\nB\n```\n";
+            let p = prepare(md, Path::new("/x"));
+            assert_eq!(p.diagrams.len(), 2);
+            assert!(!p.markdown.contains("```"));
+        }
 
-    #[test]
-    fn tilde_mermaid_fences_extract() {
-        let md = "~~~mermaid\ngraph TD;\n~~~\n";
-        let p = prepare(md, Path::new("/x"));
-        assert_eq!(p.diagrams.len(), 1);
-        assert!(p.markdown.contains("<mermaid"));
-    }
-
-    #[test]
-    fn extracts_two_diagrams() {
-        let md = "```mermaid\nA\n```\n\n```mermaid\nB\n```\n";
-        let p = prepare(md, Path::new("/x"));
-        assert_eq!(p.diagrams.len(), 2);
-        assert!(!p.markdown.contains("```"));
-    }
-
-    #[test]
-    fn handles_crlf_input() {
-        let md = "```mermaid\r\ngraph TD;\r\n```\r\n";
-        let p = prepare(md, Path::new("/x"));
-        assert_eq!(p.diagrams.len(), 1);
-        let id = diagram_id("graph TD;");
-        assert!(p.markdown.contains(&format!("<mermaid id=\"{id}\">")));
-    }
-
-    #[test]
-    fn paragraph_after_mermaid_fence_survives() {
-        // A non-blank paragraph directly after the fence must not be swallowed by
-        // the placeholder's HTML block; the placeholder ends with a blank line.
-        let md = "```mermaid\ngraph TD; A-->B;\n```\nThis paragraph must survive.\n";
-        let p = prepare(md, Path::new("/x"));
-        let id = diagram_id("graph TD; A-->B;");
-        assert!(p.markdown.contains(&format!("<mermaid id=\"{id}\">\n\n")));
-        assert!(p
-            .paragraphs
-            .values()
-            .any(|src| src == "This paragraph must survive."));
-    }
-
-    #[test]
-    fn converts_a_long_table_to_a_placeholder() {
-        let md = "| a | b |\n|---|---|\n| satu | dua |\n";
-        let p = prepare(md, Path::new("/d"));
-        assert_eq!(p.tables.len(), 1);
-        let id = p.tables.keys().next().unwrap();
-        assert!(p.markdown.contains(&format!("<mdtable id=\"{id}\">")));
-        assert!(!p.markdown.contains("| a |"));
-    }
-
-    #[test]
-    fn keeps_escaped_pipes_and_uneven_rows() {
-        let spec = parse_table_block(&["| a \\| b | c |", "|---|---|", "| 1 |"]).unwrap();
-        assert_eq!(spec.header, vec!["a | b".to_string(), "c".to_string()]);
-        assert_eq!(spec.rows, vec![vec!["1".to_string(), "".to_string()]]);
-    }
-
-    #[test]
-    fn leaves_tables_inside_code_alone() {
-        let md = "```\n| a | b |\n|---|---|\n```\n";
-        let p = prepare(md, Path::new("/d"));
-        assert!(p.tables.is_empty());
-    }
-
-    #[test]
-    fn table_at_eof_without_trailing_newline_extracts() {
-        let p = prepare("| a | b |\n|---|---|", Path::new("/d"));
-        assert_eq!(p.tables.len(), 1);
-        assert!(p.markdown.contains("<mdtable"));
-    }
-
-    #[test]
-    fn table_after_heading_extracts_and_neighbours_survive() {
-        let md = "# h\n\n| a | b |\n|---|---|\n| c | d |\n\nafter\n";
-        let p = prepare(md, Path::new("/d"));
-        assert_eq!(p.tables.len(), 1);
-        assert!(p.markdown.contains("# h"));
-        assert!(p.paragraphs.values().any(|src| src == "after"));
-        assert!(!p.markdown.contains("| a |"));
-    }
-
-    #[test]
-    fn two_tables_in_a_row_extract() {
-        let md = "| a |\n|---|\n| 1 |\n\n| b |\n|---|\n| 2 |\n";
-        let p = prepare(md, Path::new("/d"));
-        assert_eq!(p.tables.len(), 2);
-    }
-
-    #[test]
-    fn pipes_in_paragraph_list_quote_indent_stay_verbatim() {
-        let out = prepare("a | b alone\n", Path::new("/d")).markdown;
-        assert!(out.contains("a | b alone"));
-        let md = "- | a | b |\n  |---|---|\n> | q |\n\n    | code |\n";
-        let p = prepare(md, Path::new("/d"));
-        assert!(p.tables.is_empty());
-        assert!(p.markdown.contains("- | a | b |"));
-    }
-
-    #[test]
-    fn malformed_delimiter_falls_back_to_verbatim() {
-        let md = "| a | b |\n|---|\n| c |\n";
-        let p = prepare(md, Path::new("/d"));
-        assert!(p.tables.is_empty());
-        assert!(p.markdown.contains("| a | b |"));
-        assert!(p.markdown.contains("|---|"));
-    }
-
-    #[test]
-    fn crlf_table_extracts() {
-        let md = "| a |\r\n|---|\r\n| b |\r\n";
-        let p = prepare(md, Path::new("/d"));
-        assert_eq!(p.tables.len(), 1);
-        let spec = p.tables.values().next().unwrap();
-        assert_eq!(spec.header, vec!["a".to_string()]);
-        assert_eq!(spec.rows, vec![vec!["b".to_string()]]);
-    }
-
-    #[test]
-    fn extra_cells_are_kept_not_dropped() {
-        let spec = parse_table_block(&["| a | b |", "|---|---|", "| 1 | 2 | 3 |"]).unwrap();
-        assert_eq!(
-            spec.rows,
-            vec![vec!["1".to_string(), "2".to_string(), "3".to_string()]]
-        );
-    }
-
-    #[test]
-    fn pipeless_gfm_header_table_extracts() {
-        let md = "a | b\n--- | ---\n1 | 2\n";
-        let p = prepare(md, Path::new("/d"));
-        assert_eq!(p.tables.len(), 1);
-        let spec = p.tables.values().next().unwrap();
-        assert_eq!(spec.header, vec!["a".to_string(), "b".to_string()]);
-        assert_eq!(spec.rows, vec![vec!["1".to_string(), "2".to_string()]]);
-        assert!(!p.markdown.contains("a | b"));
-    }
-
-    #[test]
-    fn block_structures_stop_a_table_run() {
-        let md = "| a | b |\n|---|---|\n| 1 | 2 |\n## h | x\n- list | item\n> q | r\n";
-        let p = prepare(md, Path::new("/d"));
-        assert_eq!(p.tables.len(), 1);
-        let spec = p.tables.values().next().unwrap();
-        assert_eq!(spec.rows.len(), 1);
-        assert!(p.markdown.contains("## h | x"));
-        assert!(p.markdown.contains("- list | item"));
-        assert!(p.markdown.contains("> q | r"));
-        // Indented code after a row is a new block, not a data row.
-        let md2 = "| a | b |\n|---|---|\n| 1 | 2 |\n    | code |\n";
-        let p2 = prepare(md2, Path::new("/d"));
-        assert_eq!(p2.tables.values().next().unwrap().rows.len(), 1);
-        assert!(p2.markdown.contains("| code |"));
-    }
-
-    #[test]
-    fn images_in_cells_get_file_url_rewrite() {
-        let md = "| img | txt |\n|---|---|\n| ![x](rel.png) | y |\n";
-        let p = prepare(md, Path::new("/docs"));
-        let spec = p.tables.values().next().unwrap();
-        assert_eq!(spec.rows[0][0], "![x](file:///docs/rel.png)");
-        assert_eq!(spec.rows[0][1], "y");
-    }
-
-    #[test]
-    fn shallowly_indented_table_extracts() {
-        let md = "  | a | b |\n  |---|---|\n  | 1 | 2 |\n";
-        let p = prepare(md, Path::new("/d"));
-        assert_eq!(p.tables.len(), 1);
-    }
-
-    #[test]
-    fn placeholder_after_paragraph_gets_blank_line() {
-        let md = "intro\n| a | b |\n|---|---|\n| 1 | 2 |\n";
-        let p = prepare(md, Path::new("/d"));
-        // Both neighbours survive: the paragraph placeholder is followed by a
-        // blank line, so the table placeholder starts its own HTML block.
-        let id = p.paragraphs.keys().next().unwrap();
-        assert_eq!(p.paragraphs.values().next().unwrap(), "intro");
-        assert!(p
-            .markdown
-            .contains(&format!("<mdpara id=\"{id}\">\n\n<mdtable id=\"")));
-    }
-
-    #[test]
-    fn extracts_a_top_level_paragraph() {
-        let md = "# h\n\nHello *world*, this is a paragraph.\nStill the same paragraph.\n\n- list\n";
-        let p = prepare(md, Path::new("/d"));
-        assert_eq!(p.paragraphs.len(), 1);
-        let id = p.paragraphs.keys().next().unwrap();
-        assert!(p.markdown.contains(&format!("<mdpara id=\"{id}\">")));
-        assert!(p.markdown.contains("- list"));
-        assert!(!p.markdown.contains("world\", this is a paragraph"));
-    }
-
-    #[test]
-    fn skips_lists_quotes_headings_and_fences() {
-        let md = "- item one\n\n> quote\n\n## h\n\n```\ncode\n```\n";
-        assert!(prepare(md, Path::new("/d")).paragraphs.is_empty());
-    }
-
-    #[test]
-    fn keeps_blank_line_separation() {
-        let md = "first para\n\nsecond para\n";
-        let p = prepare(md, Path::new("/d"));
-        assert_eq!(p.paragraphs.len(), 2);
-        assert!(p.markdown.ends_with("\n\n"));
-        for id in p.paragraphs.keys() {
-            assert!(p.markdown.contains(&format!("<mdpara id=\"{id}\">\n\n")));
+        #[test]
+        fn crlf_fences_extract() {
+            let md = "```mermaid\r\ngraph TD;\r\n```\r\n";
+            let p = prepare(md, Path::new("/x"));
+            assert_eq!(p.diagrams.len(), 1);
+            let id = diagram_id("graph TD;");
+            assert!(p.markdown.contains(&format!("<mermaid id=\"{id}\">")));
         }
     }
 
-    #[test]
-    fn paragraph_at_eof_without_trailing_newline() {
-        let p = prepare("# h\n\nlast line", Path::new("/d"));
-        assert_eq!(p.paragraphs.len(), 1);
-        assert_eq!(p.paragraphs.values().next().unwrap(), "last line");
-        assert!(p.markdown.ends_with("\n\n"));
+    mod tables {
+        use super::super::*;
+
+        #[test]
+        fn converts_a_long_table_to_a_placeholder() {
+            let md = "| a | b |\n|---|---|\n| satu | dua |\n";
+            let p = prepare(md, Path::new("/d"));
+            assert_eq!(p.tables.len(), 1);
+            let id = p.tables.keys().next().unwrap();
+            assert!(p.markdown.contains(&format!("<mdtable id=\"{id}\">")));
+            assert!(!p.markdown.contains("| a |"));
+        }
+
+        #[test]
+        fn keeps_escaped_pipes_and_uneven_rows() {
+            let spec = parse_table_block(&["| a \\| b | c |", "|---|---|", "| 1 |"]).unwrap();
+            assert_eq!(spec.header, vec!["a | b".to_string(), "c".to_string()]);
+            assert_eq!(spec.rows, vec![vec!["1".to_string(), "".to_string()]]);
+        }
+
+        #[test]
+        fn leaves_tables_inside_code_alone() {
+            let md = "```\n| a | b |\n|---|---|\n```\n";
+            let p = prepare(md, Path::new("/d"));
+            assert!(p.tables.is_empty());
+        }
+
+        #[test]
+        fn table_at_eof_without_trailing_newline_extracts() {
+            let p = prepare("| a | b |\n|---|---|", Path::new("/d"));
+            assert_eq!(p.tables.len(), 1);
+            assert!(p.markdown.contains("<mdtable"));
+        }
+
+        #[test]
+        fn table_after_heading_extracts_and_neighbours_survive() {
+            let md = "# h\n\n| a | b |\n|---|---|\n| c | d |\n\nafter\n";
+            let p = prepare(md, Path::new("/d"));
+            assert_eq!(p.tables.len(), 1);
+            assert!(p.markdown.contains("# h"));
+            assert!(p.paragraphs.values().any(|src| src == "after"));
+            assert!(!p.markdown.contains("| a |"));
+        }
+
+        #[test]
+        fn two_tables_in_a_row_extract() {
+            let md = "| a |\n|---|\n| 1 |\n\n| b |\n|---|\n| 2 |\n";
+            let p = prepare(md, Path::new("/d"));
+            assert_eq!(p.tables.len(), 2);
+        }
+
+        #[test]
+        fn pipes_in_paragraph_list_quote_indent_stay_verbatim() {
+            let out = prepare("a | b alone\n", Path::new("/d")).markdown;
+            assert!(out.contains("a | b alone"));
+            let md = "- | a | b |\n  |---|---|\n> | q |\n\n    | code |\n";
+            let p = prepare(md, Path::new("/d"));
+            assert!(p.tables.is_empty());
+            assert!(p.markdown.contains("- | a | b |"));
+        }
+
+        #[test]
+        fn malformed_delimiter_falls_back_to_verbatim() {
+            let md = "| a | b |\n|---|\n| c |\n";
+            let p = prepare(md, Path::new("/d"));
+            assert!(p.tables.is_empty());
+            assert!(p.markdown.contains("| a | b |"));
+            assert!(p.markdown.contains("|---|"));
+        }
+
+        #[test]
+        fn crlf_table_extracts() {
+            let md = "| a |\r\n|---|\r\n| b |\r\n";
+            let p = prepare(md, Path::new("/d"));
+            assert_eq!(p.tables.len(), 1);
+            let spec = p.tables.values().next().unwrap();
+            assert_eq!(spec.header, vec!["a".to_string()]);
+            assert_eq!(spec.rows, vec![vec!["b".to_string()]]);
+        }
+
+        #[test]
+        fn extra_cells_are_kept_not_dropped() {
+            let spec = parse_table_block(&["| a | b |", "|---|---|", "| 1 | 2 | 3 |"]).unwrap();
+            assert_eq!(
+                spec.rows,
+                vec![vec!["1".to_string(), "2".to_string(), "3".to_string()]]
+            );
+        }
+
+        #[test]
+        fn pipeless_gfm_header_table_extracts() {
+            let md = "a | b\n--- | ---\n1 | 2\n";
+            let p = prepare(md, Path::new("/d"));
+            assert_eq!(p.tables.len(), 1);
+            let spec = p.tables.values().next().unwrap();
+            assert_eq!(spec.header, vec!["a".to_string(), "b".to_string()]);
+            assert_eq!(spec.rows, vec![vec!["1".to_string(), "2".to_string()]]);
+            assert!(!p.markdown.contains("a | b"));
+        }
+
+        #[test]
+        fn block_structures_stop_a_table_run() {
+            let md = "| a | b |\n|---|---|\n| 1 | 2 |\n## h | x\n- list | item\n> q | r\n";
+            let p = prepare(md, Path::new("/d"));
+            assert_eq!(p.tables.len(), 1);
+            let spec = p.tables.values().next().unwrap();
+            assert_eq!(spec.rows.len(), 1);
+            assert!(p.markdown.contains("## h | x"));
+            assert!(p.markdown.contains("- list | item"));
+            assert!(p.markdown.contains("> q | r"));
+            // Indented code after a row is a new block, not a data row.
+            let md2 = "| a | b |\n|---|---|\n| 1 | 2 |\n    | code |\n";
+            let p2 = prepare(md2, Path::new("/d"));
+            assert_eq!(p2.tables.values().next().unwrap().rows.len(), 1);
+            assert!(p2.markdown.contains("| code |"));
+        }
+
+        #[test]
+        fn images_in_cells_get_file_url_rewrite() {
+            let md = "| img | txt |\n|---|---|\n| ![x](rel.png) | y |\n";
+            let p = prepare(md, Path::new("/docs"));
+            let spec = p.tables.values().next().unwrap();
+            assert_eq!(spec.rows[0][0], "![x](file:///docs/rel.png)");
+            assert_eq!(spec.rows[0][1], "y");
+        }
+
+        #[test]
+        fn shallowly_indented_table_extracts() {
+            let md = "  | a | b |\n  |---|---|\n  | 1 | 2 |\n";
+            let p = prepare(md, Path::new("/d"));
+            assert_eq!(p.tables.len(), 1);
+        }
+
+        #[test]
+        fn placeholder_after_paragraph_gets_blank_line() {
+            let md = "intro\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+            let p = prepare(md, Path::new("/d"));
+            // Both neighbours survive: the paragraph placeholder is followed by a
+            // blank line, so the table placeholder starts its own HTML block.
+            let id = p.paragraphs.keys().next().unwrap();
+            assert_eq!(p.paragraphs.values().next().unwrap(), "intro");
+            assert!(p
+                .markdown
+                .contains(&format!("<mdpara id=\"{id}\">\n\n<mdtable id=\"")));
+        }
     }
 
-    #[test]
-    fn paragraph_directly_after_heading_and_after_table() {
-        let md = "## h\nbody right after\n\n| a |\n|---|\n| 1 |\nafter table\n";
-        let p = prepare(md, Path::new("/d"));
-        assert_eq!(p.tables.len(), 1);
-        assert_eq!(p.paragraphs.len(), 2);
-        assert!(p.paragraphs.values().any(|s| s == "body right after"));
-        assert!(p.paragraphs.values().any(|s| s == "after table"));
-        assert!(p.markdown.contains("## h"));
-        assert!(!p.markdown.contains("body right after"));
+    mod paragraphs {
+        use super::super::*;
+
+        #[test]
+        fn paragraph_after_mermaid_fence_survives() {
+            // A non-blank paragraph directly after the fence must not be swallowed by
+            // the placeholder's HTML block; the placeholder ends with a blank line.
+            let md = "```mermaid\ngraph TD; A-->B;\n```\nThis paragraph must survive.\n";
+            let p = prepare(md, Path::new("/x"));
+            let id = diagram_id("graph TD; A-->B;");
+            assert!(p.markdown.contains(&format!("<mermaid id=\"{id}\">\n\n")));
+            assert!(p
+                .paragraphs
+                .values()
+                .any(|src| src == "This paragraph must survive."));
+        }
+
+        #[test]
+        fn extracts_a_top_level_paragraph() {
+            let md = "# h\n\nHello *world*, this is a paragraph.\nStill the same paragraph.\n\n- list\n";
+            let p = prepare(md, Path::new("/d"));
+            assert_eq!(p.paragraphs.len(), 1);
+            let id = p.paragraphs.keys().next().unwrap();
+            assert!(p.markdown.contains(&format!("<mdpara id=\"{id}\">")));
+            assert!(p.markdown.contains("- list"));
+            assert!(!p.markdown.contains("world\", this is a paragraph"));
+        }
+
+        #[test]
+        fn skips_lists_quotes_headings_and_fences() {
+            let md = "- item one\n\n> quote\n\n## h\n\n```\ncode\n```\n";
+            assert!(prepare(md, Path::new("/d")).paragraphs.is_empty());
+        }
+
+        #[test]
+        fn keeps_blank_line_separation() {
+            let md = "first para\n\nsecond para\n";
+            let p = prepare(md, Path::new("/d"));
+            assert_eq!(p.paragraphs.len(), 2);
+            assert!(p.markdown.ends_with("\n\n"));
+            for id in p.paragraphs.keys() {
+                assert!(p.markdown.contains(&format!("<mdpara id=\"{id}\">\n\n")));
+            }
+        }
+
+        #[test]
+        fn paragraph_at_eof_without_trailing_newline() {
+            let p = prepare("# h\n\nlast line", Path::new("/d"));
+            assert_eq!(p.paragraphs.len(), 1);
+            assert_eq!(p.paragraphs.values().next().unwrap(), "last line");
+            assert!(p.markdown.ends_with("\n\n"));
+        }
+
+        #[test]
+        fn paragraph_directly_after_heading_and_after_table() {
+            let md = "## h\nbody right after\n\n| a |\n|---|\n| 1 |\nafter table\n";
+            let p = prepare(md, Path::new("/d"));
+            assert_eq!(p.tables.len(), 1);
+            assert_eq!(p.paragraphs.len(), 2);
+            assert!(p.paragraphs.values().any(|s| s == "body right after"));
+            assert!(p.paragraphs.values().any(|s| s == "after table"));
+            assert!(p.markdown.contains("## h"));
+            assert!(!p.markdown.contains("body right after"));
+        }
+
+        #[test]
+        fn crlf_paragraph_extracts() {
+            let md = "alpha beta\r\ngamma\r\n\r\ndelta\r\n";
+            let p = prepare(md, Path::new("/d"));
+            assert_eq!(p.paragraphs.len(), 2);
+            assert!(p.paragraphs.values().any(|s| s == "alpha beta\ngamma"));
+            assert!(p.paragraphs.values().any(|s| s == "delta"));
+        }
+
+        #[test]
+        fn paragraph_id_is_stable_and_content_sensitive() {
+            assert_eq!(paragraph_id("a b"), paragraph_id("a b"));
+            assert_ne!(paragraph_id("a b"), paragraph_id("a c"));
+            assert_eq!(paragraph_id("x").len(), 16);
+        }
+
+        #[test]
+        fn thematic_break_and_indented_line_are_not_paragraphs() {
+            let md = "---\n\n***\n\n  indented\n";
+            assert!(prepare(md, Path::new("/d")).paragraphs.is_empty());
+        }
+
+        #[test]
+        fn list_and_heading_end_a_paragraph_run() {
+            let md = "para\n- item\n\npara2\n# h\n";
+            let p = prepare(md, Path::new("/d"));
+            assert_eq!(p.paragraphs.len(), 2);
+            assert!(p.paragraphs.values().any(|s| s == "para"));
+            assert!(p.paragraphs.values().any(|s| s == "para2"));
+            assert!(p.markdown.contains("- item"));
+            assert!(p.markdown.contains("# h"));
+        }
+
+        #[test]
+        fn setext_equals_heading_is_not_a_paragraph() {
+            let md = "Title\n===\n";
+            let p = prepare(md, Path::new("/d"));
+            assert!(p.paragraphs.is_empty());
+            assert!(p.markdown.contains("Title\n==="));
+        }
+
+        #[test]
+        fn setext_dash_heading_is_not_a_paragraph() {
+            let md = "Title\n---\n";
+            let p = prepare(md, Path::new("/d"));
+            assert!(p.paragraphs.is_empty());
+            assert!(p.markdown.contains("Title\n---"));
+        }
+
+        #[test]
+        fn hanging_indent_continuation_stays_in_the_paragraph() {
+            let md = "Hello world\n  continued here\n";
+            let p = prepare(md, Path::new("/d"));
+            assert_eq!(p.paragraphs.len(), 1);
+            let src = p.paragraphs.values().next().unwrap();
+            assert!(src.contains("Hello world"));
+            assert!(src.contains("continued here"));
+        }
+
+        #[test]
+        fn hanging_indent_is_stripped_from_the_stored_source() {
+            let md = "Hello world\n   continued here\n  and more\n";
+            let p = prepare(md, Path::new("/d"));
+            assert_eq!(
+                p.paragraphs.values().next().unwrap(),
+                "Hello world\ncontinued here\nand more"
+            );
+        }
+
+        #[test]
+        fn four_space_indent_is_not_a_continuation() {
+            let md = "Hello world\n    code\n";
+            let p = prepare(md, Path::new("/d"));
+            assert_eq!(p.paragraphs.len(), 1);
+            assert_eq!(p.paragraphs.values().next().unwrap(), "Hello world");
+            assert!(p.markdown.contains("    code"));
+        }
     }
 
-    #[test]
-    fn crlf_paragraph_extracts() {
-        let md = "alpha beta\r\ngamma\r\n\r\ndelta\r\n";
-        let p = prepare(md, Path::new("/d"));
-        assert_eq!(p.paragraphs.len(), 2);
-        assert!(p.paragraphs.values().any(|s| s == "alpha beta\ngamma"));
-        assert!(p.paragraphs.values().any(|s| s == "delta"));
+    mod images {
+        use super::super::*;
+
+        #[test]
+        fn rewrites_relative_images_only() {
+            let md = "![a](img/x.png) ![b](/abs.png) ![c](https://h/c.png)";
+            let p = prepare(md, Path::new("/docs"));
+            // An image-only line is a paragraph now; its source is rewritten.
+            let out = p.paragraphs.values().next().unwrap();
+            assert!(out.contains("![a](file:///docs/img/x.png)"));
+            assert!(out.contains("![b](/abs.png)"));
+            assert!(out.contains("![c](https://h/c.png)"));
+        }
+
+        #[test]
+        fn balanced_parens_and_title_in_image_targets() {
+            let md = "![a](x(1).png \"caption\") ![b](a#b.png)";
+            let p = prepare(md, Path::new("/docs"));
+            let out = p.paragraphs.values().next().unwrap();
+            assert!(out.contains("![a](file:///docs/x(1).png)"));
+            assert!(out.contains("![b](file:///docs/a%23b.png)"));
+        }
     }
 
-    #[test]
-    fn paragraph_id_is_stable_and_content_sensitive() {
-        assert_eq!(paragraph_id("a b"), paragraph_id("a b"));
-        assert_ne!(paragraph_id("a b"), paragraph_id("a c"));
-        assert_eq!(paragraph_id("x").len(), 16);
-    }
+    mod read {
+        use super::super::*;
 
-    #[test]
-    fn thematic_break_and_indented_line_are_not_paragraphs() {
-        let md = "---\n\n***\n\n  indented\n";
-        assert!(prepare(md, Path::new("/d")).paragraphs.is_empty());
-    }
+        #[test]
+        fn read_doc_missing_file_message_is_unchanged() {
+            let path = Path::new("/nope/missing.md");
+            let io = std::fs::read(path).unwrap_err();
+            let err = read_doc(path).unwrap_err();
+            assert_eq!(err.to_string(), format!("cannot read {}: {io}", path.display()));
+        }
 
-    #[test]
-    fn list_and_heading_end_a_paragraph_run() {
-        let md = "para\n- item\n\npara2\n# h\n";
-        let p = prepare(md, Path::new("/d"));
-        assert_eq!(p.paragraphs.len(), 2);
-        assert!(p.paragraphs.values().any(|s| s == "para"));
-        assert!(p.paragraphs.values().any(|s| s == "para2"));
-        assert!(p.markdown.contains("- item"));
-        assert!(p.markdown.contains("# h"));
-    }
-
-    #[test]
-    fn setext_equals_heading_is_not_a_paragraph() {
-        let md = "Title\n===\n";
-        let p = prepare(md, Path::new("/d"));
-        assert!(p.paragraphs.is_empty());
-        assert!(p.markdown.contains("Title\n==="));
-    }
-
-    #[test]
-    fn setext_dash_heading_is_not_a_paragraph() {
-        let md = "Title\n---\n";
-        let p = prepare(md, Path::new("/d"));
-        assert!(p.paragraphs.is_empty());
-        assert!(p.markdown.contains("Title\n---"));
-    }
-
-    #[test]
-    fn hanging_indent_continuation_stays_in_the_paragraph() {
-        let md = "Hello world\n  continued here\n";
-        let p = prepare(md, Path::new("/d"));
-        assert_eq!(p.paragraphs.len(), 1);
-        let src = p.paragraphs.values().next().unwrap();
-        assert!(src.contains("Hello world"));
-        assert!(src.contains("continued here"));
-    }
-
-    #[test]
-    fn hanging_indent_is_stripped_from_the_stored_source() {
-        let md = "Hello world\n   continued here\n  and more\n";
-        let p = prepare(md, Path::new("/d"));
-        assert_eq!(
-            p.paragraphs.values().next().unwrap(),
-            "Hello world\ncontinued here\nand more"
-        );
-    }
-
-    #[test]
-    fn read_doc_missing_file_message_is_unchanged() {
-        let path = Path::new("/nope/missing.md");
-        let io = std::fs::read(path).unwrap_err();
-        let err = read_doc(path).unwrap_err();
-        assert_eq!(err.to_string(), format!("cannot read {}: {io}", path.display()));
-    }
-
-    #[test]
-    fn read_doc_invalid_utf8_message_is_unchanged() {
-        let path = std::env::temp_dir().join(format!("mdview-bad-utf8-{}.md", std::process::id()));
-        std::fs::write(&path, [0xff, 0xfe]).unwrap();
-        let err = read_doc(&path).unwrap_err();
-        assert_eq!(err.to_string(), format!("{} is not valid UTF-8", path.display()));
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn four_space_indent_is_not_a_continuation() {
-        let md = "Hello world\n    code\n";
-        let p = prepare(md, Path::new("/d"));
-        assert_eq!(p.paragraphs.len(), 1);
-        assert_eq!(p.paragraphs.values().next().unwrap(), "Hello world");
-        assert!(p.markdown.contains("    code"));
+        #[test]
+        fn read_doc_invalid_utf8_message_is_unchanged() {
+            let path = std::env::temp_dir().join(format!("mdview-bad-utf8-{}.md", std::process::id()));
+            std::fs::write(&path, [0xff, 0xfe]).unwrap();
+            let err = read_doc(&path).unwrap_err();
+            assert_eq!(err.to_string(), format!("{} is not valid UTF-8", path.display()));
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }

@@ -4,15 +4,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Cache-key version: bump when the render page or mermaid version changes.
 pub const RENDER_VERSION: &str = "5-mermaid11.12.0-htmlLabelsOff-2x-strict-svg-catppuccin-firacode";
 
+/// Colour theme used for the window and diagram renders.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Theme {
+    /// Light palette (Catppuccin Latte).
     Light,
+    /// Dark palette (Catppuccin Macchiato).
     Dark,
 }
 
 impl Theme {
+    /// Cache-file token for this theme (`light` or `dark`).
     pub fn as_str(self) -> &'static str {
         match self {
             Theme::Light => "light",
@@ -44,13 +49,18 @@ pub enum RenderError {
     Raster(String),
 }
 
+/// Renders mermaid sources to cached SVGs with headless Chromium.
 pub struct Renderer {
+    /// Chromium binary, when one has been discovered.
     pub chromium: Option<PathBuf>,
+    /// Path to the local mermaid.js copy.
     pub mermaid_js: PathBuf,
+    /// Directory holding cached SVGs, error text and the HTML scratch page.
     pub cache_dir: PathBuf,
 }
 
 impl Renderer {
+    /// Renderer using the user cache dir, with no Chromium discovered yet.
     pub fn new() -> Self {
         let cache_dir = dirs_cache().join("mdview");
         fs::create_dir_all(&cache_dir).ok();
@@ -60,14 +70,17 @@ impl Renderer {
         Renderer { chromium: None, mermaid_js, cache_dir }
     }
 
+    /// Cache path of the rendered SVG for `id` in `theme`.
     pub fn svg_path(&self, id: &str, theme: Theme) -> PathBuf {
         self.cache_dir.join(format!("{id}-{}-{RENDER_VERSION}.svg", theme.as_str()))
     }
 
+    /// Cache path of the error text for `id` in `theme`.
     pub fn err_path(&self, id: &str, theme: Theme) -> PathBuf {
         self.cache_dir.join(format!("{id}-{}-{RENDER_VERSION}.err", theme.as_str()))
     }
 
+    /// Cached outcome for `id` in `theme`; `None` when nothing is cached yet.
     pub fn cached(&self, id: &str, theme: Theme) -> Option<Result<PathBuf, String>> {
         let svg = self.svg_path(id, theme);
         if svg.exists() {
@@ -81,6 +94,7 @@ impl Renderer {
         None
     }
 
+    /// Render `source` to an SVG on disk, reusing or writing the cache.
     pub fn render(&self, id: &str, source: &str, theme: Theme) -> Result<PathBuf, RenderError> {
         let svg = self.svg_path(id, theme);
         if svg.exists() {
@@ -164,6 +178,7 @@ impl Renderer {
         fs::rename(&tmp, path)
     }
 
+    /// Download mermaid.js once, into `mermaid_js`, when it is missing.
     pub(crate) fn ensure_mermaid_js(&self) -> Result<(), RenderError> {
         if self.mermaid_js.exists() {
             return Ok(());
@@ -198,6 +213,7 @@ fn dirs_cache() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
+/// Locate Chromium: `MDVIEW_CHROMIUM`, then `PATH`, then Playwright's cache.
 pub fn find_chromium() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("MDVIEW_CHROMIUM") {
         let p = PathBuf::from(p);
@@ -384,171 +400,173 @@ pub fn parse_svg_size(svg: &str) -> Option<(f32, f32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    mod mermaid {
+        use super::super::*;
 
-    #[test]
-    fn render_error_messages_are_unchanged() {
-        assert_eq!(
-            RenderError::ChromiumMissing.to_string(),
-            "chromium not found; set MDVIEW_CHROMIUM"
-        );
-        assert_eq!(RenderError::MermaidJs("ERR:oops".into()).to_string(), "ERR:oops");
-        assert_eq!(
-            RenderError::Spawn("/x/chromium: nope".into()).to_string(),
-            "spawn chromium /x/chromium: nope"
-        );
-        assert_eq!(RenderError::HtmlWrite("e".into()).to_string(), "write html: e");
-        assert_eq!(RenderError::NoSvg.to_string(), "no <svg> in chromium output");
-        assert_eq!(RenderError::Raster("e".into()).to_string(), "write svg: e");
-    }
-
-    #[test]
-    fn escapes_html_metacharacters() {
-        assert_eq!(html_escape("A-->B & C<D>\"E\""), "A--&gt;B &amp; C&lt;D&gt;\"E\"");
-        assert_eq!(html_escape("</pre>"), "&lt;/pre&gt;");
-    }
-
-    fn test_renderer(cache: &Path) -> Renderer {
-        Renderer { chromium: None, mermaid_js: cache.join("mermaid.min.js"), cache_dir: cache.to_path_buf() }
-    }
-
-    #[test]
-    fn cache_paths_include_theme_and_render_version() {
-        let d = std::env::temp_dir().join("mdview-test-paths");
-        let r = test_renderer(&d);
-        let p = r.svg_path("abc", Theme::Dark);
-        assert_eq!(p.file_name().unwrap().to_str().unwrap(), format!("abc-dark-{RENDER_VERSION}.svg"));
-        assert_ne!(p, r.svg_path("abc", Theme::Light));
-    }
-
-    #[test]
-    fn cached_reports_missing_failure_and_success() {
-        let d = std::env::temp_dir().join(format!("mdview-test-cache-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        let r = test_renderer(&d);
-        assert!(r.cached("k", Theme::Light).is_none());
-        std::fs::write(r.err_path("k", Theme::Light), "boom").unwrap();
-        match r.cached("k", Theme::Light) {
-            // The cached `.err` text reaches the UI verbatim.
-            Some(Err(msg)) => assert_eq!(msg, "boom"),
-            _ => panic!("expected cached error"),
+        fn test_renderer(cache: &Path) -> Renderer {
+            Renderer { chromium: None, mermaid_js: cache.join("mermaid.min.js"), cache_dir: cache.to_path_buf() }
         }
-        std::fs::write(r.svg_path("k", Theme::Light), b"svg").unwrap();
-        assert!(matches!(r.cached("k", Theme::Light), Some(Ok(_))));
-    }
 
-    #[test]
-    fn svg_path_uses_svg_extension_and_version() {
-        let r = test_renderer(Path::new("/tmp/x"));
-        let p = r.svg_path("abc", Theme::Light);
-        assert!(p.to_string_lossy().ends_with(&format!("abc-light-{RENDER_VERSION}.svg")));
-    }
+        #[test]
+        fn render_error_messages_are_unchanged() {
+            assert_eq!(
+                RenderError::ChromiumMissing.to_string(),
+                "chromium not found; set MDVIEW_CHROMIUM"
+            );
+            assert_eq!(RenderError::MermaidJs("ERR:oops".into()).to_string(), "ERR:oops");
+            assert_eq!(
+                RenderError::Spawn("/x/chromium: nope".into()).to_string(),
+                "spawn chromium /x/chromium: nope"
+            );
+            assert_eq!(RenderError::HtmlWrite("e".into()).to_string(), "write html: e");
+            assert_eq!(RenderError::NoSvg.to_string(), "no <svg> in chromium output");
+            assert_eq!(RenderError::Raster("e".into()).to_string(), "write svg: e");
+        }
 
-    #[test]
-    fn parses_width_and_height() {
-        assert_eq!(parse_svg_size(r#"<svg width="120" height="40" viewBox="0 0 120 40">"#), Some((120.0, 40.0)));
-        assert_eq!(parse_svg_size(r#"<svg viewBox="0 0 120 40">"#), Some((120.0, 40.0)));
-        assert_eq!(parse_svg_size("<svg>"), None);
-    }
+        #[test]
+        fn escapes_html_metacharacters() {
+            assert_eq!(html_escape("A-->B & C<D>\"E\""), "A--&gt;B &amp; C&lt;D&gt;\"E\"");
+            assert_eq!(html_escape("</pre>"), "&lt;/pre&gt;");
+        }
 
-    #[test]
-    fn viewbox_accepts_comma_separators() {
-        assert_eq!(
-            parse_svg_size(r#"<svg viewBox="0,0,120,40">"#),
-            Some((120.0, 40.0))
-        );
-        assert_eq!(
-            parse_svg_size(r#"<svg viewBox="0, 0, 120, 40">"#),
-            Some((120.0, 40.0))
-        );
-    }
+        #[test]
+        fn cache_paths_include_theme_and_render_version() {
+            let d = std::env::temp_dir().join("mdview-test-paths");
+            let r = test_renderer(&d);
+            let p = r.svg_path("abc", Theme::Dark);
+            assert_eq!(p.file_name().unwrap().to_str().unwrap(), format!("abc-dark-{RENDER_VERSION}.svg"));
+            assert_ne!(p, r.svg_path("abc", Theme::Light));
+        }
 
-    #[test]
-    fn percent_width_and_malformed_fall_back_or_return_none() {
-        // Real mermaid output: width="100%", size comes from viewBox.
-        assert_eq!(parse_svg_size(r#"<svg id="d" width="100%" xmlns="u" style="max-width: 87px;" viewBox="0 0 87 160"><style>#d{font-size:16px}</style></svg>"#), Some((87.0, 160.0)));
-        // stroke-width must not be picked up as width.
-        assert_eq!(parse_svg_size(r#"<svg stroke-width="2" viewBox="0 0 5 6">"#), Some((5.0, 6.0)));
-        // Garbage must not panic.
-        assert_eq!(parse_svg_size("<<svg"), None);
-        assert_eq!(parse_svg_size(r#"<svg width="auto" height="100%" viewBox="0 0">"#), None);
-    }
+        #[test]
+        fn cached_reports_missing_failure_and_success() {
+            let d = std::env::temp_dir().join(format!("mdview-test-cache-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            let r = test_renderer(&d);
+            assert!(r.cached("k", Theme::Light).is_none());
+            std::fs::write(r.err_path("k", Theme::Light), "boom").unwrap();
+            match r.cached("k", Theme::Light) {
+                // The cached `.err` text reaches the UI verbatim.
+                Some(Err(msg)) => assert_eq!(msg, "boom"),
+                _ => panic!("expected cached error"),
+            }
+            std::fs::write(r.svg_path("k", Theme::Light), b"svg").unwrap();
+            assert!(matches!(r.cached("k", Theme::Light), Some(Ok(_))));
+        }
 
-    #[test]
-    fn env_override_wins_for_chromium() {
-        std::env::set_var("MDVIEW_CHROMIUM", "/bin/true");
-        assert_eq!(find_chromium(), Some(PathBuf::from("/bin/true")));
-        std::env::remove_var("MDVIEW_CHROMIUM");
-    }
+        #[test]
+        fn svg_path_uses_svg_extension_and_version() {
+            let r = test_renderer(Path::new("/tmp/x"));
+            let p = r.svg_path("abc", Theme::Light);
+            assert!(p.to_string_lossy().ends_with(&format!("abc-light-{RENDER_VERSION}.svg")));
+        }
 
-    #[test]
-    fn html_references_absolute_mermaid_js_path() {
-        let js = std::env::temp_dir().join("elsewhere/mermaid.min.js");
-        let html = build_html(&js, "graph TD; A-->B;", Theme::Light);
-        assert!(html.contains(&format!("file://{}", js.display())));
-        assert!(!html.contains("src=\"mermaid.min.js\""));
-    }
+        #[test]
+        fn parses_width_and_height() {
+            assert_eq!(parse_svg_size(r#"<svg width="120" height="40" viewBox="0 0 120 40">"#), Some((120.0, 40.0)));
+            assert_eq!(parse_svg_size(r#"<svg viewBox="0 0 120 40">"#), Some((120.0, 40.0)));
+            assert_eq!(parse_svg_size("<svg>"), None);
+        }
 
-    #[test]
-    fn html_uses_base_theme_with_catppuccin_variables() {
-        let js = std::env::temp_dir().join("mermaid.min.js");
-        let html = build_html(&js, "graph TD; A-->B;", Theme::Dark);
-        assert!(html.contains("theme:\"base\""));
-        assert!(html.contains(crate::theme::mermaid_variables(Theme::Dark)));
-        assert!(html.contains("themeVariables:{"));
-        assert!(!html.contains("theme:\"dark\""));
-    }
+        #[test]
+        fn viewbox_accepts_comma_separators() {
+            assert_eq!(
+                parse_svg_size(r#"<svg viewBox="0,0,120,40">"#),
+                Some((120.0, 40.0))
+            );
+            assert_eq!(
+                parse_svg_size(r#"<svg viewBox="0, 0, 120, 40">"#),
+                Some((120.0, 40.0))
+            );
+        }
 
-    #[test]
-    fn html_uses_firacode_font_family() {
-        let js = std::env::temp_dir().join("mermaid.min.js");
-        let html = build_html(&js, "graph TD; A-->B;", Theme::Light);
-        assert!(html.contains(&format!("fontFamily:\"{}\"", crate::fonts::FAMILY)));
-        assert!(!html.contains("fontFamily:\"sans-serif\""));
-    }
+        #[test]
+        fn percent_width_and_malformed_fall_back_or_return_none() {
+            // Real mermaid output: width="100%", size comes from viewBox.
+            assert_eq!(parse_svg_size(r#"<svg id="d" width="100%" xmlns="u" style="max-width: 87px;" viewBox="0 0 87 160"><style>#d{font-size:16px}</style></svg>"#), Some((87.0, 160.0)));
+            // stroke-width must not be picked up as width.
+            assert_eq!(parse_svg_size(r#"<svg stroke-width="2" viewBox="0 0 5 6">"#), Some((5.0, 6.0)));
+            // Garbage must not panic.
+            assert_eq!(parse_svg_size("<<svg"), None);
+            assert_eq!(parse_svg_size(r#"<svg width="auto" height="100%" viewBox="0 0">"#), None);
+        }
 
-    #[test]
-    fn ensure_mermaid_js_is_idempotent() {
-        let d = std::env::temp_dir().join(format!("mdview-js-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
-        let r = test_renderer(&d);
-        fs::write(&r.mermaid_js, b"// already here").unwrap();
-        r.ensure_mermaid_js().unwrap();
-        let first = fs::metadata(&r.mermaid_js).unwrap().modified().unwrap();
-        let first_bytes = fs::read(&r.mermaid_js).unwrap();
-        // A second call must not download or rewrite the file.
-        r.ensure_mermaid_js().unwrap();
-        assert_eq!(first, fs::metadata(&r.mermaid_js).unwrap().modified().unwrap());
-        assert_eq!(first_bytes, fs::read(&r.mermaid_js).unwrap());
-        let _ = fs::remove_dir_all(&d);
-    }
+        #[test]
+        fn env_override_wins_for_chromium() {
+            std::env::set_var("MDVIEW_CHROMIUM", "/bin/true");
+            assert_eq!(find_chromium(), Some(PathBuf::from("/bin/true")));
+            std::env::remove_var("MDVIEW_CHROMIUM");
+        }
 
-    #[test]
-    #[ignore]
-    fn renders_real_diagram() {
-        let r = Renderer::new();
-        let p = r.render("smoke", "graph TD; A-->B;", Theme::Light).unwrap();
-        assert!(p.exists());
-        assert!(fs::metadata(&p).unwrap().len() > 1000);
-    }
+        #[test]
+        fn html_references_absolute_mermaid_js_path() {
+            let js = std::env::temp_dir().join("elsewhere/mermaid.min.js");
+            let html = build_html(&js, "graph TD; A-->B;", Theme::Light);
+            assert!(html.contains(&format!("file://{}", js.display())));
+            assert!(!html.contains("src=\"mermaid.min.js\""));
+        }
 
-    #[test]
-    #[ignore]
-    fn renders_two_real_diagrams() {
-        let r = Renderer::new();
-        let docs = [
-            ("smoke-flow", "graph LR; A-->B;", Theme::Light),
-            (
-                "smoke-seq",
-                "sequenceDiagram\n  A->>B: hello\n  B-->>A: world",
-                Theme::Dark,
-            ),
-        ];
-        for (id, src, theme) in docs {
-            let p = r.render(id, src, theme).unwrap();
-            assert!(fs::metadata(&p).unwrap().len() > 1000, "{id} too small");
+        #[test]
+        fn html_uses_base_theme_with_catppuccin_variables() {
+            let js = std::env::temp_dir().join("mermaid.min.js");
+            let html = build_html(&js, "graph TD; A-->B;", Theme::Dark);
+            assert!(html.contains("theme:\"base\""));
+            assert!(html.contains(crate::theme::mermaid_variables(Theme::Dark)));
+            assert!(html.contains("themeVariables:{"));
+            assert!(!html.contains("theme:\"dark\""));
+        }
+
+        #[test]
+        fn html_uses_firacode_font_family() {
+            let js = std::env::temp_dir().join("mermaid.min.js");
+            let html = build_html(&js, "graph TD; A-->B;", Theme::Light);
+            assert!(html.contains(&format!("fontFamily:\"{}\"", crate::fonts::FAMILY)));
+            assert!(!html.contains("fontFamily:\"sans-serif\""));
+        }
+
+        #[test]
+        fn ensure_mermaid_js_is_idempotent() {
+            let d = std::env::temp_dir().join(format!("mdview-js-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&d);
+            fs::create_dir_all(&d).unwrap();
+            let r = test_renderer(&d);
+            fs::write(&r.mermaid_js, b"// already here").unwrap();
+            r.ensure_mermaid_js().unwrap();
+            let first = fs::metadata(&r.mermaid_js).unwrap().modified().unwrap();
+            let first_bytes = fs::read(&r.mermaid_js).unwrap();
+            // A second call must not download or rewrite the file.
+            r.ensure_mermaid_js().unwrap();
+            assert_eq!(first, fs::metadata(&r.mermaid_js).unwrap().modified().unwrap());
+            assert_eq!(first_bytes, fs::read(&r.mermaid_js).unwrap());
+            let _ = fs::remove_dir_all(&d);
+        }
+
+        #[test]
+        #[ignore = "requires headless chromium"]
+        fn renders_real_diagram() {
+            let r = Renderer::new();
+            let p = r.render("smoke", "graph TD; A-->B;", Theme::Light).unwrap();
+            assert!(p.exists());
+            assert!(fs::metadata(&p).unwrap().len() > 1000);
+        }
+
+        #[test]
+        #[ignore = "requires headless chromium"]
+        fn renders_two_real_diagrams() {
+            let r = Renderer::new();
+            let docs = [
+                ("smoke-flow", "graph LR; A-->B;", Theme::Light),
+                (
+                    "smoke-seq",
+                    "sequenceDiagram\n  A->>B: hello\n  B-->>A: world",
+                    Theme::Dark,
+                ),
+            ];
+            for (id, src, theme) in docs {
+                let p = r.render(id, src, theme).unwrap();
+                assert!(fs::metadata(&p).unwrap().len() > 1000, "{id} too small");
+            }
         }
     }
 }
