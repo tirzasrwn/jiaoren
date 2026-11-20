@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -11,13 +11,95 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use notify::{RecursiveMode, Watcher};
 
 use crate::doc::{prepare, Prepared};
-use crate::mermaid::{file_url, find_chromium, parse_svg_size, Renderer, Theme};
+use crate::mermaid::{find_chromium, parse_svg_size, Renderer, Theme};
 
 /// A render job handed to a worker thread: (diagram id, mermaid source, theme).
 type Job = (String, String, Theme);
 
 /// A finished render delivered back to the UI thread: (id, theme, outcome).
 type DiagramResult = (String, Theme, Result<PathBuf, String>);
+
+/// Resolution bucket covering a zoom factor: the smallest of `1..=3` whose
+/// scale (bucket × DPI) is at least the on-screen zoom. Zoom is clamped to
+/// `0.5..=3.0`, so this never exceeds 3.
+fn bucket_for(zoom: f32) -> u8 {
+    (zoom.ceil() as u8).clamp(1, 3)
+}
+
+/// Pixel scale for `bucket` at a given display density. Textures are rendered
+/// at `bucket × pixels_per_point` texels per SVG unit.
+fn bucket_scale(bucket: u8, pixels_per_point: f32) -> f32 {
+    bucket as f32 * pixels_per_point
+}
+
+/// Identity of one raster: diagram, theme, resolution bucket and display
+/// density (rounded to two decimals) so a DPI change never serves a stale
+/// image. Matches the `(id, theme, bucket, ppp_rounded_2dp)` interface.
+type RasterKey = (String, &'static str, u8, i32);
+
+fn raster_key(id: &str, theme: Theme, bucket: u8, pixels_per_point: f32) -> RasterKey {
+    (
+        id.to_string(),
+        theme.as_str(),
+        bucket,
+        (pixels_per_point * 100.0).round() as i32,
+    )
+}
+
+/// State of one raster in [`DiagramUi`]. `Ready` holds the GPU texture; the UI
+/// thread is the only place a texture is created or dropped.
+enum Raster {
+    Ready(egui::TextureHandle),
+    Pending,
+    Failed(String),
+}
+
+/// A rasterization job handed to a worker thread.
+struct RasterJob {
+    key: RasterKey,
+    path: PathBuf,
+    w: f32,
+    h: f32,
+    scale: f32,
+}
+
+/// Everything a worker delivers back to the UI thread.
+enum WorkerMsg {
+    Diagram(DiagramResult),
+    Raster(RasterKey, Result<egui::ColorImage, String>),
+}
+
+/// `usvg` options built once with system fonts loaded; without them `<text>`
+/// labels vanish from every diagram.
+fn svg_options() -> &'static resvg::usvg::Options<'static> {
+    static OPTS: LazyLock<resvg::usvg::Options<'static>> = LazyLock::new(|| {
+        let mut opts = resvg::usvg::Options::default();
+        opts.fontdb_mut().load_system_fonts();
+        opts
+    });
+    &OPTS
+}
+
+/// Rasterize `path` at `scale` into a premultiplied RGBA image. Runs on a
+/// worker thread; never touches egui state.
+fn rasterize(path: &Path, w: f32, h: f32, scale: f32) -> Result<egui::ColorImage, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read svg: {e}"))?;
+    let tree = resvg::usvg::Tree::from_data(&bytes, svg_options())
+        .map_err(|e| format!("parse svg: {e}"))?;
+    let pw = (w * scale).ceil().max(1.0) as u32;
+    let ph = (h * scale).ceil().max(1.0) as u32;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(pw, ph)
+        .ok_or_else(|| format!("bad raster size {pw}x{ph}"))?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    Ok(egui::ColorImage::from_rgba_premultiplied(
+        [pw as usize, ph as usize],
+        pixmap.data(),
+    ))
+}
 
 pub fn read_doc(path: &Path) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -140,9 +222,14 @@ pub struct DiagramUi {
     inflight: HashSet<String>,
     failures: HashMap<(String, &'static str), String>,
     queue: Arc<Mutex<VecDeque<Job>>>,
-    result_tx: mpsc::Sender<DiagramResult>,
-    result_rx: mpsc::Receiver<DiagramResult>,
+    result_tx: mpsc::Sender<WorkerMsg>,
+    result_rx: mpsc::Receiver<WorkerMsg>,
     active_workers: usize,
+    /// Rasterization jobs awaiting a free worker slot.
+    raster_queue: Arc<Mutex<VecDeque<RasterJob>>>,
+    /// Raster state per [`RasterKey`]; also the "queued/in-flight" marker via
+    /// [`Raster::Pending`], so a key is never enqueued twice.
+    rasters: HashMap<RasterKey, Raster>,
     placeholders: HashMap<String, Placeholder>,
     /// Mirror of the app's scroll offset, for the pure re-anchor arithmetic.
     scroll_y: f32,
@@ -165,6 +252,8 @@ impl DiagramUi {
             result_tx: tx,
             result_rx: rx,
             active_workers: 0,
+            raster_queue: Arc::new(Mutex::new(VecDeque::new())),
+            rasters: HashMap::new(),
             placeholders: HashMap::new(),
             scroll_y: 0.0,
             scroll_adjust: 0.0,
@@ -180,6 +269,10 @@ impl DiagramUi {
         self.failures.clear();
         self.queue.lock().unwrap().clear();
         self.placeholders.clear();
+        // Drop every raster with the document: dropping the `TextureHandle`s
+        // frees the GPU textures.
+        self.rasters.clear();
+        self.raster_queue.lock().unwrap().clear();
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, id: &str) {
@@ -221,16 +314,32 @@ impl DiagramUi {
 
     pub fn poll(&mut self, ctx: &egui::Context) {
         let mut got = false;
-        while let Ok((id, theme, result)) = self.result_rx.try_recv() {
+        while let Ok(msg) = self.result_rx.try_recv() {
             got = true;
-            self.inflight.remove(&id);
             self.active_workers = self.active_workers.saturating_sub(1);
-            if let Err(msg) = result {
-                self.failures.insert((id, theme.as_str()), msg);
+            match msg {
+                WorkerMsg::Diagram((id, theme, result)) => {
+                    self.inflight.remove(&id);
+                    if let Err(msg) = result {
+                        self.failures.insert((id, theme.as_str()), msg);
+                    }
+                }
+                WorkerMsg::Raster(key, Ok(image)) => {
+                    // Only the UI thread ever creates a texture.
+                    let name = format!("mdview-raster-{}-{}-{}-{}", key.0, key.1, key.2, key.3);
+                    let handle = ctx.load_texture(name, image, egui::TextureOptions::LINEAR);
+                    self.rasters.insert(key, Raster::Ready(handle));
+                }
+                WorkerMsg::Raster(key, Err(msg)) => {
+                    self.rasters.insert(key, Raster::Failed(msg));
+                }
             }
         }
         if !self.inflight.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        if self.rasters.values().any(|r| matches!(r, Raster::Pending)) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         if got {
             self.maybe_spawn();
@@ -240,17 +349,29 @@ impl DiagramUi {
 
     fn maybe_spawn(&mut self) {
         while self.active_workers < 4 {
+            // Diagram renders gate new content, so they go first.
             let job = self.queue.lock().unwrap().pop_front();
-            let Some((id, source, theme)) = job else {
-                break;
-            };
-            self.active_workers += 1;
-            let renderer = Arc::clone(&self.renderer);
-            let tx = self.result_tx.clone();
-            thread::spawn(move || {
-                let res = renderer.render(&id, &source, theme);
-                let _ = tx.send((id, theme, res));
-            });
+            if let Some((id, source, theme)) = job {
+                self.active_workers += 1;
+                let renderer = Arc::clone(&self.renderer);
+                let tx = self.result_tx.clone();
+                thread::spawn(move || {
+                    let res = renderer.render(&id, &source, theme);
+                    let _ = tx.send(WorkerMsg::Diagram((id, theme, res)));
+                });
+                continue;
+            }
+            let job = self.raster_queue.lock().unwrap().pop_front();
+            if let Some(RasterJob { key, path, w, h, scale }) = job {
+                self.active_workers += 1;
+                let tx = self.result_tx.clone();
+                thread::spawn(move || {
+                    let res = rasterize(&path, w, h, scale);
+                    let _ = tx.send(WorkerMsg::Raster(key, res));
+                });
+                continue;
+            }
+            break;
         }
     }
 
@@ -272,19 +393,59 @@ impl DiagramUi {
     }
 
     fn draw_svg(&mut self, ui: &mut egui::Ui, id: &str, svg: &Path, theme: Theme) {
-        let (w, h) = self.intrinsic(id, theme, svg).unwrap_or((640.0, 320.0));
-        let (w, h) = (w * self.zoom, h * self.zoom);
-        // The svg loader rasterizes at the requested size and caches per
-        // SizeHint, so zoom changes stay sharp rather than scaling a bitmap.
-        let uri = format!("file://{}", file_url(svg));
-        let response = ui.add(egui::Image::from_uri(uri).fit_to_exact_size(egui::vec2(w, h)));
-        if let Some(ph) = self.placeholders.remove(id) {
-            let delta = response.rect.height() - ph.height;
-            if delta != 0.0 {
-                let new_scroll = reanchor(self.scroll_y, ph.viewport_top, ph.top, delta);
-                self.scroll_adjust += new_scroll - self.scroll_y;
-                ui.ctx().request_repaint();
+        let (iw, ih) = self.intrinsic(id, theme, svg).unwrap_or((640.0, 320.0));
+        let ppp = ui.ctx().pixels_per_point();
+        let bucket = bucket_for(self.zoom);
+        let key = raster_key(id, theme, bucket, ppp);
+        // Request the exact bucket lazily (only when this zoom needs it); the
+        // `Pending` marker keeps the same key from being queued twice.
+        if !self.rasters.contains_key(&key) {
+            let scale = bucket_scale(bucket, ppp);
+            self.rasters.insert(key.clone(), Raster::Pending);
+            self.raster_queue.lock().unwrap().push_back(RasterJob {
+                key,
+                path: svg.to_path_buf(),
+                w: iw,
+                h: ih,
+                scale,
+            });
+            self.maybe_spawn();
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(50));
+        }
+        // Draw the best ready bucket at or below the needed one: a smaller
+        // ready raster is shown (mildly blurred) until the sharper one lands.
+        let mut failed: Option<String> = None;
+        for b in (1..=bucket).rev() {
+            match self.rasters.get(&raster_key(id, theme, b, ppp)) {
+                Some(Raster::Ready(tex)) => {
+                    let tex = tex.clone();
+                    let (w, h) = (iw * self.zoom, ih * self.zoom);
+                    let response = ui.add(
+                        egui::Image::from_texture(&tex).fit_to_exact_size(egui::vec2(w, h)),
+                    );
+                    if let Some(ph) = self.placeholders.remove(id) {
+                        let delta = response.rect.height() - ph.height;
+                        if delta != 0.0 {
+                            let new_scroll = reanchor(self.scroll_y, ph.viewport_top, ph.top, delta);
+                            self.scroll_adjust += new_scroll - self.scroll_y;
+                            ui.ctx().request_repaint();
+                        }
+                    }
+                    return;
+                }
+                Some(Raster::Failed(msg)) => {
+                    if failed.is_none() {
+                        failed = Some(msg.clone());
+                    }
+                }
+                _ => {}
             }
+        }
+        if let Some(msg) = failed {
+            self.draw_error(ui, id, &msg);
+        } else {
+            self.draw_placeholder(ui, id);
         }
     }
 
@@ -700,6 +861,36 @@ mod tests {
         );
         assert_eq!(super::parse_placeholder("<div>hi</div>"), None);
         assert_eq!(super::parse_placeholder(r#"<mermaid id="">"#), None);
+    }
+
+    #[test]
+    fn buckets_cover_the_zoom() {
+        assert_eq!(super::bucket_for(0.5), 1);
+        assert_eq!(super::bucket_for(1.0), 1);
+        assert_eq!(super::bucket_for(1.4), 2);
+        assert_eq!(super::bucket_for(2.6), 3);
+        assert_eq!(super::bucket_for(3.0), 3);
+    }
+
+    #[test]
+    fn bucket_scale_multiplies_by_dpi() {
+        assert_eq!(super::bucket_scale(2, 1.0), 2.0);
+        assert_eq!(super::bucket_scale(1, 1.25), 1.25);
+    }
+
+    #[test]
+    fn rasterize_produces_scaled_premultiplied_rgba() {
+        // A 10x5 red rect rendered at scale 2 must be a 20x10 opaque red image.
+        let p = std::env::temp_dir().join(format!("mdview-raster-{}.svg", std::process::id()));
+        std::fs::write(
+            &p,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 5"><rect width="10" height="5" fill="#ff0000"/></svg>"##,
+        )
+        .unwrap();
+        let img = super::rasterize(&p, 10.0, 5.0, 2.0).unwrap();
+        assert_eq!(img.size, [20, 10]);
+        assert_eq!(img.pixels[0], egui::Color32::from_rgba_premultiplied(255, 0, 0, 255));
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]
