@@ -21,6 +21,10 @@ mdview [--dark] file.md
 ```
 
 - `--dark` — start with the dark theme.
+
+Colors are [Catppuccin](https://catppuccin.com/palette/): Latte for the light
+theme, Macchiato for the dark theme. Window chrome and mermaid diagrams use the
+same palette.
 - A missing file, a directory, or a non-UTF-8 file prints a readable error to
   stderr and exits with status `2` (no window).
 
@@ -40,8 +44,7 @@ mdview [--dark] file.md
 | `-` | zoom out |
 | `a` | reset zoom to 100% and pan back to the left |
 | `h` / `l`, `shift+←` / `shift+→` | pan left / right (for zoomed-in content) |
-| `t` | toggle light/dark theme |
-| `r` | reload from disk |
+| `t` | toggle light/dark theme || `r` | reload from disk |
 | `q` / `esc` | quit |
 
 ## Mermaid diagrams
