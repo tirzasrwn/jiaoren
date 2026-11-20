@@ -775,7 +775,7 @@ fn paint_at(
         let last = row + 1 == lines.len();
         let stretchable = line.iter().skip(1).filter(|&&i| gaps[i] > 0.0).count();
         let split = touches_split(&split_words, line, lines.get(row + 1).map(Vec::as_slice));
-        let grow = justified_grow(justify, last, extra, stretchable, split);
+        let grow = justified_grow(justify, last, extra, stretchable, split, space);
 
         let mut x = left;
         let y = top + row as f32 * row_h;
@@ -803,12 +803,26 @@ fn touches_split(split: &[bool], line: &[usize], next: Option<&[usize]>) -> bool
 }
 
 /// Extra width added to every stretchable gap on a line; zero for the last line,
-/// lines with nothing to stretch, and lines touching a split token.
-fn justified_grow(justify: bool, last: bool, extra: f32, stretchable: usize, split: bool) -> f32 {
-    if justify && !last && stretchable > 0 && !split {
-        extra / stretchable as f32
-    } else {
+/// lines with nothing to stretch, and lines touching a split token. Growth is
+/// also capped at twice the natural `space`: a line that would need more is a
+/// sparse line before a long token, and stretching it turns the words into
+/// islands, so it stays ragged instead.
+fn justified_grow(
+    justify: bool,
+    last: bool,
+    extra: f32,
+    stretchable: usize,
+    split: bool,
+    space: f32,
+) -> f32 {
+    if !justify || last || stretchable == 0 || split {
+        return 0.0;
+    }
+    let grow = extra / stretchable as f32;
+    if grow > space * 2.0 {
         0.0
+    } else {
+        grow
     }
 }
 
@@ -1059,10 +1073,23 @@ mod tests {
             assert!(touches_split(&split, &[1, 2], None)); // holds split pieces
             assert!(touches_split(&split, &[0], Some(&[1]))); // next line starts it
             assert!(!touches_split(&split, &[0], Some(&[3])));
-            assert_eq!(justified_grow(true, false, 50.0, 1, true), 0.0);
-            assert_eq!(justified_grow(true, false, 50.0, 2, false), 25.0);
-            assert_eq!(justified_grow(true, true, 50.0, 2, false), 0.0); // last line
-            assert_eq!(justified_grow(false, false, 50.0, 2, false), 0.0); // draw_left
+            assert_eq!(justified_grow(true, false, 50.0, 1, true, 20.0), 0.0);
+            assert_eq!(justified_grow(true, false, 50.0, 2, false, 20.0), 25.0);
+            assert_eq!(justified_grow(true, true, 50.0, 2, false, 20.0), 0.0); // last line
+
+            // draw_left
+            assert_eq!(justified_grow(false, false, 50.0, 2, false, 20.0), 0.0);
+        }
+
+        #[test]
+        fn gaps_grow_at_most_twice_the_space_width() {
+            // extra 100 over 2 gaps, cap 17.6 -> no stretch
+            assert_eq!(justified_grow(true, false, 100.0, 2, false, 8.8), 0.0);
+            // extra 10 over 2 gaps -> 5.0
+            assert_eq!(justified_grow(true, false, 10.0, 2, false, 8.8), 5.0);
+            // last line and split-token lines still 0
+            assert_eq!(justified_grow(true, true, 10.0, 2, false, 8.8), 0.0);
+            assert_eq!(justified_grow(true, false, 10.0, 2, true, 8.8), 0.0);
         }
     }
 
