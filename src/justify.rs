@@ -341,19 +341,22 @@ fn combine(outer: &RunKind, inner: RunKind) -> RunKind {
     }
 }
 
-/// Greedy word wrap: a word joins the line only when `line + space + word`
-/// fits; a lone over-wide word gets its own line and overflows instead of being
-/// cut. Returns the word indices per line and the natural space width used.
-pub fn wrap_words(widths: &[f32], space: f32, column: f32) -> (Vec<Vec<usize>>, f32) {
+/// Greedy word wrap: a word joins the line only when `gap + word` still fits;
+/// a lone over-wide word gets its own line and overflows instead of being cut.
+/// `gaps[i]` is the gap before word `i` (ignored at the start of a line), so
+/// pieces of one token can be glued together with a zero gap.
+pub fn wrap_words(widths: &[f32], gaps: &[f32], column: f32) -> Vec<Vec<usize>> {
     let mut lines: Vec<Vec<usize>> = Vec::new();
     let mut cur: Vec<usize> = Vec::new();
     let mut used = 0.0;
     for (i, &w) in widths.iter().enumerate() {
-        if cur.is_empty() {
-            used = w;
-            cur.push(i);
-        } else if used + space + w <= column {
-            used += space + w;
+        let gap = if cur.is_empty() {
+            0.0
+        } else {
+            gaps.get(i).copied().unwrap_or(0.0)
+        };
+        if cur.is_empty() || used + gap + w <= column {
+            used += gap + w;
             cur.push(i);
         } else {
             lines.push(std::mem::take(&mut cur));
@@ -364,12 +367,65 @@ pub fn wrap_words(widths: &[f32], space: f32, column: f32) -> (Vec<Vec<usize>>, 
     if !cur.is_empty() {
         lines.push(cur);
     }
-    (lines, space)
+    lines
+}
+
+/// How much a separator is preferred as a break point; `0` means "not a
+/// separator". Ties are resolved by taking the latest fitting separator so the
+/// line stays as full as possible.
+fn break_priority(c: char) -> u8 {
+    match c {
+        '/' => 3,
+        '-' | '_' => 2,
+        ':' | '.' => 1,
+        ',' | ';' | '?' | '&' | '=' | '\\' => 1,
+        _ => 0,
+    }
+}
+
+/// Split an over-wide token into pieces that each measure at most `max_width`.
+/// Prefers cutting just after a separator; falls back to a hard cut at the
+/// largest fitting char boundary. A char wider than `max_width` forms its own
+/// piece, so the loop always advances and no character is ever dropped.
+pub fn split_token(
+    word: &str,
+    max_width: f32,
+    measure: &dyn Fn(&str) -> f32,
+) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    while start < word.len() {
+        let rest = &word[start..];
+        if measure(rest) <= max_width {
+            parts.push(rest.to_string());
+            break;
+        }
+        let mut last_fit = None;
+        let mut sep_cut = None;
+        for (off, ch) in rest.char_indices() {
+            let end = start + off + ch.len_utf8();
+            if measure(&word[start..end]) > max_width {
+                break;
+            }
+            last_fit = Some(end);
+            if break_priority(ch) > 0 {
+                sep_cut = Some(end);
+            }
+        }
+        let cut = sep_cut.or(last_fit).unwrap_or_else(|| {
+            start + rest.chars().next().expect("non-empty").len_utf8()
+        });
+        parts.push(word[start..cut].to_string());
+        start = cut;
+    }
+    parts
 }
 
 struct Frag {
     kind: RunKind,
     color: Color32,
+    format: TextFormat,
+    text: String,
     galley: Arc<Galley>,
     width: f32,
 }
@@ -377,6 +433,8 @@ struct Frag {
 struct Word {
     frags: Vec<Frag>,
     width: f32,
+    /// No gap before this word: it is a continuation piece of the previous one.
+    glued: bool,
 }
 
 /// Layout every word fragment with the real egui font metrics. Words are split
@@ -435,7 +493,7 @@ fn push_frag(
     strong: Color32,
     link_color: Color32,
 ) {
-    let (font, color, italics, underline, strike) = match &run.kind {
+    let (font, color, italics, underline, strikethrough) = match &run.kind {
         RunKind::Text => (body.clone(), text_color, false, Stroke::NONE, Stroke::NONE),
         RunKind::Bold => (body.clone(), strong, false, Stroke::NONE, Stroke::NONE),
         RunKind::Italic => (body.clone(), text_color, true, Stroke::NONE, Stroke::NONE),
@@ -456,12 +514,21 @@ fn push_frag(
             Stroke::NONE,
         ),
     };
-    let galley = layout(ui, text, font, color, italics, underline, strike);
+    let format = TextFormat {
+        font_id: font,
+        color,
+        italics,
+        underline,
+        strikethrough,
+        ..Default::default()
+    };
+    let galley = layout(ui, text, &format);
     let width = galley.size().x;
     if !*open {
         words.push(Word {
             frags: Vec::new(),
             width: 0.0,
+            glued: false,
         });
         *open = true;
     }
@@ -470,42 +537,39 @@ fn push_frag(
     word.frags.push(Frag {
         kind: run.kind.clone(),
         color,
+        format,
+        text: text.to_string(),
         galley,
         width,
     });
 }
 
-fn layout(
-    ui: &egui::Ui,
-    text: &str,
-    font_id: FontId,
-    color: Color32,
-    italics: bool,
-    underline: Stroke,
-    strikethrough: Stroke,
-) -> Arc<Galley> {
+fn layout(ui: &egui::Ui, text: &str, format: &TextFormat) -> Arc<Galley> {
     let mut job = LayoutJob::default();
     job.wrap.max_width = f32::INFINITY;
-    job.append(
-        text,
-        0.0,
-        TextFormat {
-            font_id,
-            color,
-            italics,
-            underline,
-            strikethrough,
-            ..Default::default()
-        },
-    );
+    job.append(text, 0.0, format.clone());
     ui.fonts_mut(|f| f.layout_job(job))
 }
 
 /// Paint `runs` as a fully justified paragraph in a `column`-wide slot starting
-/// at the current cursor. Every line but the last (and any single-word line) is
-/// spread so its right edge lands on `cursor.left() + column`.
+/// at the current cursor. Every line but the last (and any line without a
+/// stretchable gap) is spread so its right edge lands on `cursor.left() + column`.
 pub fn draw(ui: &mut egui::Ui, runs: &[Run], column: f32) {
+    paint(ui, runs, column, true);
+}
+
+/// Left-aligned variant of [`draw`]: same wrapping, splitting and painting, but
+/// gaps never stretch and rows hug the left edge.
+#[allow(dead_code)] // table cells consume it in the next task
+pub fn draw_left(ui: &mut egui::Ui, runs: &[Run], column: f32) {
+    paint(ui, runs, column, false);
+}
+
+fn paint(ui: &mut egui::Ui, runs: &[Run], column: f32, justify: bool) {
     let column = column.max(0.0);
+    if column <= 0.0 {
+        return;
+    }
     let body = ui
         .style()
         .text_styles
@@ -518,52 +582,101 @@ pub fn draw(ui: &mut egui::Ui, runs: &[Run], column: f32) {
         .size()
         .x;
 
-    let words = build_words(ui, runs);
-    if words.is_empty() || column <= 0.0 {
+    let words = split_overwide(ui, build_words(ui, runs), column);
+    if words.is_empty() {
         return;
     }
     let widths: Vec<f32> = words.iter().map(|w| w.width).collect();
-    let (lines, _) = wrap_words(&widths, space, column);
+    let gaps: Vec<f32> = words
+        .iter()
+        .map(|w| if w.glued { 0.0 } else { space })
+        .collect();
+    let lines = wrap_words(&widths, &gaps, column);
+    let natural_of = |line: &[usize]| {
+        line.iter()
+            .enumerate()
+            .map(|(k, &i)| widths[i] + if k == 0 { 0.0 } else { gaps[i] })
+            .sum::<f32>()
+    };
 
     let used_height = lines.len() as f32 * row_h;
-    // Reserve the widest line's natural width so an over-wide word stays
-    // reachable by horizontal pan instead of being silently clipped.
-    let reserved = lines
-        .iter()
-        .map(|line| {
-            line.iter().map(|&i| widths[i]).sum::<f32>()
-                + space * line.len().saturating_sub(1) as f32
-        })
-        .fold(column, f32::max);
+    // Reserve the widest line's natural width so a lone char wider than the
+    // column stays reachable by horizontal pan instead of being clipped.
+    let reserved = lines.iter().map(|line| natural_of(line)).fold(column, f32::max);
     let (_, rect) = ui.allocate_space(egui::vec2(reserved, used_height));
     let left = rect.left();
     let top = rect.top();
     let painter = ui.painter().clone();
 
     for (row, line) in lines.iter().enumerate() {
-        let natural: f32 = line.iter().map(|&i| widths[i]).sum::<f32>()
-            + space * line.len().saturating_sub(1) as f32;
+        let natural = natural_of(line);
         let extra = (column - natural).max(0.0);
         let last = row + 1 == lines.len();
-        let gap = space
-            + if last || line.len() == 1 {
-                0.0
-            } else {
-                extra / (line.len() - 1) as f32
-            };
+        let stretchable = line
+            .iter()
+            .skip(1)
+            .filter(|&&i| gaps[i] > 0.0)
+            .count();
+        let grow = if justify && !last && stretchable > 0 {
+            extra / stretchable as f32
+        } else {
+            0.0
+        };
 
         let mut x = left;
         let y = top + row as f32 * row_h;
-        for &wi in line {
+        for (k, &wi) in line.iter().enumerate() {
+            if k > 0 {
+                let gap = gaps[wi];
+                x += if gap > 0.0 { gap + grow } else { 0.0 };
+            }
             let word = &words[wi];
             for frag in &word.frags {
                 let pos = Pos2::new(x, y);
                 paint_frag(ui, &painter, pos, frag);
                 x += frag.width;
             }
-            x += gap;
         }
     }
+}
+
+/// Turn any single-fragment word that is wider than the column into glued
+/// pieces, so long paths and URLs wrap instead of overflowing. Words made of
+/// several fragments (adjacent styled runs) are left alone.
+fn split_overwide(ui: &egui::Ui, words: Vec<Word>, column: f32) -> Vec<Word> {
+    let mut out = Vec::with_capacity(words.len());
+    for word in words {
+        if word.width <= column || word.frags.len() != 1 {
+            out.push(word);
+            continue;
+        }
+        let frag = &word.frags[0];
+        let measure = |s: &str| layout(ui, s, &frag.format).size().x;
+        let parts = split_token(&frag.text, column, &measure);
+        if parts.len() <= 1 {
+            out.push(word);
+            continue;
+        }
+        let first = out.len();
+        for part in parts {
+            let galley = layout(ui, &part, &frag.format);
+            let width = galley.size().x;
+            out.push(Word {
+                frags: vec![Frag {
+                    kind: frag.kind.clone(),
+                    color: frag.color,
+                    format: frag.format.clone(),
+                    text: part,
+                    galley,
+                    width,
+                }],
+                width,
+                glued: true,
+            });
+        }
+        out[first].glued = false;
+    }
+    out
 }
 
 fn paint_frag(ui: &egui::Ui, painter: &egui::Painter, pos: Pos2, frag: &Frag) {
@@ -655,14 +768,62 @@ mod tests {
     #[test]
     fn wraps_greedily() {
         let widths = vec![30.0, 30.0, 30.0, 30.0];
-        let (lines, _) = wrap_words(&widths, 10.0, 100.0);
+        let gaps = vec![0.0, 10.0, 10.0, 10.0];
+        let lines = wrap_words(&widths, &gaps, 100.0);
         // 30 + 10 + 30 = 70 fits; adding the third word needs 110 > 100.
         assert_eq!(lines, vec![vec![0, 1], vec![2, 3]]);
     }
 
     #[test]
     fn an_overwide_word_gets_its_own_line() {
-        let (lines, _) = wrap_words(&[30.0, 200.0, 30.0], 10.0, 100.0);
+        let lines = wrap_words(&[30.0, 200.0, 30.0], &[0.0, 10.0, 10.0], 100.0);
         assert_eq!(lines, vec![vec![0], vec![1], vec![2]]);
+    }
+
+    #[test]
+    fn splits_prefer_separators_and_lose_nothing() {
+        let m = |s: &str| s.chars().count() as f32 * 10.0; // fake measure
+        let parts = split_token("src/db/schema.ts:293-311", 100.0, &m);
+        assert!(parts.len() > 1);
+        assert_eq!(parts.concat(), "src/db/schema.ts:293-311");
+        assert!(parts.iter().all(|p| m(p) <= 100.0));
+    }
+
+    #[test]
+    fn hard_splits_when_no_separator_and_terminates() {
+        let m = |s: &str| s.chars().count() as f32 * 10.0;
+        for n in [300, 500] {
+            let word = "a".repeat(n);
+            let parts = split_token(&word, 100.0, &m);
+            assert_eq!(parts.concat(), word);
+            assert!(parts.iter().all(|p| m(p) <= 100.0));
+        }
+    }
+
+    #[test]
+    fn keeps_whole_tokens_that_fit_and_splits_slash_runs() {
+        let m = |s: &str| s.chars().count() as f32 * 10.0;
+        assert_eq!(split_token("abcdefghij", 100.0, &m), vec!["abcdefghij"]);
+        assert_eq!(split_token("alpha/", 60.0, &m), vec!["alpha/"]);
+        let parts = split_token("//////////", 30.0, &m);
+        assert_eq!(parts.concat(), "//////////");
+        assert!(parts.iter().all(|p| m(p) <= 30.0));
+    }
+
+    #[test]
+    fn breaks_after_separator_not_before() {
+        let m = |s: &str| s.chars().count() as f32 * 10.0;
+        let parts = split_token("alpha/beta/gamma", 60.0, &m);
+        assert_eq!(parts, vec!["alpha/", "beta/", "gamma"]);
+    }
+
+    #[test]
+    fn splits_multibyte_without_panicking() {
+        let m = |s: &str| s.chars().count() as f32 * 10.0;
+        let word = "数据库查询接口超长标识符😀😀😀";
+        let parts = split_token(word, 40.0, &m);
+        assert_eq!(parts.concat(), word);
+        assert!(parts.iter().all(|p| m(p) <= 40.0), "{parts:?}");
+        assert_eq!(parts[0].chars().count(), 4);
     }
 }
