@@ -1,12 +1,11 @@
-mod mermaid;
+mod app;
 mod doc;
+mod mermaid;
 
 use std::path::PathBuf;
 
 pub struct Options {
-    #[allow(dead_code)]
     path: PathBuf,
-    #[allow(dead_code)]
     dark: bool,
 }
 
@@ -30,17 +29,6 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
         .ok_or_else(|| USAGE.to_string())
 }
 
-#[allow(dead_code)] // scaffold: window shell reads opts in later tasks
-struct App {
-    opts: Options,
-}
-
-impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ui, |_ui| {});
-    }
-}
-
 fn main() -> Result<(), eframe::Error> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let opts = match parse_args(&args) {
@@ -53,7 +41,10 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "mdview",
         eframe::NativeOptions::default(),
-        Box::new(move |_cc| Ok(Box::new(App { opts }))),
+        Box::new(move |cc| {
+            egui_extras::install_image_loaders(&cc.egui_ctx);
+            Ok(Box::new(app::App::new(opts.path, opts.dark)))
+        }),
     )
 }
 
