@@ -1,3 +1,5 @@
+//! Locate Chromium, download mermaid.js once, and cache diagram renders as SVG.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -168,7 +170,7 @@ fn dirs_cache() -> PathBuf {
     std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .unwrap_or_else(|| std::env::temp_dir())
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 pub fn find_chromium() -> Option<PathBuf> {

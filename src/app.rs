@@ -1,3 +1,6 @@
+//! The eframe application: window state, scrolling and zoom, and the Markdown
+//! render hook that swaps placeholders for diagrams, tables and paragraphs.
+
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -505,11 +508,7 @@ impl DiagramUi {
                     }
                     return;
                 }
-                Some(Raster::Failed(msg)) => {
-                    if failed.is_none() {
-                        failed = Some(msg.clone());
-                    }
-                }
+                Some(Raster::Failed(msg)) if failed.is_none() => failed = Some(msg.clone()),
                 _ => {}
             }
         }
@@ -771,6 +770,9 @@ pub fn apply_key(
     }
 }
 
+/// Renders an HTML placeholder through the diagram, table or paragraph UI.
+type HtmlFn = Box<dyn Fn(&mut egui::Ui, &str)>;
+
 pub struct App {
     pub path: PathBuf,
     pub prepared: Prepared,
@@ -782,7 +784,7 @@ pub struct App {
     diagrams: Rc<RefCell<DiagramUi>>,
     tables: Rc<RefCell<TableUi>>,
     paragraphs: Rc<RefCell<ParagraphUi>>,
-    html_fn: Box<dyn Fn(&mut egui::Ui, &str)>,
+    html_fn: HtmlFn,
     scroll_y: f32,
     scroll_x: f32,
     /// Set by `G`: jump to the bottom once the next layout reveals `max_y`.
@@ -838,7 +840,7 @@ impl App {
         )));
         let tables = Rc::new(RefCell::new(TableUi::new(prepared.tables.clone())));
         let paragraphs = Rc::new(RefCell::new(ParagraphUi::new(prepared.paragraphs.clone())));
-        let html_fn: Box<dyn Fn(&mut egui::Ui, &str)> = {
+        let html_fn: HtmlFn = {
             let d = Rc::clone(&diagrams);
             let t = Rc::clone(&tables);
             let p = Rc::clone(&paragraphs);
@@ -1396,7 +1398,7 @@ mod key_tests {
         assert!(matches!(apply_key(&mut s, Key::ArrowLeft, Modifiers::SHIFT, now), Some(Action::ScrollCols(v)) if v < 0.0));
         assert!(matches!(apply_key(&mut s, Key::ArrowRight, Modifiers::SHIFT, now), Some(Action::ScrollCols(v)) if v > 0.0));
         // Unshifted arrows keep their vertical meaning.
-        assert!(matches!(apply_key(&mut s, Key::ArrowLeft, Modifiers::NONE, now), None));
+        assert!(apply_key(&mut s, Key::ArrowLeft, Modifiers::NONE, now).is_none());
     }
 
     #[test]

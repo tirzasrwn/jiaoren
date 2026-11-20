@@ -1,3 +1,6 @@
+//! Catppuccin palettes, egui visuals and mermaid theme variables for the light
+//! and dark themes.
+
 use std::sync::LazyLock;
 
 use crate::mermaid::Theme;

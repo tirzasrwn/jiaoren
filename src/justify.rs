@@ -148,12 +148,12 @@ pub fn parse_inline(md: &str) -> Vec<Run> {
             continue;
         }
 
-        if rest.starts_with("~~") {
+        if let Some(after) = rest.strip_prefix("~~") {
             if delimiter_can_open(md, i, 2, '~') {
-                if let Some(end) = find_marker(&rest[2..], "~~", '~') {
+                if let Some(end) = find_marker(after, "~~", '~') {
                     flush_text(&mut runs, &mut text);
                     runs.push(Run {
-                        text: unescape(&rest[2..2 + end]),
+                        text: unescape(&after[..end]),
                         kind: RunKind::Strike,
                     });
                     i += end + 4;

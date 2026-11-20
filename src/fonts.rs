@@ -1,3 +1,5 @@
+//! Locate and install the FiraCode Nerd Font faces used by the window.
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

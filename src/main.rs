@@ -1,3 +1,6 @@
+//! Command-line entry point: parse arguments, validate the input file, and
+//! start the eframe window.
+
 mod app;
 mod doc;
 mod fonts;

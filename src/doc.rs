@@ -1,3 +1,6 @@
+//! Pre-parse a Markdown document, extracting mermaid diagrams, GFM tables and
+//! paragraph placeholders before rendering.
+
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -314,7 +317,7 @@ fn split_row(line: &str) -> Vec<String> {
     let mut cur = String::new();
     let mut slashes = 0usize;
     for c in s.chars() {
-        if c == '|' && slashes % 2 == 0 {
+        if c == '|' && slashes.is_multiple_of(2) {
             cells.push(cur.trim().to_string());
             cur.clear();
             slashes = 0;
