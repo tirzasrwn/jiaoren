@@ -155,6 +155,30 @@ fn parse_table_placeholder(html: &str) -> Option<&str> {
     Some(id)
 }
 
+/// Returns the paragraph id when `html` is exactly a `<mdpara id="…">` placeholder.
+fn parse_paragraph_placeholder(html: &str) -> Option<&str> {
+    let s = html.trim();
+    let rest = s.strip_prefix("<mdpara")?;
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix("id=")?;
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    let id = &rest[..end];
+    if id.is_empty() {
+        return None;
+    }
+    let after = &rest[end + 1..];
+    let after = after.trim_end();
+    if !after.ends_with('>') {
+        return None;
+    }
+    if !after[..after.len() - 1].trim().is_empty() {
+        return None;
+    }
+    Some(id)
+}
+
 /// Width of the reading column: the window minus 64 px of margins, capped at
 /// 900 px scaled by zoom. Floored at 0 so a tiny window never goes negative.
 fn content_column(available: f32, zoom: f32) -> f32 {
@@ -611,6 +635,44 @@ fn render_cell(ui: &mut egui::Ui, w: f32, cell_md: &str, cache: &mut CommonMarkC
     });
 }
 
+/// Shared, interior-mutable state backing the `<mdpara>` render path. Body
+/// paragraphs are painted justified by `justify`; anything the mini-parser
+/// cannot express (images, raw HTML) falls back to the library with a cache of
+/// its own, separate from the outer viewer's.
+pub struct ParagraphUi {
+    paragraphs: HashMap<String, String>,
+    cache: CommonMarkCache,
+}
+
+impl ParagraphUi {
+    fn new(paragraphs: HashMap<String, String>) -> Self {
+        ParagraphUi {
+            paragraphs,
+            cache: CommonMarkCache::default(),
+        }
+    }
+
+    fn reset(&mut self, paragraphs: HashMap<String, String>) {
+        self.paragraphs = paragraphs;
+        self.cache = CommonMarkCache::default();
+    }
+
+    fn show(&mut self, ui: &mut egui::Ui, id: &str) {
+        // Clone: the source rarely changes and this keeps `cache` free to borrow.
+        let source = match self.paragraphs.get(id) {
+            Some(s) => s.clone(),
+            None => return, // unknown id: draw nothing, never panic
+        };
+        if source.contains("![") || source.contains('<') {
+            CommonMarkViewer::new().show(ui, &mut self.cache, &source);
+            return;
+        }
+        let runs = crate::justify::parse_inline(&source);
+        let column = ui.available_width();
+        crate::justify::draw(ui, &runs, column);
+    }
+}
+
 /// Keys pressed on the keyboard, with no egui Context dependency (unit-testable).
 #[derive(Default)]
 pub struct KeyState {
@@ -692,6 +754,7 @@ pub struct App {
     cache: CommonMarkCache,
     diagrams: Rc<RefCell<DiagramUi>>,
     tables: Rc<RefCell<TableUi>>,
+    paragraphs: Rc<RefCell<ParagraphUi>>,
     html_fn: Box<dyn Fn(&mut egui::Ui, &str)>,
     scroll_y: f32,
     scroll_x: f32,
@@ -747,11 +810,15 @@ impl App {
             theme,
         )));
         let tables = Rc::new(RefCell::new(TableUi::new(prepared.tables.clone())));
+        let paragraphs = Rc::new(RefCell::new(ParagraphUi::new(prepared.paragraphs.clone())));
         let html_fn: Box<dyn Fn(&mut egui::Ui, &str)> = {
             let d = Rc::clone(&diagrams);
             let t = Rc::clone(&tables);
+            let p = Rc::clone(&paragraphs);
             Box::new(move |ui: &mut egui::Ui, html: &str| {
-                if let Some(id) = parse_table_placeholder(html) {
+                if let Some(id) = parse_paragraph_placeholder(html) {
+                    p.borrow_mut().show(ui, id);
+                } else if let Some(id) = parse_table_placeholder(html) {
                     t.borrow_mut().show(ui, id);
                 } else if let Some(id) = parse_placeholder(html) {
                     d.borrow_mut().show(ui, id);
@@ -794,6 +861,7 @@ impl App {
             cache: CommonMarkCache::default(),
             diagrams,
             tables,
+            paragraphs,
             html_fn,
             scroll_y: 0.0,
             scroll_x: 0.0,
@@ -824,6 +892,9 @@ impl App {
         let sources = self.prepared.diagrams.clone();
         self.diagrams.borrow_mut().reset_for_reload(sources);
         self.tables.borrow_mut().reset(self.prepared.tables.clone());
+        self.paragraphs
+            .borrow_mut()
+            .reset(self.prepared.paragraphs.clone());
     }
 
     /// Drive live reload: drain watcher events (or poll mtime when the watcher
@@ -1013,6 +1084,13 @@ mod tests {
         assert_eq!(super::parse_table_placeholder(r#"<mdtable id="abc">"#), Some("abc"));
         assert_eq!(super::parse_table_placeholder(r#"<mdtable id="">"#), None);
         assert_eq!(super::parse_table_placeholder(r#"<mermaid id="x">"#), None);
+    }
+
+    #[test]
+    fn parses_paragraph_placeholder_ids() {
+        assert_eq!(super::parse_paragraph_placeholder(r#"<mdpara id="abc">"#), Some("abc"));
+        assert_eq!(super::parse_paragraph_placeholder(r#"<mdpara id="">"#), None);
+        assert_eq!(super::parse_paragraph_placeholder(r#"<mdtable id="x">"#), None);
     }
 
     #[test]

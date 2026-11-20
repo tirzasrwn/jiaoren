@@ -119,6 +119,14 @@ fn is_paragraph_continuation(line: &str) -> bool {
     }
 }
 
+/// Drop the 1–3 space hanging indent CommonMark allows on paragraph
+/// continuation lines, so it never becomes a stray gap when the paragraph is
+/// re-wrapped by the justified painter.
+fn strip_hanging_indent(line: &str) -> &str {
+    let n = line.len() - line.trim_start_matches(' ').len();
+    &line[n.min(3)..]
+}
+
 #[allow(dead_code)] // consumed by app.rs in later tasks
 pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
     let mut out = String::with_capacity(md.len());
@@ -200,7 +208,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         // CRLF safe: each line is trimmed at its end, then joined.
                         let joined = lines[i..j]
                             .iter()
-                            .map(|l| l.trim_end())
+                            .map(|l| strip_hanging_indent(l.trim_end()))
                             .collect::<Vec<_>>()
                             .join("\n");
                         let source = rewrite_images(&joined, doc_dir);
@@ -778,6 +786,16 @@ mod tests {
         let src = p.paragraphs.values().next().unwrap();
         assert!(src.contains("Hello world"));
         assert!(src.contains("continued here"));
+    }
+
+    #[test]
+    fn hanging_indent_is_stripped_from_the_stored_source() {
+        let md = "Hello world\n   continued here\n  and more\n";
+        let p = prepare(md, Path::new("/d"));
+        assert_eq!(
+            p.paragraphs.values().next().unwrap(),
+            "Hello world\ncontinued here\nand more"
+        );
     }
 
     #[test]
