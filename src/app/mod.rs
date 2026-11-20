@@ -359,6 +359,9 @@ impl eframe::App for App {
                         if let Some(a) = apply_key(&mut self.keys, *key, *modifiers, now) {
                             acts.push(a);
                         }
+                    } else if matches!(ev, egui::Event::Copy) {
+                        // winit reports Ctrl+C as `Copy` rather than `Key::C`.
+                        acts.push(Action::Quit);
                     }
                 }
             });

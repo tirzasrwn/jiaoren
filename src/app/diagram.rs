@@ -14,6 +14,7 @@ use super::geometry::{
 };
 use super::lock;
 use super::raster::{rasterize, Raster, RasterJob};
+use super::table::table_pad;
 
 /// A render job handed to a worker thread: (diagram id, mermaid source, theme).
 type Job = (String, String, Theme);
@@ -186,7 +187,21 @@ impl DiagramUi {
         self.column = column;
     }
 
+    /// Draw a diagram inline, with the same vertical breathing room as a table
+    /// above and below. The popup draws its image directly and skips this pad.
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, id: &str) {
+        let pad = table_pad(ui.text_style_height(&egui::TextStyle::Body));
+        // The html hook runs in a wrapping left-to-right layout, where a bare
+        // `add_space` advances horizontally; the vertical wrapper turns the
+        // padding into real space above and below the diagram.
+        ui.vertical(|ui| {
+            ui.add_space(pad);
+            self.show_unpadded(ui, id);
+            ui.add_space(pad);
+        });
+    }
+
+    fn show_unpadded(&mut self, ui: &mut egui::Ui, id: &str) {
         if let Some(msg) = self.failures.get(&(id.to_string(), self.theme.as_str())) {
             let msg = msg.clone();
             self.draw_error(ui, id, &msg);
@@ -429,8 +444,9 @@ impl DiagramUi {
     }
 
     /// Draw the zoom overlay for the clicked diagram. Its own input handling:
-    /// `Esc` closes, wheel/`+`/`-` zoom, `h`/`l`/`j`/`k` pan, and a click on the
-    /// dimmed background closes. The document behind it does not scroll.
+    /// `Esc`, `q` and `Ctrl+C` close, wheel/`+`/`-` zoom, `h`/`l`/`j`/`k` and
+    /// mouse drag pan, and a click on the dimmed background closes. The
+    /// document behind it does not scroll.
     pub(crate) fn draw_popup(&mut self, ctx: &egui::Context, column: f32) {
         let (id, mut zoom, mut pan) = match self.popup.as_ref() {
             Some(p) => (p.id.clone(), p.zoom, p.pan),
@@ -456,34 +472,43 @@ impl DiagramUi {
                 }
             },
         };
-        let (esc, plus, minus, wheel_up, wheel_down, h, l, j, k) = ctx.input(|i| {
-            // Read wheel notches, not `smooth_scroll_delta`: the smoothed value
-            // spans many frames and would multiply one notch into many steps.
-            let (mut up, mut down) = (false, false);
-            for event in &i.events {
-                if let egui::Event::MouseWheel { delta, .. } = event {
-                    up |= delta.y > 0.0;
-                    down |= delta.y < 0.0;
+        let (esc, quit_key, ctrl_c, plus, minus, wheel_up, wheel_down, h, l, j, k) =
+            ctx.input(|i| {
+                // Read wheel notches, not `smooth_scroll_delta`: the smoothed value
+                // spans many frames and would multiply one notch into many steps.
+                let (mut up, mut down) = (false, false);
+                for event in &i.events {
+                    if let egui::Event::MouseWheel { delta, .. } = event {
+                        up |= delta.y > 0.0;
+                        down |= delta.y < 0.0;
+                    }
                 }
-            }
-            (
-                i.key_pressed(egui::Key::Escape),
-                i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals),
-                i.key_pressed(egui::Key::Minus),
-                up,
-                down,
-                i.key_pressed(egui::Key::H),
-                i.key_pressed(egui::Key::L),
-                i.key_pressed(egui::Key::J),
-                i.key_pressed(egui::Key::K),
-            )
-        });
-        if esc {
+                (
+                    i.key_pressed(egui::Key::Escape),
+                    i.key_pressed(egui::Key::Q) && !i.modifiers.any(),
+                    (i.key_pressed(egui::Key::C) && (i.modifiers.command || i.modifiers.ctrl))
+                        || i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
+                    i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals),
+                    i.key_pressed(egui::Key::Minus),
+                    up,
+                    down,
+                    i.key_pressed(egui::Key::H),
+                    i.key_pressed(egui::Key::L),
+                    i.key_pressed(egui::Key::J),
+                    i.key_pressed(egui::Key::K),
+                )
+            });
+        if esc || quit_key || ctrl_c {
             self.popup = None;
             // Keep the same press from reaching the document next frame: a held
-            // `Esc` would otherwise quit right after closing the overlay.
+            // `q`/`Ctrl+C` would otherwise quit right after closing the overlay.
             ctx.input_mut(|i| {
                 i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Q);
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::C);
+                i.consume_key(egui::Modifiers::CTRL, egui::Key::C);
+                // winit turns Ctrl+C into `Copy` and never emits a `Key::C`.
+                i.events.retain(|e| !matches!(e, egui::Event::Copy));
             });
             return;
         }
@@ -564,10 +589,11 @@ impl DiagramUi {
                                     .max_width(view_w)
                                     .max_height(view_h)
                                     .auto_shrink([false, false])
-                                    // The wheel zooms; panning is keys and bars.
+                                    // The wheel zooms; panning is keys, the bars
+                                    // and pointer drag (both axes).
                                     .scroll_source(egui::scroll_area::ScrollSource {
                                         scroll_bar: true,
-                                        drag: egui::scroll_area::DragScroll::Never,
+                                        drag: egui::scroll_area::DragScroll::Always,
                                         mouse_wheel: false,
                                     })
                                     .scroll_offset(pan)
@@ -580,7 +606,10 @@ impl DiagramUi {
                                                     ui.add(
                                                         egui::Image::from_texture(tex)
                                                             .fit_to_exact_size(egui::vec2(dw, dh))
-                                                            .sense(egui::Sense::click()),
+                                                            // Hover only: a click sense would
+                                                            // steal the pointer from the
+                                                            // scroll area's drag-to-pan.
+                                                            .sense(egui::Sense::hover()),
                                                     );
                                                 }
                                                 RasterDraw::Failed(msg) => {
@@ -598,7 +627,7 @@ impl DiagramUi {
                                                 RasterDraw::Pending => {
                                                     let (rect, _) = ui.allocate_exact_size(
                                                         egui::vec2(dw, dh),
-                                                        egui::Sense::click(),
+                                                        egui::Sense::hover(),
                                                     );
                                                     draw_placeholder_box(ui, rect);
                                                 }
@@ -615,6 +644,8 @@ impl DiagramUi {
             })
             .inner;
 
+        // Drag and the scroll bars move the real offset; read it back so key
+        // deltas next frame start from where the pointer left the image.
         pan = offset;
         self.popup = Some(PopupState { id, zoom, pan });
         let fresh = std::mem::take(&mut self.popup_fresh);

@@ -68,6 +68,7 @@ pub fn apply_key(
         Key::Num0 => Some(Action::ResetZoom),
         Key::T => Some(Action::ToggleTheme),
         Key::R => Some(Action::Reload),
+        Key::C if modifiers.command || modifiers.ctrl => Some(Action::Quit),
         Key::Q | Key::Escape => Some(Action::Quit),
         Key::G => {
             // Shift+G (bottom) is immediate; a lone `g` starts the gg window.
@@ -212,6 +213,21 @@ mod tests {
                 apply_key(&mut s, Key::Num0, Modifiers::NONE, now),
                 Some(Action::ResetZoom)
             );
+        }
+
+        #[test]
+        fn ctrl_c_quits_but_plain_c_does_nothing() {
+            let mut s = KeyState::default();
+            let now = std::time::Instant::now();
+            assert_eq!(
+                apply_key(&mut s, Key::C, Modifiers::COMMAND, now),
+                Some(Action::Quit)
+            );
+            assert_eq!(
+                apply_key(&mut s, Key::C, Modifiers::CTRL, now),
+                Some(Action::Quit)
+            );
+            assert_eq!(apply_key(&mut s, Key::C, Modifiers::NONE, now), None);
         }
 
         #[test]

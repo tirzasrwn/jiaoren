@@ -57,8 +57,9 @@ To go back to the defaults, delete (or comment out) the
 | `a` | reset zoom to 100% and pan back to the left |
 | `0` | reset zoom to 100% (keeps scroll position and pan) |
 | `h` / `l`, `shift+←` / `shift+→` | pan left / right (for zoomed-in content) |
-| `t` | toggle light/dark theme || `r` | reload from disk |
-| `q` / `esc` | quit |
+| `t` | toggle light/dark theme |
+| `r` | reload from disk |
+| `q` / `esc` / `ctrl+c` | quit |
 
 ## Mermaid diagrams
 
@@ -77,9 +78,12 @@ If no Chromium is found, the document still opens and a warning banner is
 shown; diagrams simply won't render.
 
 A diagram is drawn at its intrinsic size (centred when narrower than the text
-column) and capped to the column width when wider. Click a diagram to open it
-in a dimmed overlay: `+`/`-` or the wheel zoom (1×–3×), `h`/`l`/`j`/`k` and the
-scroll bars pan, `Esc` or a click outside closes it.
+column) and capped to the column width when wider, with the same vertical
+spacing above and below as a table. Click a diagram to open it in a dimmed
+overlay: `+`/`-` or the wheel zoom (1×–3×), `h`/`l`/`j`/`k`, the scroll bars and
+mouse drag pan (both axes), and `Esc`, `q`, `Ctrl+C` or a click outside closes
+it. `q` and `Ctrl+C` only close the overlay; `Ctrl+C` with no overlay open quits
+mdview.
 
 ## Cache
 
