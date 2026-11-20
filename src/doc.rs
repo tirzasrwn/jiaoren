@@ -502,9 +502,9 @@ fn is_block_boundary(line: &str) -> bool {
 
 /// Parse a list block starting at `start` (which must carry a column-0 marker)
 /// into its items. Returns the index just past the block and the spec. Nested
-/// markers (indent / 2, capped at 5) stay in the same block; an indented
-/// non-marker line joins the current item; a blank or column-0 non-marker ends
-/// the block.
+/// markers (even indent / 2, capped at 5) stay in the same block; an indented
+/// non-marker line joins the current item; a blank, column-0 non-marker or
+/// odd-indent marker ends the block.
 fn parse_list_block(lines: &[&str], start: usize) -> Option<(usize, ListSpec)> {
     let (indent, kind, text) = list_marker(lines[start])?;
     if indent != 0 {
@@ -523,6 +523,11 @@ fn parse_list_block(lines: &[&str], start: usize) -> Option<(usize, ListSpec)> {
             break;
         }
         if let Some((indent, kind, text)) = list_marker(line) {
+            // Only even indents are item markers: a 1-space (or other odd)
+            // marker ends the block and stays on the library path.
+            if indent % 2 == 1 {
+                break;
+            }
             let depth = (indent / 2).min(5) as u8;
             items.push(std::mem::replace(
                 &mut cur,
@@ -552,7 +557,7 @@ fn parse_list_block(lines: &[&str], start: usize) -> Option<(usize, ListSpec)> {
 
 /// Split a line into its marker: leading spaces, kind, and remaining text.
 /// Ordered markers keep their literal number; task suffixes are recognised
-/// only directly after a marker and one space.
+/// after a marker and 1–4 spaces (or one tab).
 fn list_marker(line: &str) -> Option<(usize, ListKind, &str)> {
     let t = line.trim_end_matches(['\r', '\n', ' ', '\t']);
     let indent = t.len() - t.trim_start_matches(' ').len();
@@ -577,20 +582,33 @@ fn list_marker(line: &str) -> Option<(usize, ListKind, &str)> {
         return None;
     }
     let rest = &s[end..];
-    let task = rest.strip_prefix(' ').and_then(|r| {
-        let done = match r.get(..3)? {
-            "[ ]" => false,
-            "[x]" | "[X]" => true,
-            _ => return None,
-        };
-        match r[3..].chars().next() {
-            None | Some(' ') | Some('\t') => Some((done, &r[3..])),
-            _ => None,
-        }
-    });
-    match task {
-        Some((done, text)) => Some((indent, ListKind::Task(done), text.trim_start())),
+    match task_suffix(rest) {
+        Some((done, text)) => Some((indent, ListKind::Task(done), text)),
         None => Some((indent, kind, rest.trim_start())),
+    }
+}
+
+/// Task suffix after a marker: 1–4 spaces (or one tab), then `[ ]`, `[x]` or
+/// `[X]`, then whitespace or end of line.
+fn task_suffix(rest: &str) -> Option<(bool, &str)> {
+    let body = match rest.strip_prefix('\t') {
+        Some(r) => r,
+        None => {
+            let spaces = rest.len() - rest.trim_start_matches(' ').len();
+            if !(1..=4).contains(&spaces) {
+                return None;
+            }
+            &rest[spaces..]
+        }
+    };
+    let done = match body.get(..3)? {
+        "[ ]" => false,
+        "[x]" | "[X]" => true,
+        _ => return None,
+    };
+    match body[3..].chars().next() {
+        None | Some(' ') | Some('\t') => Some((done, body[3..].trim_start())),
+        _ => None,
     }
 }
 
@@ -785,6 +803,8 @@ mod tests {
             assert!(p.tables.is_empty());
             // Lists own their lines now; the quote and indented code stay verbatim.
             assert_eq!(p.lists.len(), 1);
+            let spec = p.lists.values().next().unwrap();
+            assert!(spec.items[0].text.contains("| a | b |"));
             assert!(p.markdown.contains("> | q |"));
             assert!(p.markdown.contains("    | code |"));
         }
@@ -837,6 +857,10 @@ mod tests {
             assert_eq!(spec.rows.len(), 1);
             assert!(p.markdown.contains("## h | x"));
             assert_eq!(p.lists.len(), 1);
+            assert_eq!(
+                p.lists.values().next().unwrap().items[0].text,
+                "list | item"
+            );
             assert!(p.markdown.contains("> q | r"));
             // Indented code after a row is a new block, not a data row.
             let md2 = "| a | b |\n|---|---|\n| 1 | 2 |\n    | code |\n";
@@ -891,6 +915,7 @@ mod tests {
             assert_eq!(spec.items[2].depth, 1);
             assert!(matches!(spec.items[3].kind, ListKind::Ordered(1)));
             assert!(p.markdown.contains("<mdlist id="));
+            assert!(!p.markdown.contains("- satu"));
         }
 
         #[test]
@@ -985,6 +1010,38 @@ mod tests {
             let p = prepare("a - b\n", Path::new("/d"));
             assert!(p.lists.is_empty());
             assert_eq!(p.paragraphs.len(), 1);
+        }
+
+        #[test]
+        fn odd_indent_marker_ends_the_block() {
+            let p = prepare("- a\n - b\n", Path::new("/d"));
+            assert_eq!(p.lists.values().next().unwrap().items.len(), 1);
+            assert!(p.markdown.contains(" - b"));
+        }
+
+        #[test]
+        fn plus_bullets_and_paren_ordered_markers() {
+            let p = prepare("+ a\n1) b\n", Path::new("/d"));
+            let spec = p.lists.values().next().unwrap();
+            assert_eq!(spec.items[0].kind, ListKind::Bullet);
+            assert_eq!(spec.items[1].kind, ListKind::Ordered(1));
+        }
+
+        #[test]
+        fn task_suffix_accepts_one_to_four_spaces_or_tab() {
+            let p = prepare("-  [x] a\n-\t[ ] b\n", Path::new("/d"));
+            let spec = p.lists.values().next().unwrap();
+            assert_eq!(spec.items[0].kind, ListKind::Task(true));
+            assert_eq!(spec.items[0].text, "a");
+            assert_eq!(spec.items[1].kind, ListKind::Task(false));
+            assert_eq!(spec.items[1].text, "b");
+        }
+
+        #[test]
+        fn list_inside_fence_stays_untouched() {
+            let p = prepare("```\n- a\n```\n", Path::new("/d"));
+            assert!(p.lists.is_empty());
+            assert!(p.markdown.contains("- a"));
         }
 
         #[test]
