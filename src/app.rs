@@ -307,10 +307,9 @@ pub fn apply_key(
             }
             match state.last_g.take() {
                 Some(t) if now.duration_since(t) < GG_WINDOW => Some(Action::Top),
-                // A `g` after the window has elapsed: nothing to pair with, so
-                // treat it as a standalone jump to the bottom.
-                Some(_) => Some(Action::Bottom),
-                None => {
+                // A `g` with no recent predecessor (including one after the
+                // window elapsed) arms a fresh `gg`.
+                _ => {
                     state.last_g = Some(now);
                     None
                 }
@@ -716,7 +715,30 @@ mod key_tests {
         assert_eq!(apply_key(&mut s, Key::G, Modifiers::NONE, t0), None);
         assert_eq!(apply_key(&mut s, Key::G, Modifiers::NONE, t0 + std::time::Duration::from_millis(200)), Some(Action::Top));
         assert_eq!(apply_key(&mut s, Key::G, Modifiers::NONE, t0 + std::time::Duration::from_millis(700)), None);
-        assert_eq!(apply_key(&mut s, Key::G, Modifiers::NONE, t0 + std::time::Duration::from_millis(2300)), Some(Action::Bottom));
+        assert_eq!(apply_key(&mut s, Key::G, Modifiers::SHIFT, t0 + std::time::Duration::from_millis(2300)), Some(Action::Bottom));
+    }
+
+    #[test]
+    fn shifted_g_jumps_to_bottom_and_clears_pending_g() {
+        let mut s = KeyState::default();
+        let t0 = std::time::Instant::now();
+        // A lone `g` arms the window...
+        assert_eq!(apply_key(&mut s, Key::G, Modifiers::NONE, t0), None);
+        // ...and Shift+G is bottom immediately, dropping the pending `g`.
+        assert_eq!(apply_key(&mut s, Key::G, Modifiers::SHIFT, t0), Some(Action::Bottom));
+        assert!(s.last_g.is_none());
+        // The cleared state means the next `g` re-arms rather than going top.
+        assert_eq!(apply_key(&mut s, Key::G, Modifiers::NONE, t0), None);
+    }
+
+    #[test]
+    fn zoom_keys_map_to_zoom_actions() {
+        let mut s = KeyState::default();
+        let now = std::time::Instant::now();
+        assert_eq!(apply_key(&mut s, Key::Plus, Modifiers::NONE, now), Some(Action::ZoomIn));
+        assert_eq!(apply_key(&mut s, Key::Equals, Modifiers::NONE, now), Some(Action::ZoomIn));
+        assert_eq!(apply_key(&mut s, Key::Minus, Modifiers::NONE, now), Some(Action::ZoomOut));
+        assert_eq!(apply_key(&mut s, Key::A, Modifiers::NONE, now), Some(Action::Fit));
     }
 
     #[test]
