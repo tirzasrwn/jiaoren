@@ -45,8 +45,8 @@ pub fn paragraph_id(source: &str) -> String {
     hex.as_str()[..16].to_string()
 }
 
-/// True when `line` may open or continue a top-level paragraph: it starts at
-/// column 0, is non-blank, and carries no block marker the library must own.
+/// True when `line` may open a top-level paragraph: it starts at column 0, is
+/// non-blank, and carries no block marker the library must own.
 pub fn is_paragraph_start(line: &str) -> bool {
     let t = line.trim_end_matches(['\r', '\n', ' ', '\t']);
     let first = match t.chars().next() {
@@ -56,7 +56,7 @@ pub fn is_paragraph_start(line: &str) -> bool {
     if first == ' ' || first == '\t' {
         return false; // indented: code block, list continuation, ...
     }
-    if open_fence(t).is_some() || is_thematic_break(t) {
+    if open_fence(t).is_some() || is_thematic_break(t) || is_setext_underline(t) {
         return false;
     }
     match first {
@@ -91,6 +91,30 @@ fn is_thematic_break(t: &str) -> bool {
         Some(&m) if matches!(m, '-' | '*' | '_') => {
             marks.len() >= 3 && marks.iter().all(|&c| c == m)
         }
+        _ => false,
+    }
+}
+
+/// A setext underline: one or more `=` or `-` and nothing else (up to 3 spaces
+/// of indent). It turns the preceding line into a heading, so the library must
+/// own both lines instead of us extracting that line as a paragraph.
+fn is_setext_underline(line: &str) -> bool {
+    let t = line.trim();
+    match t.chars().next() {
+        Some('=') => t.chars().all(|c| c == '='),
+        Some('-') => t.chars().all(|c| c == '-'),
+        _ => false,
+    }
+}
+
+/// A paragraph continuation may be indented 1–3 spaces (CommonMark allows a
+/// hanging indent); 4+ spaces is code or a nested block, so the run ends there.
+fn is_paragraph_continuation(line: &str) -> bool {
+    let t = line.trim_end_matches(['\r', '\n', ' ', '\t']);
+    let indent = t.len() - t.trim_start_matches(' ').len();
+    match indent {
+        0 => is_paragraph_start(t),
+        1..=3 => is_paragraph_start(t.trim_start_matches(' ')),
         _ => false,
     }
 }
@@ -160,8 +184,18 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                     // two never cover the same lines.
                     if is_paragraph_start(line) {
                         let mut j = i + 1;
-                        while j < lines.len() && is_paragraph_start(lines[j]) {
+                        while j < lines.len() && is_paragraph_continuation(lines[j]) {
                             j += 1;
+                        }
+                        // A setext underline anywhere in/after the run makes the
+                        // library's heading win: emit this line verbatim and let
+                        // the underline end the block on the next iteration.
+                        let setext = (j < lines.len() && is_setext_underline(lines[j]))
+                            || lines[i + 1..j].iter().any(|l| is_setext_underline(l));
+                        if setext {
+                            out.push_str(&rewrite_images(line, doc_dir));
+                            i += 1;
+                            continue;
                         }
                         // CRLF safe: each line is trimmed at its end, then joined.
                         let joined = lines[i..j]
@@ -630,11 +664,13 @@ mod tests {
     fn placeholder_after_paragraph_gets_blank_line() {
         let md = "intro\n| a | b |\n|---|---|\n| 1 | 2 |\n";
         let p = prepare(md, Path::new("/d"));
-        // Both neighbours survive: the paragraph placeholder also ends with a
+        // Both neighbours survive: the paragraph placeholder is followed by a
         // blank line, so the table placeholder starts its own HTML block.
-        assert!(p.paragraphs.values().any(|s| s == "intro"));
-        assert!(p.markdown.contains("<mdpara"));
-        assert!(p.markdown.contains("<mdtable id="));
+        let id = p.paragraphs.keys().next().unwrap();
+        assert_eq!(p.paragraphs.values().next().unwrap(), "intro");
+        assert!(p
+            .markdown
+            .contains(&format!("<mdpara id=\"{id}\">\n\n<mdtable id=\"")));
     }
 
     #[test]
@@ -659,7 +695,10 @@ mod tests {
         let md = "first para\n\nsecond para\n";
         let p = prepare(md, Path::new("/d"));
         assert_eq!(p.paragraphs.len(), 2);
-        assert!(p.markdown.ends_with("\n"));
+        assert!(p.markdown.ends_with("\n\n"));
+        for id in p.paragraphs.keys() {
+            assert!(p.markdown.contains(&format!("<mdpara id=\"{id}\">\n\n")));
+        }
     }
 
     #[test]
@@ -713,5 +752,40 @@ mod tests {
         assert!(p.paragraphs.values().any(|s| s == "para2"));
         assert!(p.markdown.contains("- item"));
         assert!(p.markdown.contains("# h"));
+    }
+
+    #[test]
+    fn setext_equals_heading_is_not_a_paragraph() {
+        let md = "Title\n===\n";
+        let p = prepare(md, Path::new("/d"));
+        assert!(p.paragraphs.is_empty());
+        assert!(p.markdown.contains("Title\n==="));
+    }
+
+    #[test]
+    fn setext_dash_heading_is_not_a_paragraph() {
+        let md = "Title\n---\n";
+        let p = prepare(md, Path::new("/d"));
+        assert!(p.paragraphs.is_empty());
+        assert!(p.markdown.contains("Title\n---"));
+    }
+
+    #[test]
+    fn hanging_indent_continuation_stays_in_the_paragraph() {
+        let md = "Hello world\n  continued here\n";
+        let p = prepare(md, Path::new("/d"));
+        assert_eq!(p.paragraphs.len(), 1);
+        let src = p.paragraphs.values().next().unwrap();
+        assert!(src.contains("Hello world"));
+        assert!(src.contains("continued here"));
+    }
+
+    #[test]
+    fn four_space_indent_is_not_a_continuation() {
+        let md = "Hello world\n    code\n";
+        let p = prepare(md, Path::new("/d"));
+        assert_eq!(p.paragraphs.len(), 1);
+        assert_eq!(p.paragraphs.values().next().unwrap(), "Hello world");
+        assert!(p.markdown.contains("    code"));
     }
 }
