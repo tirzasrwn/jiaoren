@@ -1,5 +1,5 @@
-//! Pre-parse a Markdown document, extracting mermaid diagrams, GFM tables and
-//! paragraph placeholders before rendering.
+//! Pre-parse a Markdown document, extracting mermaid diagrams, GFM tables,
+//! list blocks and paragraph placeholders before rendering.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -45,8 +45,40 @@ pub struct Prepared {
     pub diagrams: HashMap<String, String>,
     /// Parsed tables keyed by [`table_id`].
     pub tables: HashMap<String, TableSpec>,
+    /// Parsed list blocks keyed by [`list_id`].
+    #[allow(dead_code, reason = "rendered by app/list.rs in Task 2")]
+    pub lists: HashMap<String, ListSpec>,
     /// Paragraph Markdown keyed by [`paragraph_id`].
     pub paragraphs: HashMap<String, String>,
+}
+
+/// A top-level list block, parsed out of the Markdown before rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListSpec {
+    /// Items in document order, with nesting depth and marker kind.
+    pub items: Vec<ListItem>,
+}
+
+/// One list item: its nesting depth, marker and inline Markdown text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListItem {
+    /// Nesting depth (leading spaces / 2, capped at 5).
+    pub depth: u8,
+    /// Marker that opened the item.
+    pub kind: ListKind,
+    /// Item text with continuation lines joined by a single space.
+    pub text: String,
+}
+
+/// The marker that opened a list item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListKind {
+    /// `-`, `*` or `+`.
+    Bullet,
+    /// Ordered marker, keeping the literal number from the source.
+    Ordered(u64),
+    /// Task marker; `true` when the box is checked.
+    Task(bool),
 }
 
 /// A top-level GFM table, parsed out of the Markdown before rendering.
@@ -78,6 +110,30 @@ pub fn table_id(spec: &TableSpec) -> String {
 /// Stable 16-hex-character id for a paragraph's rewritten Markdown source.
 pub fn paragraph_id(source: &str) -> String {
     let hex = blake3::hash(source.trim().as_bytes()).to_hex();
+    hex.as_str()[..16].to_string()
+}
+
+/// Stable 16-hex-character id for a list block's items.
+pub fn list_id(spec: &ListSpec) -> String {
+    let mut canon = String::new();
+    for (n, item) in spec.items.iter().enumerate() {
+        if n > 0 {
+            canon.push('\u{1e}');
+        }
+        canon.push_str(&item.depth.to_string());
+        canon.push('\u{1f}');
+        match item.kind {
+            ListKind::Bullet => canon.push('b'),
+            ListKind::Ordered(number) => {
+                canon.push('o');
+                canon.push_str(&number.to_string());
+            }
+            ListKind::Task(done) => canon.push(if done { 'x' } else { ' ' }),
+        }
+        canon.push('\u{1f}');
+        canon.push_str(item.text.trim_end());
+    }
+    let hex = blake3::hash(canon.as_bytes()).to_hex();
     hex.as_str()[..16].to_string()
 }
 
@@ -168,6 +224,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
     let mut out = String::with_capacity(md.len());
     let mut diagrams = HashMap::new();
     let mut tables = HashMap::new();
+    let mut lists = HashMap::new();
     let mut paragraphs = HashMap::new();
     // (fence char, run length, info string, verbatim open line)
     let mut open: Option<(char, usize, String, String)> = None;
@@ -222,6 +279,31 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                             i = j;
                             continue;
                         }
+                    }
+                    // List block: a marker at column 0 opens it, indented
+                    // markers nest, indented non-markers continue the item.
+                    // Claimed before paragraphs so a bullet is never a
+                    // paragraph. Items the library must own (images, raw HTML)
+                    // leave the whole block verbatim.
+                    if let Some((j, spec)) = parse_list_block(&lines, i) {
+                        let fallback = spec
+                            .items
+                            .iter()
+                            .any(|it| it.text.contains("![") || it.text.contains('<'));
+                        if fallback {
+                            for l in &lines[i..j] {
+                                out.push_str(&rewrite_images(l, doc_dir));
+                            }
+                        } else {
+                            let id = list_id(&spec);
+                            lists.insert(id.clone(), spec);
+                            if !out.is_empty() && !out.ends_with("\n\n") {
+                                out.push('\n');
+                            }
+                            out.push_str(&format!("<mdlist id=\"{id}\">\n\n"));
+                        }
+                        i = j;
+                        continue;
                     }
                     // Not a table (or malformed delimiter): emit as before.
                     // A paragraph is claimed only after table detection, so the
@@ -295,6 +377,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
         markdown: out,
         diagrams,
         tables,
+        lists,
         paragraphs,
     }
 }
@@ -414,6 +497,100 @@ fn is_block_boundary(line: &str) -> bool {
             let digits = t.len() - t.trim_start_matches(|c: char| c.is_ascii_digit()).len();
             digits > 0 && digits < t.len() && matches!(t.as_bytes()[digits], b'.' | b')')
         }
+    }
+}
+
+/// Parse a list block starting at `start` (which must carry a column-0 marker)
+/// into its items. Returns the index just past the block and the spec. Nested
+/// markers (indent / 2, capped at 5) stay in the same block; an indented
+/// non-marker line joins the current item; a blank or column-0 non-marker ends
+/// the block.
+fn parse_list_block(lines: &[&str], start: usize) -> Option<(usize, ListSpec)> {
+    let (indent, kind, text) = list_marker(lines[start])?;
+    if indent != 0 {
+        return None;
+    }
+    let mut items = Vec::new();
+    let mut cur = ListItem {
+        depth: 0,
+        kind,
+        text: text.to_string(),
+    };
+    let mut j = start + 1;
+    while j < lines.len() {
+        let line = lines[j];
+        if line.trim().is_empty() {
+            break;
+        }
+        if let Some((indent, kind, text)) = list_marker(line) {
+            let depth = (indent / 2).min(5) as u8;
+            items.push(std::mem::replace(
+                &mut cur,
+                ListItem {
+                    depth,
+                    kind,
+                    text: text.to_string(),
+                },
+            ));
+            j += 1;
+            continue;
+        }
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        if indent >= 2 {
+            if !cur.text.is_empty() {
+                cur.text.push(' ');
+            }
+            cur.text.push_str(line.trim());
+            j += 1;
+            continue;
+        }
+        break;
+    }
+    items.push(cur);
+    Some((j, ListSpec { items }))
+}
+
+/// Split a line into its marker: leading spaces, kind, and remaining text.
+/// Ordered markers keep their literal number; task suffixes are recognised
+/// only directly after a marker and one space.
+fn list_marker(line: &str) -> Option<(usize, ListKind, &str)> {
+    let t = line.trim_end_matches(['\r', '\n', ' ', '\t']);
+    let indent = t.len() - t.trim_start_matches(' ').len();
+    let s = &t[indent..];
+    if is_thematic_break(s) {
+        return None;
+    }
+    let b = s.as_bytes();
+    let (kind, end) = match b.first()? {
+        b'-' | b'*' | b'+' => (ListKind::Bullet, 1),
+        c if c.is_ascii_digit() => {
+            let digits = b.iter().take_while(|c| c.is_ascii_digit()).count();
+            let number = s[..digits].parse().ok()?;
+            match b.get(digits) {
+                Some(b'.') | Some(b')') => (ListKind::Ordered(number), digits + 1),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    if !(end == s.len() || matches!(b[end], b' ' | b'\t')) {
+        return None;
+    }
+    let rest = &s[end..];
+    let task = rest.strip_prefix(' ').and_then(|r| {
+        let done = match r.get(..3)? {
+            "[ ]" => false,
+            "[x]" | "[X]" => true,
+            _ => return None,
+        };
+        match r[3..].chars().next() {
+            None | Some(' ') | Some('\t') => Some((done, &r[3..])),
+            _ => None,
+        }
+    });
+    match task {
+        Some((done, text)) => Some((indent, ListKind::Task(done), text.trim_start())),
+        None => Some((indent, kind, rest.trim_start())),
     }
 }
 
@@ -600,13 +777,16 @@ mod tests {
         }
 
         #[test]
-        fn pipes_in_paragraph_list_quote_indent_stay_verbatim() {
+        fn pipes_in_list_quote_indent_are_never_tables() {
             let out = prepare("a | b alone\n", Path::new("/d")).markdown;
             assert!(out.contains("a | b alone"));
             let md = "- | a | b |\n  |---|---|\n> | q |\n\n    | code |\n";
             let p = prepare(md, Path::new("/d"));
             assert!(p.tables.is_empty());
-            assert!(p.markdown.contains("- | a | b |"));
+            // Lists own their lines now; the quote and indented code stay verbatim.
+            assert_eq!(p.lists.len(), 1);
+            assert!(p.markdown.contains("> | q |"));
+            assert!(p.markdown.contains("    | code |"));
         }
 
         #[test]
@@ -656,7 +836,7 @@ mod tests {
             let spec = p.tables.values().next().unwrap();
             assert_eq!(spec.rows.len(), 1);
             assert!(p.markdown.contains("## h | x"));
-            assert!(p.markdown.contains("- list | item"));
+            assert_eq!(p.lists.len(), 1);
             assert!(p.markdown.contains("> q | r"));
             // Indented code after a row is a new block, not a data row.
             let md2 = "| a | b |\n|---|---|\n| 1 | 2 |\n    | code |\n";
@@ -695,6 +875,153 @@ mod tests {
         }
     }
 
+    mod lists {
+        use super::super::*;
+
+        #[test]
+        fn extracts_bullets_with_depth_and_numbers() {
+            let md = "- satu\n- dua\n  - anak\n    1. cucu\n";
+            let p = prepare(md, Path::new("/d"));
+            let spec = p.lists.values().next().unwrap();
+            assert_eq!(spec.items.len(), 4);
+            assert_eq!(
+                (spec.items[0].depth, &spec.items[0].kind),
+                (0, &ListKind::Bullet)
+            );
+            assert_eq!(spec.items[2].depth, 1);
+            assert!(matches!(spec.items[3].kind, ListKind::Ordered(1)));
+            assert!(p.markdown.contains("<mdlist id="));
+        }
+
+        #[test]
+        fn joins_continuation_lines() {
+            let md = "- item yang panjang\n  lanjutan baris pertama\n  dan kedua\n";
+            let spec = prepare(md, Path::new("/d"))
+                .lists
+                .into_values()
+                .next()
+                .unwrap();
+            assert_eq!(spec.items.len(), 1);
+            assert_eq!(
+                spec.items[0].text,
+                "item yang panjang lanjutan baris pertama dan kedua"
+            );
+        }
+
+        #[test]
+        fn task_lists_and_ordered_start() {
+            let md = "3. tiga\n4. empat\n- [x] selesai\n- [ ] belum\n";
+            let p = prepare(md, Path::new("/d"));
+            let specs: Vec<_> = p.lists.into_values().collect();
+            let all: Vec<_> = specs.iter().flat_map(|s| &s.items).collect();
+            assert!(matches!(all[0].kind, ListKind::Ordered(3)));
+            assert!(matches!(all[1].kind, ListKind::Ordered(4)));
+            assert_eq!(all[2].kind, ListKind::Task(true));
+            assert_eq!(all[3].kind, ListKind::Task(false));
+        }
+
+        #[test]
+        fn image_items_fall_back_to_library() {
+            let md = "- biasa\n- dengan ![gambar](a.png)\n";
+            let p = prepare(md, Path::new("/d"));
+            assert!(p.lists.is_empty());
+            assert!(p.markdown.contains("- dengan"));
+        }
+
+        #[test]
+        fn blockquote_lists_are_not_extracted() {
+            assert!(prepare("> - satu\n", Path::new("/d")).lists.is_empty());
+        }
+
+        #[test]
+        fn html_items_fall_back_to_library() {
+            let p = prepare("- a<br>b\n- c\n", Path::new("/d"));
+            assert!(p.lists.is_empty());
+            assert!(p.markdown.contains("- a<br>b"));
+            assert!(p.markdown.contains("- c"));
+        }
+
+        #[test]
+        fn list_then_paragraph_keeps_both() {
+            let p = prepare("- a\nnext para\n", Path::new("/d"));
+            assert_eq!(p.lists.len(), 1);
+            assert_eq!(p.paragraphs.len(), 1);
+            assert!(p.paragraphs.values().any(|s| s == "next para"));
+            assert!(p.markdown.contains("<mdlist id="));
+            assert!(p.markdown.contains("<mdpara id="));
+        }
+
+        #[test]
+        fn list_after_table_extracts_both() {
+            let p = prepare("| a |\n|---|\n| 1 |\n- x\n", Path::new("/d"));
+            assert_eq!(p.tables.len(), 1);
+            assert_eq!(p.lists.len(), 1);
+        }
+
+        #[test]
+        fn crlf_list_extracts_and_joins() {
+            let p = prepare("- satu\r\n  lanjut\r\n- dua\r\n", Path::new("/d"));
+            let spec = p.lists.values().next().unwrap();
+            assert_eq!(spec.items.len(), 2);
+            assert_eq!(spec.items[0].text, "satu lanjut");
+            assert_eq!(spec.items[1].text, "dua");
+        }
+
+        #[test]
+        fn list_at_eof_without_newline_extracts() {
+            let p = prepare("- satu", Path::new("/d"));
+            assert_eq!(p.lists.values().next().unwrap().items.len(), 1);
+        }
+
+        #[test]
+        fn star_emphasis_line_is_not_a_list() {
+            let p = prepare("*emphasis*\n", Path::new("/d"));
+            assert!(p.lists.is_empty());
+            assert_eq!(p.paragraphs.len(), 1);
+        }
+
+        #[test]
+        fn dash_inside_sentence_is_not_a_list() {
+            let p = prepare("a - b\n", Path::new("/d"));
+            assert!(p.lists.is_empty());
+            assert_eq!(p.paragraphs.len(), 1);
+        }
+
+        #[test]
+        fn nested_task_item_keeps_depth_and_state() {
+            let p = prepare("- [ ] induk\n  - [x] anak\n", Path::new("/d"));
+            let spec = p.lists.values().next().unwrap();
+            assert_eq!(spec.items[0].kind, ListKind::Task(false));
+            assert_eq!(
+                (spec.items[1].depth, spec.items[1].kind),
+                (1, ListKind::Task(true))
+            );
+        }
+
+        #[test]
+        fn depth_is_capped_at_five() {
+            let p = prepare("- a\n                - b\n", Path::new("/d"));
+            let spec = p.lists.values().next().unwrap();
+            assert_eq!(spec.items[1].depth, 5);
+        }
+
+        #[test]
+        fn list_id_is_stable_and_content_sensitive() {
+            let a = ListSpec {
+                items: vec![ListItem {
+                    depth: 0,
+                    kind: ListKind::Bullet,
+                    text: "x".to_string(),
+                }],
+            };
+            let mut b = a.clone();
+            b.items[0].text = "y".to_string();
+            assert_eq!(list_id(&a), list_id(&a));
+            assert_ne!(list_id(&a), list_id(&b));
+            assert_eq!(list_id(&a).len(), 16);
+        }
+    }
+
     mod paragraphs {
         use super::super::*;
 
@@ -720,7 +1047,8 @@ mod tests {
             assert_eq!(p.paragraphs.len(), 1);
             let id = p.paragraphs.keys().next().unwrap();
             assert!(p.markdown.contains(&format!("<mdpara id=\"{id}\">")));
-            assert!(p.markdown.contains("- list"));
+            assert!(p.markdown.contains("<mdlist id="));
+            assert_eq!(p.lists.len(), 1);
             assert!(!p.markdown.contains("world\", this is a paragraph"));
         }
 
@@ -790,7 +1118,8 @@ mod tests {
             assert_eq!(p.paragraphs.len(), 2);
             assert!(p.paragraphs.values().any(|s| s == "para"));
             assert!(p.paragraphs.values().any(|s| s == "para2"));
-            assert!(p.markdown.contains("- item"));
+            assert_eq!(p.lists.len(), 1);
+            assert!(p.markdown.contains("<mdlist id="));
             assert!(p.markdown.contains("# h"));
         }
 
