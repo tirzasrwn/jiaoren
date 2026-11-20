@@ -100,6 +100,11 @@ document cannot exfiltrate data or load remote resources during rendering.
 
 - Wide tables and long code lines wrap instead of getting a horizontal
   scrollbar. Use `+` to zoom in when a wrapped line is hard to read.
+- Body paragraphs are justified by a built-in layout: bold/italic/code/strike/
+  links are supported, but a paragraph containing an image or raw HTML falls
+  back to plain (left-aligned) rendering.
+- A single token wider than the column (a very long URL) overflows and is
+  clipped at the window edge.
 
 ## Non-goals
 
