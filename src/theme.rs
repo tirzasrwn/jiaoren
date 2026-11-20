@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use crate::mermaid::Theme;
 
 #[derive(Clone, Copy)]
@@ -132,6 +134,29 @@ pub fn visuals(theme: Theme) -> egui::Visuals {
     v
 }
 
+/// Mermaid `themeVariables` fragment (no outer braces) keyed to the palette.
+static MERMAID_VARS: LazyLock<[String; 2]> =
+    LazyLock::new(|| [mermaid_vars(&LATTE), mermaid_vars(&MACCHIATO)]);
+
+fn mermaid_vars(p: &Palette) -> String {
+    let h = |c: Rgb| c.to_hex();
+    format!(
+        "background:\"{}\",primaryColor:\"{}\",primaryTextColor:\"{}\",primaryBorderColor:\"{}\",lineColor:\"{}\",secondaryColor:\"{}\",tertiaryColor:\"{}\",textColor:\"{}\",mainBkg:\"{}\",nodeBorder:\"{}\",clusterBkg:\"{}\",clusterBorder:\"{}\",titleColor:\"{}\",edgeLabelBackground:\"{}\",actorBkg:\"{}\",actorBorder:\"{}\",actorTextColor:\"{}\",signalColor:\"{}\",signalTextColor:\"{}\",labelBoxBkgColor:\"{}\",labelBoxBorderColor:\"{}\",noteBkgColor:\"{}\",noteTextColor:\"{}\",noteBorderColor:\"{}\"",
+        h(p.base), h(p.surface0), h(p.text), h(p.overlay1), h(p.overlay2),
+        h(p.mantle), h(p.crust), h(p.text), h(p.surface0), h(p.overlay1),
+        h(p.mantle), h(p.surface1), h(p.text), h(p.base), h(p.surface0),
+        h(p.overlay1), h(p.text), h(p.text), h(p.text), h(p.surface0),
+        h(p.overlay1), h(p.yellow), h(p.base), h(p.yellow),
+    )
+}
+
+pub fn mermaid_variables(theme: Theme) -> &'static str {
+    match theme {
+        Theme::Light => MERMAID_VARS[0].as_str(),
+        Theme::Dark => MERMAID_VARS[1].as_str(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +177,16 @@ mod tests {
         let d = visuals(Theme::Dark);
         assert!(d.dark_mode);
         assert_eq!(d.panel_fill, palette(Theme::Dark).base.into());
+    }
+
+    #[test]
+    fn mermaid_variables_use_their_palette_and_differ() {
+        let l = mermaid_variables(Theme::Light);
+        let d = mermaid_variables(Theme::Dark);
+        assert!(l.contains(&palette(Theme::Light).base.to_hex()));
+        assert!(l.contains(&palette(Theme::Light).text.to_hex()));
+        assert!(d.contains(&palette(Theme::Dark).base.to_hex()));
+        assert!(d.contains(&palette(Theme::Dark).text.to_hex()));
+        assert_ne!(l, d);
     }
 }
