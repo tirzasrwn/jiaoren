@@ -76,20 +76,7 @@ impl Renderer {
         self.ensure_mermaid_js()?;
 
         let html = self.cache_dir.join(format!("{id}-{}-{RENDER_VERSION}.html", theme.as_str()));
-        let escaped = html_escape(source);
-        let page = format!(
-            "<!doctype html><meta charset=\"utf-8\"><body style=\"margin:0\"><div id=\"out\"></div>\n\
-<pre id=\"src\" hidden>{escaped}</pre>\n\
-<script src=\"mermaid.min.js\"></script>\n\
-<script>\n\
-mermaid.initialize({{startOnLoad:false, htmlLabels:false, theme:\"{theme}\", fontFamily:\"sans-serif\",\n\
-  flowchart:{{htmlLabels:false}}, securityLevel:\"loose\"}});\n\
-mermaid.render(\"d\", document.getElementById(\"src\").textContent)\n\
-  .then(r => {{ document.getElementById(\"out\").innerHTML = r.svg; }})\n\
-  .catch(e => {{ document.getElementById(\"out\").textContent = \"ERR:\" + e.message; }});\n\
-</script>\n",
-            theme = theme.as_str()
-        );
+        let page = build_html(&self.mermaid_js, source, theme);
         fs::write(&html, &page).map_err(|e| format!("write html: {e}"))?;
 
         let out = Command::new(&chromium)
@@ -146,7 +133,9 @@ mermaid.render(\"d\", document.getElementById(\"src\").textContent)\n\
     }
 
     fn atomic_write(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-        let tmp = path.with_extension("tmp");
+        // Append rather than replace the extension so .png and .err of the
+        // same id get distinct tmp names.
+        let tmp = PathBuf::from(format!("{}.tmp", path.display()));
         fs::write(&tmp, bytes)?;
         fs::rename(&tmp, path)
     }
@@ -155,16 +144,19 @@ mermaid.render(\"d\", document.getElementById(\"src\").textContent)\n\
         if self.mermaid_js.exists() {
             return Ok(());
         }
+        let tmp = PathBuf::from(format!("{}.tmp", self.mermaid_js.display()));
         let status = Command::new("curl")
             .arg("-fsSL")
             .arg("-o")
-            .arg(&self.mermaid_js)
+            .arg(&tmp)
             .arg("https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.min.js")
             .status()
             .map_err(|e| format!("spawn curl: {e}"))?;
-        if status.success() && self.mermaid_js.exists() {
+        if status.success() {
+            fs::rename(&tmp, &self.mermaid_js).map_err(|e| format!("rename mermaid js: {e}"))?;
             Ok(())
         } else {
+            let _ = fs::remove_file(&tmp);
             Err("failed to download mermaid.min.js".to_string())
         }
     }
@@ -234,6 +226,46 @@ fn html_escape(s: &str) -> String {
     out
 }
 
+fn file_url(path: &Path) -> String {
+    let mut out = String::new();
+    for c in path.to_string_lossy().chars() {
+        match c {
+            ' ' => out.push_str("%20"),
+            '#' => out.push_str("%23"),
+            '?' => out.push_str("%3F"),
+            '%' => out.push_str("%25"),
+            '"' => out.push_str("%22"),
+            '<' => out.push_str("%3C"),
+            '>' => out.push_str("%3E"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+// Build the Chromium page. The JS is referenced by absolute file:// URL so a
+// $MDVIEW_MERMAID_JS override outside cache_dir still loads.
+fn build_html(mermaid_js: &Path, source: &str, theme: Theme) -> String {
+    let abs = mermaid_js
+        .canonicalize()
+        .unwrap_or_else(|_| mermaid_js.to_path_buf());
+    let js_src = format!("file://{}", file_url(&abs));
+    let escaped = html_escape(source);
+    format!(
+        "<!doctype html><meta charset=\"utf-8\"><body style=\"margin:0\"><div id=\"out\"></div>\n\
+<pre id=\"src\" hidden>{escaped}</pre>\n\
+<script src=\"{js_src}\"></script>\n\
+<script>\n\
+mermaid.initialize({{startOnLoad:false, htmlLabels:false, theme:\"{theme}\", fontFamily:\"sans-serif\",\n\
+  flowchart:{{htmlLabels:false}}, securityLevel:\"loose\"}});\n\
+mermaid.render(\"d\", document.getElementById(\"src\").textContent)\n\
+  .then(r => {{ document.getElementById(\"out\").innerHTML = r.svg; }})\n\
+  .catch(e => {{ document.getElementById(\"out\").textContent = \"ERR:\" + e.message; }});\n\
+</script>\n",
+        theme = theme.as_str()
+    )
+}
+
 fn slice_svg(stdout: &str) -> Option<&str> {
     let start = stdout.find("<svg")?;
     let end = stdout.rfind("</svg>")? + "</svg>".len();
@@ -297,6 +329,14 @@ mod tests {
         std::env::set_var("MDVIEW_CHROMIUM", "/bin/true");
         assert_eq!(find_chromium(), Some(PathBuf::from("/bin/true")));
         std::env::remove_var("MDVIEW_CHROMIUM");
+    }
+
+    #[test]
+    fn html_references_absolute_mermaid_js_path() {
+        let js = std::env::temp_dir().join("elsewhere/mermaid.min.js");
+        let html = build_html(&js, "graph TD; A-->B;", Theme::Light);
+        assert!(html.contains(&format!("file://{}", js.display())));
+        assert!(!html.contains("src=\"mermaid.min.js\""));
     }
 
     #[test]
