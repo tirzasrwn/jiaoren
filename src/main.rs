@@ -38,6 +38,10 @@ fn main() -> Result<(), eframe::Error> {
             std::process::exit(2);
         }
     };
+    if let Err(e) = app::read_doc(&opts.path) {
+        eprintln!("{e}");
+        std::process::exit(2);
+    }
     eframe::run_native(
         "mdview",
         eframe::NativeOptions::default(),
