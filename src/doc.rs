@@ -58,17 +58,37 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                 }
                 None => {
                     // Table block: consecutive `|`-lines starting at a top-level
-                    // pipe-first line. ponytail: GFM headers without a leading
-                    // pipe (`a | b`) are not detected; add when seen in the wild.
-                    let mut j = i + 1;
-                    if !line.starts_with(char::is_whitespace) && t.starts_with('|') {
-                        while j < lines.len() && lines[j].trim().contains('|') {
+                    // line (GFM headers may omit the leading pipe); block-level
+                    // structures end the run. ponytail: an emphasis header like
+                    // `*a | b*` counts as a boundary and is missed; loosen the
+                    // marker set if that style shows up.
+                    if !is_block_boundary(line) && t.contains('|') {
+                        let mut j = i + 1;
+                        while j < lines.len()
+                            && lines[j].trim().contains('|')
+                            && !is_block_boundary(lines[j])
+                        {
                             j += 1;
                         }
                         let block: Vec<&str> = lines[i..j].iter().map(|l| l.trim()).collect();
-                        if let Some(spec) = parse_table_block(&block) {
+                        if let Some(mut spec) = parse_table_block(&block) {
+                            // Cells are ordinary Markdown: give them the same
+                            // relative-image rewrite every other line gets.
+                            for c in &mut spec.header {
+                                *c = rewrite_images(c, doc_dir);
+                            }
+                            for row in &mut spec.rows {
+                                for c in row {
+                                    *c = rewrite_images(c, doc_dir);
+                                }
+                            }
                             let id = table_id(&spec);
                             tables.insert(id.clone(), spec);
+                            // Blank line before the placeholder: type-7 HTML can
+                            // never interrupt a paragraph, so separate it first.
+                            if !out.is_empty() && !out.ends_with("\n\n") {
+                                out.push('\n');
+                            }
                             // Trailing blank line keeps a following paragraph out
                             // of the placeholder's HTML block, as with mermaid.
                             out.push_str(&format!("<mdtable id=\"{id}\">\n\n"));
@@ -204,6 +224,34 @@ fn open_fence(t: &str) -> Option<(char, usize, &str)> {
 
 fn is_close(t: &str, ch: char, open_len: usize) -> bool {
     t.chars().all(|c| c == ch) && t.chars().count() >= open_len
+}
+
+/// A table run ends (and cannot start) on such a line: fenced code, headings,
+/// blockquotes, list items, or indented code (≥4 spaces or a tab). A blank
+/// line qualifies too; it simply has no `|`, so the run stops at it anyway.
+fn is_block_boundary(line: &str) -> bool {
+    let t = line.trim_start();
+    if line.len() - t.len() >= 4 || line.starts_with('\t') {
+        return true; // indented code
+    }
+    let t = t.trim_end();
+    if open_fence(t).is_some() {
+        return true; // ``` / ~~~ fence line (may carry an info string with `|`)
+    }
+    match t.as_bytes().first() {
+        None => true,
+        Some(b'#') | Some(b'>') => true,
+        // Bullets stop a run — but a delimiter row (`--- | ---`) is part of the
+        // table, not a bullet.
+        Some(b'-') | Some(b'+') | Some(b'*') => {
+            let cells = split_row(t);
+            !(cells.len() > 1 && cells.iter().all(|c| is_delim_cell(c)))
+        }
+        Some(_) => {
+            let digits = t.len() - t.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            digits > 0 && digits < t.len() && matches!(t.as_bytes()[digits], b'.' | b')')
+        }
+    }
 }
 
 /// Split the text after `](` into the link body and the index just past the
@@ -441,5 +489,56 @@ mod tests {
             spec.rows,
             vec![vec!["1".to_string(), "2".to_string(), "3".to_string()]]
         );
+    }
+
+    #[test]
+    fn pipeless_gfm_header_table_extracts() {
+        let md = "a | b\n--- | ---\n1 | 2\n";
+        let p = prepare(md, Path::new("/d"));
+        assert_eq!(p.tables.len(), 1);
+        let spec = p.tables.values().next().unwrap();
+        assert_eq!(spec.header, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(spec.rows, vec![vec!["1".to_string(), "2".to_string()]]);
+        assert!(!p.markdown.contains("a | b"));
+    }
+
+    #[test]
+    fn block_structures_stop_a_table_run() {
+        let md = "| a | b |\n|---|---|\n| 1 | 2 |\n## h | x\n- list | item\n> q | r\n";
+        let p = prepare(md, Path::new("/d"));
+        assert_eq!(p.tables.len(), 1);
+        let spec = p.tables.values().next().unwrap();
+        assert_eq!(spec.rows.len(), 1);
+        assert!(p.markdown.contains("## h | x"));
+        assert!(p.markdown.contains("- list | item"));
+        assert!(p.markdown.contains("> q | r"));
+        // Indented code after a row is a new block, not a data row.
+        let md2 = "| a | b |\n|---|---|\n| 1 | 2 |\n    | code |\n";
+        let p2 = prepare(md2, Path::new("/d"));
+        assert_eq!(p2.tables.values().next().unwrap().rows.len(), 1);
+        assert!(p2.markdown.contains("| code |"));
+    }
+
+    #[test]
+    fn images_in_cells_get_file_url_rewrite() {
+        let md = "| img | txt |\n|---|---|\n| ![x](rel.png) | y |\n";
+        let p = prepare(md, Path::new("/docs"));
+        let spec = p.tables.values().next().unwrap();
+        assert_eq!(spec.rows[0][0], "![x](file:///docs/rel.png)");
+        assert_eq!(spec.rows[0][1], "y");
+    }
+
+    #[test]
+    fn shallowly_indented_table_extracts() {
+        let md = "  | a | b |\n  |---|---|\n  | 1 | 2 |\n";
+        let p = prepare(md, Path::new("/d"));
+        assert_eq!(p.tables.len(), 1);
+    }
+
+    #[test]
+    fn placeholder_after_paragraph_gets_blank_line() {
+        let md = "intro\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let p = prepare(md, Path::new("/d"));
+        assert!(p.markdown.contains("intro\n\n<mdtable"));
     }
 }
