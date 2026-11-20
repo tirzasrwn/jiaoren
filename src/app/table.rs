@@ -57,19 +57,33 @@ impl TableUi {
         let w = column_widths(ui.available_width(), ui.spacing().item_spacing.x, ncols);
         // A distinct id per occurrence so two identical tables never share state.
         let grid_id = ui.id().with(("mdtable", id, occurrence));
-        egui::Grid::new(grid_id).striped(true).show(ui, |ui| {
-            for cell in &spec.header {
-                render_cell(ui, w, cell, &mut self.cell_cache);
-            }
-            ui.end_row();
-            for row in &spec.rows {
-                for cell in row {
+        let body_row_height = ui.text_style_height(&egui::TextStyle::Body);
+        // The html hook runs in a wrapping left-to-right layout, where a bare
+        // `add_space` would advance horizontally; the vertical wrapper turns the
+        // padding into real space above and below the grid.
+        ui.vertical(|ui| {
+            ui.add_space(table_pad(body_row_height));
+            egui::Grid::new(grid_id).striped(true).show(ui, |ui| {
+                for cell in &spec.header {
                     render_cell(ui, w, cell, &mut self.cell_cache);
                 }
                 ui.end_row();
-            }
+                for row in &spec.rows {
+                    for cell in row {
+                        render_cell(ui, w, cell, &mut self.cell_cache);
+                    }
+                    ui.end_row();
+                }
+            });
+            ui.add_space(table_pad(body_row_height));
         });
     }
+}
+
+/// Vertical breathing room above and below a table: three quarters of a body
+/// row reads as balanced without pushing tables apart from their captions.
+fn table_pad(row_height: f32) -> f32 {
+    row_height * 0.75
 }
 
 /// Cells with images or raw HTML still need the library: our mini-parser cannot
@@ -106,6 +120,12 @@ fn render_cell(ui: &mut egui::Ui, w: f32, cell_md: &str, cache: &mut CommonMarkC
 mod tests {
     mod table {
         use super::super::cell_needs_library_fallback;
+        use super::super::table_pad;
+
+        #[test]
+        fn table_pad_is_three_quarters_of_a_row() {
+            assert_eq!(table_pad(20.0), 15.0);
+        }
 
         #[test]
         fn cell_falls_back_only_for_images_and_html() {
