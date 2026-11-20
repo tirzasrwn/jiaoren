@@ -384,9 +384,11 @@ fn break_priority(c: char) -> u8 {
 }
 
 /// Split an over-wide token into pieces that each measure at most `max_width`.
-/// Prefers cutting just after a separator; falls back to a hard cut at the
-/// largest fitting char boundary. A char wider than `max_width` forms its own
-/// piece, so the loop always advances and no character is ever dropped.
+/// Prefers cutting just after a separator when that piece is at least half full;
+/// otherwise hard-cuts at the largest fitting char boundary. A char wider than
+/// `max_width` forms its own piece, so the loop always advances and no character
+/// is ever dropped. Prefixes are measured once per candidate, never the whole
+/// remaining suffix, so a huge token stays linear in layouts.
 pub fn split_token(
     word: &str,
     max_width: f32,
@@ -396,25 +398,29 @@ pub fn split_token(
     let mut start = 0;
     while start < word.len() {
         let rest = &word[start..];
-        if measure(rest) <= max_width {
-            parts.push(rest.to_string());
-            break;
-        }
         let mut last_fit = None;
-        let mut sep_cut = None;
+        let mut sep_cut: Option<(usize, f32)> = None;
         for (off, ch) in rest.char_indices() {
             let end = start + off + ch.len_utf8();
-            if measure(&word[start..end]) > max_width {
+            let w = measure(&word[start..end]);
+            if w > max_width {
                 break;
             }
             last_fit = Some(end);
             if break_priority(ch) > 0 {
-                sep_cut = Some(end);
+                sep_cut = Some((end, w));
             }
         }
-        let cut = sep_cut.or(last_fit).unwrap_or_else(|| {
-            start + rest.chars().next().expect("non-empty").len_utf8()
-        });
+        if last_fit == Some(word.len()) {
+            parts.push(rest.to_string());
+            break;
+        }
+        let cut = match sep_cut {
+            Some((end, w)) if w >= max_width * 0.5 => end,
+            _ => last_fit.unwrap_or_else(|| {
+                start + rest.chars().next().expect("non-empty").len_utf8()
+            }),
+        };
         parts.push(word[start..cut].to_string());
         start = cut;
     }
@@ -435,6 +441,8 @@ struct Word {
     width: f32,
     /// No gap before this word: it is a continuation piece of the previous one.
     glued: bool,
+    /// Produced by splitting an over-wide token (head and continuations alike).
+    split: bool,
 }
 
 /// Layout every word fragment with the real egui font metrics. Words are split
@@ -529,6 +537,7 @@ fn push_frag(
             frags: Vec::new(),
             width: 0.0,
             glued: false,
+            split: false,
         });
         *open = true;
     }
@@ -607,6 +616,7 @@ fn paint(ui: &mut egui::Ui, runs: &[Run], column: f32, justify: bool) {
     let left = rect.left();
     let top = rect.top();
     let painter = ui.painter().clone();
+    let split_words: Vec<bool> = words.iter().map(|w| w.split).collect();
 
     for (row, line) in lines.iter().enumerate() {
         let natural = natural_of(line);
@@ -617,11 +627,12 @@ fn paint(ui: &mut egui::Ui, runs: &[Run], column: f32, justify: bool) {
             .skip(1)
             .filter(|&&i| gaps[i] > 0.0)
             .count();
-        let grow = if justify && !last && stretchable > 0 {
-            extra / stretchable as f32
-        } else {
-            0.0
-        };
+        let split = touches_split(
+            &split_words,
+            line,
+            lines.get(row + 1).map(Vec::as_slice),
+        );
+        let grow = justified_grow(justify, last, extra, stretchable, split);
 
         let mut x = left;
         let y = top + row as f32 * row_h;
@@ -637,6 +648,33 @@ fn paint(ui: &mut egui::Ui, runs: &[Run], column: f32, justify: bool) {
                 x += frag.width;
             }
         }
+    }
+}
+
+/// A line borders a split token when it holds any piece of one (head or
+/// continuation) or the next line starts with a piece. Such lines stay
+/// left-aligned: stretching gaps next to a broken URL/path looks like inserted
+/// spaces.
+fn touches_split(split: &[bool], line: &[usize], next: Option<&[usize]>) -> bool {
+    line.iter().any(|&i| split[i])
+        || next
+            .and_then(|l| l.first())
+            .is_some_and(|&i| split[i])
+}
+
+/// Extra width added to every stretchable gap on a line; zero for the last line,
+/// lines with nothing to stretch, and lines touching a split token.
+fn justified_grow(
+    justify: bool,
+    last: bool,
+    extra: f32,
+    stretchable: usize,
+    split: bool,
+) -> f32 {
+    if justify && !last && stretchable > 0 && !split {
+        extra / stretchable as f32
+    } else {
+        0.0
     }
 }
 
@@ -672,6 +710,7 @@ fn split_overwide(ui: &egui::Ui, words: Vec<Word>, column: f32) -> Vec<Word> {
                 }],
                 width,
                 glued: true,
+                split: true,
             });
         }
         out[first].glued = false;
@@ -781,6 +820,26 @@ mod tests {
     }
 
     #[test]
+    fn glued_words_share_a_line_break_budget() {
+        assert_eq!(
+            wrap_words(&[60.0, 60.0], &[0.0, 0.0], 100.0),
+            vec![vec![0], vec![1]]
+        );
+    }
+
+    #[test]
+    fn lines_touching_a_split_token_are_not_stretched() {
+        let split = [false, true, true, false];
+        assert!(touches_split(&split, &[1, 2], None)); // holds split pieces
+        assert!(touches_split(&split, &[0], Some(&[1]))); // next line starts it
+        assert!(!touches_split(&split, &[0], Some(&[3])));
+        assert_eq!(justified_grow(true, false, 50.0, 1, true), 0.0);
+        assert_eq!(justified_grow(true, false, 50.0, 2, false), 25.0);
+        assert_eq!(justified_grow(true, true, 50.0, 2, false), 0.0); // last line
+        assert_eq!(justified_grow(false, false, 50.0, 2, false), 0.0); // draw_left
+    }
+
+    #[test]
     fn splits_prefer_separators_and_lose_nothing() {
         let m = |s: &str| s.chars().count() as f32 * 10.0; // fake measure
         let parts = split_token("src/db/schema.ts:293-311", 100.0, &m);
@@ -815,6 +874,28 @@ mod tests {
         let m = |s: &str| s.chars().count() as f32 * 10.0;
         let parts = split_token("alpha/beta/gamma", 60.0, &m);
         assert_eq!(parts, vec!["alpha/", "beta/", "gamma"]);
+    }
+
+    #[test]
+    fn skips_a_separator_that_leaves_the_piece_less_than_half_full() {
+        let m = |s: &str| s.chars().count() as f32 * 10.0;
+        let word = format!("a-{}", "b".repeat(40));
+        let parts = split_token(&word, 100.0, &m);
+        assert_eq!(parts[0], "a-bbbbbbbb");
+        assert_eq!(parts.concat(), word);
+    }
+
+    #[test]
+    fn measures_only_short_prefixes_for_huge_tokens() {
+        let longest = std::cell::Cell::new(0usize);
+        let m = |s: &str| {
+            longest.set(longest.get().max(s.chars().count()));
+            s.chars().count() as f32 * 10.0
+        };
+        let word = "a/".repeat(50_000);
+        let parts = split_token(&word, 100.0, &m);
+        assert_eq!(parts.concat(), word);
+        assert!(longest.get() <= 11, "measured {} chars", longest.get());
     }
 
     #[test]
