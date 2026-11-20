@@ -76,6 +76,11 @@ export MDVIEW_CHROMIUM=/path/to/chrome
 If no Chromium is found, the document still opens and a warning banner is
 shown; diagrams simply won't render.
 
+A diagram is drawn at its intrinsic size (centred when narrower than the text
+column) and capped to the column width when wider. Click a diagram to open it
+in a dimmed overlay: `+`/`-` or the wheel zoom (1×–3×), `h`/`l`/`j`/`k` and the
+scroll bars pan, `Esc` or a click outside closes it.
+
 ## Cache
 
 Rendered diagrams are cached as SVG under `~/.cache/mdview/` (keyed by diagram
