@@ -113,6 +113,19 @@ document cannot exfiltrate data or load remote resources during rendering.
 - `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&#39;`, `&apos;` and `&nbsp;` are decoded
   in paragraphs and cells; other HTML entities show literally.
 
+## Development
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test
+cargo test -- --ignored        # needs headless chromium
+```
+
+`all` and `perf` clippy groups are denied in `Cargo.toml`, so the gate is
+enforced by the compiler. `pedantic` is intentionally off (its casts are
+noise here); targeted pedantic advice is applied by hand.
+
 ## Non-goals
 
 Editing, tabs, a TUI mode, `/` search, PDF/HTML export, math, remote images,
