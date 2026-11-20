@@ -52,9 +52,11 @@ fn parse_placeholder(html: &str) -> Option<&str> {
 /// agree. `set_theme` selects the style; `set_visuals` guarantees the exact
 /// light/dark palette even when the OS preference is the other one.
 fn apply_theme(ctx: &egui::Context, theme: Theme) {
-    let (egui_theme, visuals) = match theme {
-        Theme::Light => (egui::Theme::Light, egui::Visuals::light()),
-        Theme::Dark => (egui::Theme::Dark, egui::Visuals::dark()),
+    let visuals = crate::theme::visuals(theme);
+    let egui_theme = if visuals.dark_mode {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
     };
     ctx.set_theme(egui_theme);
     ctx.set_visuals(visuals);

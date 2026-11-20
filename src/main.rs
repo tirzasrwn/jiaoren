@@ -1,6 +1,7 @@
 mod app;
 mod doc;
 mod mermaid;
+mod theme;
 
 use std::path::PathBuf;
 
