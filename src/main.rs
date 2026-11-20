@@ -35,7 +35,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
         .ok_or_else(|| USAGE.to_string())
 }
 
-fn main() -> Result<(), eframe::Error> {
+fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let opts = match parse_args(&args) {
         Ok(o) => o,
@@ -44,18 +44,31 @@ fn main() -> Result<(), eframe::Error> {
             std::process::exit(2);
         }
     };
-    if let Err(e) = app::read_doc(&opts.path) {
-        eprintln!("{e}");
-        std::process::exit(2);
-    }
+    // Read once, before any window exists; the app receives the text.
+    let text = match doc::read_doc(&opts.path) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
     eframe::run_native(
         "mdview",
         eframe::NativeOptions::default(),
         Box::new(move |cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(app::App::new(opts.path, opts.dark, &cc.egui_ctx)))
+            Ok(Box::new(app::App::new(
+                opts.path,
+                text,
+                opts.dark,
+                &cc.egui_ctx,
+            )))
         }),
     )
+    // `eframe::Error` is not `Sync`, so it cannot convert via `?`; the display
+    // text is all the boundary needs.
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(())
 }
 
 #[cfg(test)]

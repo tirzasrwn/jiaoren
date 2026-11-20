@@ -11,6 +11,8 @@ egui_extras = { version = "0.36", features = ["image", "file", "svg", "svg_text"
 notify = "8"
 blake3 = "1"
 resvg = "0.48"
+thiserror = "2"
+anyhow = "1"
 
 [lints.clippy]
 all = { level = "deny", priority = 10 }

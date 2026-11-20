@@ -16,6 +16,14 @@ use notify::{RecursiveMode, Watcher};
 use crate::doc::{prepare, Prepared, TableSpec};
 use crate::mermaid::{find_chromium, parse_svg_size, Renderer, Theme};
 
+pub use crate::doc::read_doc;
+
+/// Lock a mutex, recovering the guard if a previous holder panicked. Poisoning
+/// must never deadlock the UI thread or silently drop queued renders.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// A render job handed to a worker thread: (diagram id, mermaid source, theme).
 type Job = (String, String, Theme);
 
@@ -102,11 +110,6 @@ fn rasterize(path: &Path, w: f32, h: f32, scale: f32) -> Result<egui::ColorImage
         [pw as usize, ph as usize],
         pixmap.data(),
     ))
-}
-
-pub fn read_doc(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    String::from_utf8(bytes).map_err(|_| format!("{} is not valid UTF-8", path.display()))
 }
 
 /// Returns the diagram id when `html` is exactly a `<mermaid id="…">` placeholder.
@@ -266,10 +269,7 @@ fn enqueue_diagram(
     }
     if let Some(src) = sources.get(id) {
         inflight.insert(id.to_string());
-        queue
-            .lock()
-            .unwrap()
-            .push_back((id.to_string(), src.clone(), theme));
+        lock(queue).push_back((id.to_string(), src.clone(), theme));
         true
     } else {
         false
@@ -341,12 +341,12 @@ impl DiagramUi {
         self.sizes.clear();
         self.inflight.clear();
         self.failures.clear();
-        self.queue.lock().unwrap().clear();
+        lock(&self.queue).clear();
         self.placeholders.clear();
         // Drop every raster with the document: dropping the `TextureHandle`s
         // frees the GPU textures.
         self.rasters.clear();
-        self.raster_queue.lock().unwrap().clear();
+        lock(&self.raster_queue).clear();
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, id: &str) {
@@ -424,18 +424,18 @@ impl DiagramUi {
     fn maybe_spawn(&mut self) {
         while self.active_workers < 4 {
             // Diagram renders gate new content, so they go first.
-            let job = self.queue.lock().unwrap().pop_front();
+            let job = lock(&self.queue).pop_front();
             if let Some((id, source, theme)) = job {
                 self.active_workers += 1;
                 let renderer = Arc::clone(&self.renderer);
                 let tx = self.result_tx.clone();
                 thread::spawn(move || {
-                    let res = renderer.render(&id, &source, theme);
+                    let res = renderer.render(&id, &source, theme).map_err(|e| e.to_string());
                     let _ = tx.send(WorkerMsg::Diagram((id, theme, res)));
                 });
                 continue;
             }
-            let job = self.raster_queue.lock().unwrap().pop_front();
+            let job = lock(&self.raster_queue).pop_front();
             if let Some(RasterJob { key, path, w, h, scale }) = job {
                 self.active_workers += 1;
                 let tx = self.result_tx.clone();
@@ -476,7 +476,7 @@ impl DiagramUi {
         if !self.rasters.contains_key(&key) {
             let scale = bucket_scale(bucket, ppp);
             self.rasters.insert(key.clone(), Raster::Pending);
-            self.raster_queue.lock().unwrap().push_back(RasterJob {
+            lock(&self.raster_queue).push_back(RasterJob {
                 key,
                 path: svg.to_path_buf(),
                 w: iw,
@@ -602,8 +602,10 @@ impl TableUi {
         if ncols == 0 {
             return;
         }
-        let occurrence = *self.occurrences.entry(id.to_string()).or_insert(0);
-        *self.occurrences.get_mut(id).unwrap() += 1;
+        let occurrence = self.occurrences.entry(id.to_string()).or_insert(0);
+        let current = *occurrence;
+        *occurrence += 1;
+        let occurrence = current;
         let w = column_widths(ui.available_width(), ui.spacing().item_spacing.x, ncols);
         // A distinct id per occurrence so two identical tables never share state.
         let grid_id = ui.id().with(("mdtable", id, occurrence));
@@ -801,7 +803,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(path: PathBuf, dark: bool, ctx: &egui::Context) -> Self {
+    pub fn new(path: PathBuf, text: String, dark: bool, ctx: &egui::Context) -> Self {
         let theme = if dark { Theme::Dark } else { Theme::Light };
         // Once, before the first frame: FiraCode primary, egui defaults as fallback.
         crate::fonts::install(ctx);
@@ -820,18 +822,7 @@ impl App {
             cache_dir: renderer.cache_dir.clone(),
         });
 
-        let (error, prepared) = match read_doc(&path) {
-            Ok(text) => (None, prepare(&text, parent_dir(&path))),
-            Err(e) => (
-                Some(e),
-                Prepared {
-                    markdown: String::new(),
-                    diagrams: HashMap::new(),
-                    tables: HashMap::new(),
-                    paragraphs: HashMap::new(),
-                },
-            ),
-        };
+        let prepared = prepare(&text, parent_dir(&path));
 
         let diagrams = Rc::new(RefCell::new(DiagramUi::new(
             shared,
@@ -886,7 +877,7 @@ impl App {
             renderer,
             theme,
             zoom: 1.0,
-            error,
+            error: None,
             cache: CommonMarkCache::default(),
             diagrams,
             tables,
@@ -911,7 +902,7 @@ impl App {
                 self.prepared = prepare(&text, parent_dir(&self.path));
                 self.error = None;
             }
-            Err(e) => self.error = Some(e),
+            Err(e) => self.error = Some(e.to_string()),
         }
     }
 
@@ -1181,16 +1172,41 @@ mod tests {
     fn read_doc_reports_missing_dir_and_bad_utf8() {
         assert!(read_doc(Path::new("/nope/missing.md"))
             .unwrap_err()
+            .to_string()
             .contains("cannot read"));
-        assert!(read_doc(Path::new("/tmp")).unwrap_err().contains("cannot read"));
+        assert!(read_doc(Path::new("/tmp"))
+            .unwrap_err()
+            .to_string()
+            .contains("cannot read"));
         let bad = std::env::temp_dir().join("mdview-bad-utf8.md");
         std::fs::write(&bad, [0xff, 0xfe]).unwrap();
-        assert!(read_doc(&bad).unwrap_err().contains("UTF-8"));
+        assert!(read_doc(&bad).unwrap_err().to_string().contains("UTF-8"));
         let _ = std::fs::remove_file(&bad);
     }
 
     fn sources() -> HashMap<String, String> {
         HashMap::from([("abc".to_string(), "graph TD; A-->B;".to_string())])
+    }
+
+    #[test]
+    fn lock_recovers_poisoned_mutex_and_keeps_queued_work() {
+        let queue = Mutex::new(VecDeque::new());
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = queue.lock().unwrap();
+            panic!("poison the queue");
+        }));
+        assert!(queue.is_poisoned());
+        let failures = HashMap::new();
+        let mut inflight = HashSet::new();
+        assert!(enqueue_diagram(
+            &failures,
+            &mut inflight,
+            &sources(),
+            &queue,
+            "abc",
+            Theme::Light
+        ));
+        assert_eq!(lock(&queue).len(), 1);
     }
 
     #[test]

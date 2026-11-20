@@ -21,6 +21,29 @@ impl Theme {
     }
 }
 
+/// Failure to produce a diagram SVG.
+#[derive(Debug, thiserror::Error)]
+pub enum RenderError {
+    /// No Chromium binary was found.
+    #[error("chromium not found; set MDVIEW_CHROMIUM")]
+    ChromiumMissing,
+    /// mermaid.js failed to load, or mermaid reported an error (text passed through).
+    #[error("{0}")]
+    MermaidJs(String),
+    /// Chromium could not be spawned.
+    #[error("spawn chromium {0}")]
+    Spawn(String),
+    /// The temporary HTML page could not be written.
+    #[error("write html: {0}")]
+    HtmlWrite(String),
+    /// Chromium produced output without an `<svg>` element.
+    #[error("no <svg> in chromium output")]
+    NoSvg,
+    /// The SVG could not be written to the cache.
+    #[error("write svg: {0}")]
+    Raster(String),
+}
+
 pub struct Renderer {
     pub chromium: Option<PathBuf>,
     pub mermaid_js: PathBuf,
@@ -58,7 +81,7 @@ impl Renderer {
         None
     }
 
-    pub fn render(&self, id: &str, source: &str, theme: Theme) -> Result<PathBuf, String> {
+    pub fn render(&self, id: &str, source: &str, theme: Theme) -> Result<PathBuf, RenderError> {
         let svg = self.svg_path(id, theme);
         if svg.exists() {
             return Ok(svg);
@@ -66,20 +89,20 @@ impl Renderer {
         let err = self.err_path(id, theme);
         if err.exists() {
             let msg = fs::read_to_string(&err).unwrap_or_else(|_| "render failed".to_string());
-            return Err(msg);
+            return Err(RenderError::MermaidJs(msg));
         }
 
         let chromium = self
             .chromium
             .clone()
             .or_else(find_chromium)
-            .ok_or_else(|| "chromium not found; set MDVIEW_CHROMIUM".to_string())?;
+            .ok_or(RenderError::ChromiumMissing)?;
 
         self.ensure_mermaid_js()?;
 
         let html = self.cache_dir.join(format!("{id}-{}-{RENDER_VERSION}.html", theme.as_str()));
         let page = build_html(&self.mermaid_js, source, theme);
-        fs::write(&html, &page).map_err(|e| format!("write html: {e}"))?;
+        fs::write(&html, &page).map_err(|e| RenderError::HtmlWrite(e.to_string()))?;
 
         let out = Command::new(&chromium)
             .arg("--headless")
@@ -91,7 +114,7 @@ impl Renderer {
             .arg("--virtual-time-budget=5000")
             .arg(format!("file://{}", html.display()))
             .output()
-            .map_err(|e| format!("spawn chromium {}: {e}", chromium.display()))?;
+            .map_err(|e| RenderError::Spawn(format!("{}: {e}", chromium.display())))?;
 
         let _ = fs::remove_file(&html);
 
@@ -102,7 +125,7 @@ impl Renderer {
                 String::from_utf8_lossy(&out.stderr).trim()
             );
             self.write_err(id, theme, &msg);
-            return Err(msg);
+            return Err(RenderError::MermaidJs(msg));
         }
 
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -111,19 +134,20 @@ impl Renderer {
         if let Some(pos) = stdout.find("id=\"out\">ERR:") {
             let msg = stdout[pos..].split("</div>").next().unwrap_or("mermaid error").to_string();
             self.write_err(id, theme, &msg);
-            return Err(msg);
+            return Err(RenderError::MermaidJs(msg));
         }
 
         let svg_text = match slice_svg(&stdout) {
             Some(s) => s,
             None => {
-                let msg = "no <svg> in chromium output".to_string();
-                self.write_err(id, theme, &msg);
-                return Err(msg);
+                let err = RenderError::NoSvg;
+                self.write_err(id, theme, &err.to_string());
+                return Err(err);
             }
         };
 
-        self.atomic_write(&svg, svg_text.as_bytes()).map_err(|e| format!("write svg: {e}"))?;
+        self.atomic_write(&svg, svg_text.as_bytes())
+            .map_err(|e| RenderError::Raster(e.to_string()))?;
         Ok(svg)
     }
 
@@ -140,7 +164,7 @@ impl Renderer {
         fs::rename(&tmp, path)
     }
 
-    pub(crate) fn ensure_mermaid_js(&self) -> Result<(), String> {
+    pub(crate) fn ensure_mermaid_js(&self) -> Result<(), RenderError> {
         if self.mermaid_js.exists() {
             return Ok(());
         }
@@ -155,13 +179,14 @@ impl Renderer {
             .arg(&tmp)
             .arg("https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.min.js")
             .status()
-            .map_err(|e| format!("spawn curl: {e}"))?;
+            .map_err(|e| RenderError::MermaidJs(format!("spawn curl: {e}")))?;
         if status.success() {
-            fs::rename(&tmp, &self.mermaid_js).map_err(|e| format!("rename mermaid js: {e}"))?;
+            fs::rename(&tmp, &self.mermaid_js)
+                .map_err(|e| RenderError::MermaidJs(format!("rename mermaid js: {e}")))?;
             Ok(())
         } else {
             let _ = fs::remove_file(&tmp);
-            Err("failed to download mermaid.min.js (network needed on first run only; set MDVIEW_MERMAID_JS to use an existing copy)".to_string())
+            Err(RenderError::MermaidJs("failed to download mermaid.min.js (network needed on first run only; set MDVIEW_MERMAID_JS to use an existing copy)".to_string()))
         }
     }
 }
@@ -362,6 +387,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn render_error_messages_are_unchanged() {
+        assert_eq!(
+            RenderError::ChromiumMissing.to_string(),
+            "chromium not found; set MDVIEW_CHROMIUM"
+        );
+        assert_eq!(RenderError::MermaidJs("ERR:oops".into()).to_string(), "ERR:oops");
+        assert_eq!(
+            RenderError::Spawn("/x/chromium: nope".into()).to_string(),
+            "spawn chromium /x/chromium: nope"
+        );
+        assert_eq!(RenderError::HtmlWrite("e".into()).to_string(), "write html: e");
+        assert_eq!(RenderError::NoSvg.to_string(), "no <svg> in chromium output");
+        assert_eq!(RenderError::Raster("e".into()).to_string(), "write svg: e");
+    }
+
+    #[test]
     fn escapes_html_metacharacters() {
         assert_eq!(html_escape("A-->B & C<D>\"E\""), "A--&gt;B &amp; C&lt;D&gt;\"E\"");
         assert_eq!(html_escape("</pre>"), "&lt;/pre&gt;");
@@ -388,7 +429,11 @@ mod tests {
         let r = test_renderer(&d);
         assert!(r.cached("k", Theme::Light).is_none());
         std::fs::write(r.err_path("k", Theme::Light), "boom").unwrap();
-        assert!(matches!(r.cached("k", Theme::Light), Some(Err(_))));
+        match r.cached("k", Theme::Light) {
+            // The cached `.err` text reaches the UI verbatim.
+            Some(Err(msg)) => assert_eq!(msg, "boom"),
+            _ => panic!("expected cached error"),
+        }
         std::fs::write(r.svg_path("k", Theme::Light), b"svg").unwrap();
         assert!(matches!(r.cached("k", Theme::Light), Some(Ok(_))));
     }

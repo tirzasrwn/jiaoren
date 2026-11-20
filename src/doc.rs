@@ -2,9 +2,39 @@
 //! paragraph placeholders before rendering.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::mermaid::file_url;
+
+/// Failure to load a Markdown document from disk.
+#[derive(Debug, thiserror::Error)]
+pub enum DocError {
+    /// The file could not be read at all.
+    #[error("cannot read {}: {source}", path.display())]
+    Io {
+        /// Path the read was attempted on.
+        path: PathBuf,
+        /// Underlying OS error.
+        source: std::io::Error,
+    },
+    /// The file was read but is not UTF-8.
+    #[error("{} is not valid UTF-8", path.display())]
+    NotUtf8 {
+        /// Path that contained invalid UTF-8.
+        path: PathBuf,
+    },
+}
+
+/// Read `path` as UTF-8 text, naming the file in every error message.
+pub fn read_doc(path: &Path) -> Result<String, DocError> {
+    let bytes = std::fs::read(path).map_err(|source| DocError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    String::from_utf8(bytes).map_err(|_| DocError::NotUtf8 {
+        path: path.to_path_buf(),
+    })
+}
 
 #[allow(dead_code)] // fields consumed by app.rs in later tasks
 pub struct Prepared {
@@ -799,6 +829,23 @@ mod tests {
             p.paragraphs.values().next().unwrap(),
             "Hello world\ncontinued here\nand more"
         );
+    }
+
+    #[test]
+    fn read_doc_missing_file_message_is_unchanged() {
+        let path = Path::new("/nope/missing.md");
+        let io = std::fs::read(path).unwrap_err();
+        let err = read_doc(path).unwrap_err();
+        assert_eq!(err.to_string(), format!("cannot read {}: {io}", path.display()));
+    }
+
+    #[test]
+    fn read_doc_invalid_utf8_message_is_unchanged() {
+        let path = std::env::temp_dir().join(format!("mdview-bad-utf8-{}.md", std::process::id()));
+        std::fs::write(&path, [0xff, 0xfe]).unwrap();
+        let err = read_doc(&path).unwrap_err();
+        assert_eq!(err.to_string(), format!("{} is not valid UTF-8", path.display()));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
