@@ -13,6 +13,9 @@ use crate::mermaid::{find_chromium, Renderer, Theme};
 /// A render job handed to a worker thread: (diagram id, mermaid source, theme).
 type Job = (String, String, Theme);
 
+/// A finished render delivered back to the UI thread: (id, theme, outcome).
+type DiagramResult = (String, Theme, Result<PathBuf, String>);
+
 pub fn read_doc(path: &Path) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     String::from_utf8(bytes).map_err(|_| format!("{} is not valid UTF-8", path.display()))
@@ -48,17 +51,19 @@ fn parent_dir(path: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
-/// Queue a render for `id`, unless it has already failed this session or is in flight.
-/// Returns true when a job was actually enqueued.
+/// Queue a render for `id` in `theme`, unless it has already failed this session
+/// (for the same theme) or is in flight. Returns true when a job was enqueued, in
+/// which case the caller must request a repaint so the result is picked up without
+/// user input.
 fn enqueue_diagram(
-    failures: &HashMap<String, String>,
+    failures: &HashMap<(String, &'static str), String>,
     inflight: &mut HashSet<String>,
     sources: &HashMap<String, String>,
     queue: &Mutex<VecDeque<Job>>,
     id: &str,
     theme: Theme,
 ) -> bool {
-    if failures.contains_key(id) || inflight.contains(id) {
+    if failures.contains_key(&(id.to_string(), theme.as_str())) || inflight.contains(id) {
         return false;
     }
     if let Some(src) = sources.get(id) {
@@ -81,10 +86,10 @@ pub struct DiagramUi {
     zoom: f32,
     textures: HashMap<String, (egui::TextureHandle, [usize; 2])>,
     inflight: HashSet<String>,
-    failures: HashMap<String, String>,
+    failures: HashMap<(String, &'static str), String>,
     queue: Arc<Mutex<VecDeque<Job>>>,
-    result_tx: mpsc::Sender<(String, Result<PathBuf, String>)>,
-    result_rx: mpsc::Receiver<(String, Result<PathBuf, String>)>,
+    result_tx: mpsc::Sender<DiagramResult>,
+    result_rx: mpsc::Receiver<DiagramResult>,
     active_workers: usize,
 }
 
@@ -108,7 +113,7 @@ impl DiagramUi {
 
     pub fn show(&mut self, ui: &mut egui::Ui, id: &str) {
         let col = ui.available_width();
-        if let Some(msg) = self.failures.get(id) {
+        if let Some(msg) = self.failures.get(&(id.to_string(), self.theme.as_str())) {
             let msg = msg.clone();
             self.draw_error(ui, id, &msg);
             return;
@@ -117,7 +122,7 @@ impl DiagramUi {
             Some(Ok(png)) => self.draw_png(ui, id, &png, col),
             Some(Err(msg)) => self.draw_error(ui, id, &msg),
             None => {
-                enqueue_diagram(
+                let enqueued = enqueue_diagram(
                     &self.failures,
                     &mut self.inflight,
                     &self.sources,
@@ -126,6 +131,9 @@ impl DiagramUi {
                     self.theme,
                 );
                 self.maybe_spawn();
+                if enqueued {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                }
                 self.draw_placeholder(ui);
             }
         }
@@ -133,12 +141,12 @@ impl DiagramUi {
 
     pub fn poll(&mut self, ctx: &egui::Context) {
         let mut got = false;
-        while let Ok((id, result)) = self.result_rx.try_recv() {
+        while let Ok((id, theme, result)) = self.result_rx.try_recv() {
             got = true;
             self.inflight.remove(&id);
             self.active_workers = self.active_workers.saturating_sub(1);
             if let Err(msg) = result {
-                self.failures.insert(id, msg);
+                self.failures.insert((id, theme.as_str()), msg);
             }
         }
         if !self.inflight.is_empty() {
@@ -161,7 +169,7 @@ impl DiagramUi {
             let tx = self.result_tx.clone();
             thread::spawn(move || {
                 let res = renderer.render(&id, &source, theme);
-                let _ = tx.send((id, res));
+                let _ = tx.send((id, theme, res));
             });
         }
     }
@@ -390,6 +398,7 @@ mod tests {
         let failures = HashMap::new();
         let mut inflight = HashSet::new();
         let queue = Mutex::new(VecDeque::new());
+        // A successful enqueue signals "must repaint" (returns true).
         assert!(enqueue_diagram(
             &failures,
             &mut inflight,
@@ -413,7 +422,8 @@ mod tests {
     fn failed_id_is_never_requeued() {
         // A failed render must not be queued again this session, even though the
         // on-disk cache never got a png/err (.err is only written for diagram errors).
-        let failures = HashMap::from([("abc".to_string(), "chromium not found".to_string())]);
+        let failures =
+            HashMap::from([(("abc".to_string(), "light"), "chromium not found".to_string())]);
         let mut inflight = HashSet::new();
         let queue = Mutex::new(VecDeque::new());
         assert!(!enqueue_diagram(
@@ -426,6 +436,32 @@ mod tests {
         ));
         assert!(inflight.is_empty());
         assert!(queue.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failure_is_theme_scoped() {
+        // A Light-mode failure must not suppress the same id under Dark.
+        let failures =
+            HashMap::from([(("abc".to_string(), "light"), "boom".to_string())]);
+        let mut inflight = HashSet::new();
+        let queue = Mutex::new(VecDeque::new());
+        assert!(!enqueue_diagram(
+            &failures,
+            &mut inflight,
+            &sources(),
+            &queue,
+            "abc",
+            Theme::Light
+        ));
+        assert!(enqueue_diagram(
+            &failures,
+            &mut inflight,
+            &sources(),
+            &queue,
+            "abc",
+            Theme::Dark
+        ));
+        assert_eq!(queue.lock().unwrap().len(), 1);
     }
 
     #[test]
