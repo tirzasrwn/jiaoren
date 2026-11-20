@@ -1,3 +1,4 @@
+mod mermaid;
 mod doc;
 
 use std::path::PathBuf;
