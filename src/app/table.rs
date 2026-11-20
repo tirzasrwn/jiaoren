@@ -112,7 +112,7 @@ impl TableUi {
             }
         }
         let target = (available - spacing * (ncols - 1) as f32).max(0.0);
-        let max = 0.6 * target;
+        let max = if ncols == 1 { target } else { 0.6 * target };
         let desired: Vec<f32> = (0..ncols)
             .map(|i| {
                 spec.header

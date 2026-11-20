@@ -208,6 +208,13 @@ mod tests {
         }
 
         #[test]
+        fn table_widths_single_column_keeps_full_width() {
+            let w = table_column_widths(&[2000.0], 900.0, 8.0, 80.0);
+            let capped = cap_column_widths(&w, 900.0);
+            assert!((capped[0] - 900.0).abs() < 0.01);
+        }
+
+        #[test]
         fn table_widths_empty_is_empty() {
             assert!(table_column_widths(&[], 900.0, 8.0, 80.0).is_empty());
         }
