@@ -14,14 +14,57 @@ pub(crate) fn content_column(available: f32, zoom: f32) -> f32 {
     (available - 64.0).min(900.0 * zoom).max(0.0)
 }
 
-/// Per-column width for a table spanning `available` points with `ncols`
-/// columns and `spacing` between them. Exact division, floored at 80 px.
-pub(crate) fn column_widths(available: f32, spacing: f32, ncols: usize) -> f32 {
-    if ncols == 0 {
-        return available;
+/// Widths proportional to each column's desired width, fitting `available`
+/// after `spacing` between columns, with a `min` floor.
+/// `desired` must be non-empty; values are clamped to >= 1.0 so no column starves.
+pub(crate) fn table_column_widths(
+    desired: &[f32],
+    available: f32,
+    spacing: f32,
+    min: f32,
+) -> Vec<f32> {
+    let n = desired.len();
+    if n == 0 {
+        return Vec::new();
     }
-    let w = (available - spacing * (ncols - 1) as f32) / ncols as f32;
-    w.max(80.0)
+    let min = if min.is_finite() { min.max(0.0) } else { 0.0 };
+    let total = available - spacing * (n - 1) as f32;
+    if !total.is_finite() || total < min * n as f32 {
+        return vec![min; n];
+    }
+    let desire: Vec<f32> = desired
+        .iter()
+        .map(|d| if d.is_finite() { d.max(1.0) } else { 1.0 })
+        .collect();
+    let mut fixed = vec![false; n];
+    loop {
+        let active_sum: f32 = desire
+            .iter()
+            .zip(&fixed)
+            .filter(|(_, f)| !**f)
+            .map(|(d, _)| d)
+            .sum();
+        let fixed_sum = min * fixed.iter().filter(|f| **f).count() as f32;
+        let scale = if active_sum > 0.0 {
+            (total - fixed_sum) / active_sum
+        } else {
+            0.0
+        };
+        let mut changed = false;
+        for (i, d) in desire.iter().enumerate() {
+            if !fixed[i] && d * scale < min {
+                fixed[i] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            return desire
+                .iter()
+                .zip(&fixed)
+                .map(|(d, f)| if *f { min } else { d * scale })
+                .collect();
+        }
+    }
 }
 
 /// Keep a placeholder's top edge steady across a height change. Only content
@@ -80,9 +123,39 @@ mod tests {
         }
 
         #[test]
-        fn column_width_leaves_room_for_spacing() {
-            assert!((column_widths(900.0, 8.0, 3) - 294.666_7).abs() < 0.01);
-            assert_eq!(column_widths(100.0, 8.0, 10), 80.0);
+        fn table_widths_scale_to_desired_content() {
+            let w = table_column_widths(&[100.0, 100.0, 300.0], 900.0, 8.0, 80.0);
+            assert!(((w.iter().sum::<f32>()) - 884.0).abs() < 0.01);
+            assert!(w.iter().all(|x| *x >= 80.0));
+            assert!((w[2] - 3.0 * w[0]).abs() < 0.5);
+        }
+
+        #[test]
+        fn table_widths_floor_starved_columns() {
+            let w = table_column_widths(&[10.0, 100.0, 100.0], 300.0, 8.0, 80.0);
+            assert_eq!(w[0], 80.0);
+            assert!((w[1] - w[2]).abs() < 0.01);
+            assert!(((w.iter().sum::<f32>()) - 284.0).abs() < 0.01);
+        }
+
+        #[test]
+        fn table_widths_overflow_when_min_cannot_fit() {
+            assert_eq!(
+                table_column_widths(&[1.0; 5], 100.0, 8.0, 80.0),
+                vec![80.0; 5]
+            );
+        }
+
+        #[test]
+        fn table_widths_empty_is_empty() {
+            assert!(table_column_widths(&[], 900.0, 8.0, 80.0).is_empty());
+        }
+
+        #[test]
+        fn table_widths_clamp_non_positive_desire() {
+            let w = table_column_widths(&[0.0, -5.0, 100.0], 400.0, 8.0, 80.0);
+            assert!(w.iter().all(|x| x.is_finite() && *x >= 80.0));
+            assert!((w.iter().sum::<f32>() - 384.0).abs() < 0.01);
         }
 
         #[test]

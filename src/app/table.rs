@@ -7,16 +7,18 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 use crate::doc::TableSpec;
 
-use super::geometry::column_widths;
+use super::geometry::table_column_widths;
 
 /// Shared, interior-mutable state backing the `<mdtable>` render path in the
 /// html hook. Holds the parsed specs, a per-cell `CommonMarkCache` separate
-/// from the outer viewer's (a cell never re-borrows the outer cache), and a
-/// per-id occurrence counter so identical tables each get a distinct egui `Id`.
+/// from the outer viewer's (a cell never re-borrows the outer cache), a
+/// per-id occurrence counter so identical tables each get a distinct egui `Id`,
+/// and the last measured column widths per table.
 pub(crate) struct TableUi {
     tables: HashMap<String, TableSpec>,
     cell_cache: CommonMarkCache,
     occurrences: HashMap<String, usize>,
+    widths: HashMap<String, (i32, i32, Vec<f32>)>,
 }
 
 impl TableUi {
@@ -25,6 +27,7 @@ impl TableUi {
             tables,
             cell_cache: CommonMarkCache::default(),
             occurrences: HashMap::new(),
+            widths: HashMap::new(),
         }
     }
 
@@ -37,6 +40,7 @@ impl TableUi {
         self.tables = tables;
         self.cell_cache = CommonMarkCache::default();
         self.occurrences.clear();
+        self.widths.clear();
     }
 
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, id: &str) {
@@ -54,7 +58,9 @@ impl TableUi {
         let current = *occurrence;
         *occurrence += 1;
         let occurrence = current;
-        let w = column_widths(ui.available_width(), ui.spacing().item_spacing.x, ncols);
+        let available = ui.available_width();
+        let spacing = ui.spacing().item_spacing.x;
+        let widths = self.column_widths(ui, id, &spec, available, spacing);
         // A distinct id per occurrence so two identical tables never share state.
         let grid_id = ui.id().with(("mdtable", id, occurrence));
         let body_row_height = ui.text_style_height(&egui::TextStyle::Body);
@@ -64,13 +70,13 @@ impl TableUi {
         ui.vertical(|ui| {
             ui.add_space(table_pad(body_row_height));
             egui::Grid::new(grid_id).striped(true).show(ui, |ui| {
-                for cell in &spec.header {
-                    render_cell(ui, w, cell, &mut self.cell_cache);
+                for (i, cell) in spec.header.iter().enumerate() {
+                    render_cell(ui, cell_width(&widths, i), cell, &mut self.cell_cache);
                 }
                 ui.end_row();
                 for row in &spec.rows {
-                    for cell in row {
-                        render_cell(ui, w, cell, &mut self.cell_cache);
+                    for (i, cell) in row.iter().enumerate() {
+                        render_cell(ui, cell_width(&widths, i), cell, &mut self.cell_cache);
                     }
                     ui.end_row();
                 }
@@ -78,12 +84,69 @@ impl TableUi {
             ui.add_space(table_pad(body_row_height));
         });
     }
+
+    /// Content-proportional widths for one table, cached by id and layout so
+    /// the text measurement runs only when the column width or DPI changes.
+    fn column_widths(
+        &mut self,
+        ui: &egui::Ui,
+        id: &str,
+        spec: &TableSpec,
+        available: f32,
+        spacing: f32,
+    ) -> Vec<f32> {
+        let available_key = available.round() as i32;
+        let ppp_key = (ui.ctx().pixels_per_point() * 100.0).round() as i32;
+        if let Some((a, p, widths)) = self.widths.get(id) {
+            if *a == available_key && *p == ppp_key {
+                return widths.clone();
+            }
+        }
+        let body = egui::TextStyle::Body.resolve(ui.style());
+        let cap = 0.6 * available;
+        let ncols = spec.header.len();
+        let desired: Vec<f32> = (0..ncols)
+            .map(|i| {
+                spec.header
+                    .get(i)
+                    .into_iter()
+                    .chain(spec.rows.iter().filter_map(|row| row.get(i)))
+                    .map(|md| measure(ui, md, &body))
+                    .fold(1.0_f32, f32::max)
+                    .min(cap)
+            })
+            .collect();
+        let widths = table_column_widths(&desired, available, spacing, 80.0);
+        self.widths
+            .insert(id.to_string(), (available_key, ppp_key, widths.clone()));
+        widths
+    }
 }
 
 /// Vertical breathing room above and below a table: three quarters of a body
 /// row reads as balanced without pushing tables apart from their captions.
 pub(crate) fn table_pad(row_height: f32) -> f32 {
     row_height * 0.75
+}
+
+/// Single-line width of a cell's raw Markdown. Markup characters are counted,
+/// so this overestimates styled text slightly; it only steers the proportions.
+fn measure(ui: &egui::Ui, md: &str, font: &egui::FontId) -> f32 {
+    ui.fonts_mut(|f| {
+        f.layout_no_wrap(md.to_owned(), font.clone(), egui::Color32::WHITE)
+            .size()
+            .x
+    })
+}
+
+/// Width for column `i`, falling back to the last measured width for rows that
+/// carry more cells than the header.
+fn cell_width(widths: &[f32], i: usize) -> f32 {
+    widths
+        .get(i)
+        .or_else(|| widths.last())
+        .copied()
+        .unwrap_or(80.0)
 }
 
 /// Cells with images or raw HTML still need the library: our mini-parser cannot
@@ -95,7 +158,7 @@ fn cell_needs_library_fallback(md: &str) -> bool {
 
 /// Render one cell, capped at `w` so text wraps and inline formatting (bold,
 /// code, links) still applies. Long tokens break at separators, so a cell never
-/// widens the grid past the reading column.
+/// widens the grid past its column.
 fn render_cell(ui: &mut egui::Ui, w: f32, cell_md: &str, cache: &mut CommonMarkCache) {
     // A vertical scope reports the real content height back to the grid; a
     // zero-height `allocate_ui_with_layout` would collapse every row to 0 and
