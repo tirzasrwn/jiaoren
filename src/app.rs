@@ -642,6 +642,9 @@ fn render_cell(ui: &mut egui::Ui, w: f32, cell_md: &str, cache: &mut CommonMarkC
 pub struct ParagraphUi {
     paragraphs: HashMap<String, String>,
     cache: CommonMarkCache,
+    /// Reading column in effect this frame, set from the same `col` the viewer
+    /// is given via `ui.set_width(col)`.
+    column: f32,
 }
 
 impl ParagraphUi {
@@ -649,7 +652,14 @@ impl ParagraphUi {
         ParagraphUi {
             paragraphs,
             cache: CommonMarkCache::default(),
+            column: 0.0,
         }
+    }
+
+    /// Record the document's reading column once per frame, before the viewer
+    /// runs. `ui.available_width()` inside the html hook is not that column.
+    fn begin_frame(&mut self, column: f32) {
+        self.column = column;
     }
 
     fn reset(&mut self, paragraphs: HashMap<String, String>) {
@@ -668,8 +678,7 @@ impl ParagraphUi {
             return;
         }
         let runs = crate::justify::parse_inline(&source);
-        let column = ui.available_width();
-        crate::justify::draw(ui, &runs, column);
+        crate::justify::draw(ui, &runs, self.column);
     }
 }
 
@@ -1039,6 +1048,7 @@ impl eframe::App for App {
                             let cache = &mut self.cache;
                             let md = &self.prepared.markdown;
                             self.tables.borrow_mut().begin_frame();
+                            self.paragraphs.borrow_mut().begin_frame(col);
                             CommonMarkViewer::new()
                                 .max_image_width(Some(col as usize))
                                 .render_html_fn(Some(&**html_fn))
