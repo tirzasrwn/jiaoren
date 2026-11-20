@@ -28,6 +28,18 @@ same palette.
 - A missing file, a directory, or a non-UTF-8 file prints a readable error to
   stderr and exits with status `2` (no window).
 
+## Typography
+
+mdview uses **FiraCode Nerd Font** (family name `FiraCode Nerd Font`) for both
+body text and code, and for mermaid diagram labels. It looks for
+`FiraCodeNerdFont-Regular.ttf` / `FiraCodeNerdFont-Bold.ttf` in `~/.fonts`,
+`$XDG_DATA_HOME/fonts`, `~/.local/share/fonts`, then
+`/usr/share/fonts/truetype`. When the font is absent mdview starts normally on
+egui's built-in fonts.
+
+To go back to the defaults, delete (or comment out) the
+`crate::fonts::install(ctx);` call in `src/app.rs::App::new`.
+
 ## Keys
 
 | Key | Action |

@@ -1,5 +1,6 @@
 mod app;
 mod doc;
+mod fonts;
 mod mermaid;
 mod theme;
 

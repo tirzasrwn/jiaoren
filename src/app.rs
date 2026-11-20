@@ -586,6 +586,8 @@ pub struct App {
 impl App {
     pub fn new(path: PathBuf, dark: bool, ctx: &egui::Context) -> Self {
         let theme = if dark { Theme::Dark } else { Theme::Light };
+        // Once, before the first frame: FiraCode primary, egui defaults as fallback.
+        crate::fonts::install(ctx);
         apply_theme(ctx, theme);
         let mut renderer = Renderer::new();
         renderer.chromium = find_chromium();

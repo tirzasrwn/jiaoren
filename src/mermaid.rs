@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const RENDER_VERSION: &str = "4-mermaid11.12.0-htmlLabelsOff-2x-strict-svg-catppuccin";
+pub const RENDER_VERSION: &str = "5-mermaid11.12.0-htmlLabelsOff-2x-strict-svg-catppuccin-firacode";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Theme {
@@ -273,14 +273,15 @@ fn build_html(mermaid_js: &Path, source: &str, theme: Theme) -> String {
 <pre id=\"src\" hidden>{escaped}</pre>\n\
 <script src=\"{js_src}\"></script>\n\
 <script>\n\
-mermaid.initialize({{startOnLoad:false, htmlLabels:false, theme:\"base\", fontFamily:\"sans-serif\",\n\
+mermaid.initialize({{startOnLoad:false, htmlLabels:false, theme:\"base\", fontFamily:\"{family}\",\n\
   themeVariables:{{{vars}}},\n\
   flowchart:{{htmlLabels:false}}, securityLevel:\"strict\"}});\n\
 mermaid.render(\"d\", document.getElementById(\"src\").textContent)\n\
   .then(r => {{ document.getElementById(\"out\").innerHTML = r.svg; }})\n\
   .catch(e => {{ document.getElementById(\"out\").textContent = \"ERR:\" + e.message; }});\n\
 </script>\n",
-        vars = crate::theme::mermaid_variables(theme)
+        vars = crate::theme::mermaid_variables(theme),
+        family = crate::fonts::FAMILY
     )
 }
 
@@ -450,6 +451,14 @@ mod tests {
         assert!(html.contains(crate::theme::mermaid_variables(Theme::Dark)));
         assert!(html.contains("themeVariables:{"));
         assert!(!html.contains("theme:\"dark\""));
+    }
+
+    #[test]
+    fn html_uses_firacode_font_family() {
+        let js = std::env::temp_dir().join("mermaid.min.js");
+        let html = build_html(&js, "graph TD; A-->B;", Theme::Light);
+        assert!(html.contains(&format!("fontFamily:\"{}\"", crate::fonts::FAMILY)));
+        assert!(!html.contains("fontFamily:\"sans-serif\""));
     }
 
     #[test]
