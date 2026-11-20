@@ -5,9 +5,7 @@
 use std::sync::Arc;
 
 use egui::text::{LayoutJob, TextFormat};
-use egui::{
-    Color32, FontId, Galley, Id, Pos2, Rect, Sense, Stroke, TextStyle,
-};
+use egui::{Color32, FontId, Galley, Id, Pos2, Rect, Sense, Stroke, TextStyle};
 
 /// One styled piece of a paragraph.
 #[derive(Clone, Debug, PartialEq)]
@@ -267,9 +265,7 @@ fn find_marker(s: &str, marker: &str, ch: char) -> Option<usize> {
             i += n;
             continue;
         }
-        if rest.starts_with(marker)
-            && !escaped(s, i)
-            && delimiter_can_close(s, i, marker.len(), ch)
+        if rest.starts_with(marker) && !escaped(s, i) && delimiter_can_close(s, i, marker.len(), ch)
         {
             return Some(i);
         }
@@ -431,11 +427,7 @@ fn break_priority(c: char) -> u8 {
 /// `max_width` forms its own piece, so the loop always advances and no character
 /// is ever dropped. Prefixes are measured once per candidate, never the whole
 /// remaining suffix, so a huge token stays linear in layouts.
-pub fn split_token(
-    word: &str,
-    max_width: f32,
-    measure: &dyn Fn(&str) -> f32,
-) -> Vec<String> {
+pub fn split_token(word: &str, max_width: f32, measure: &dyn Fn(&str) -> f32) -> Vec<String> {
     let mut parts = Vec::new();
     let mut start = 0;
     while start < word.len() {
@@ -459,9 +451,8 @@ pub fn split_token(
         }
         let cut = match sep_cut {
             Some((end, w)) if w >= max_width * 0.5 => end,
-            _ => last_fit.unwrap_or_else(|| {
-                start + rest.chars().next().expect("non-empty").len_utf8()
-            }),
+            _ => last_fit
+                .unwrap_or_else(|| start + rest.chars().next().expect("non-empty").len_utf8()),
         };
         parts.push(word[start..cut].to_string());
         start = cut;
@@ -515,7 +506,10 @@ fn build_words(ui: &egui::Ui, runs: &[Run]) -> Vec<Word> {
         for ch in run.text.chars() {
             if ch.is_whitespace() && !atomic {
                 if !buf.is_empty() {
-                    push_frag(ui, &mut words, &mut open, &buf, run, &body, &mono, text_color, strong, link_color);
+                    push_frag(
+                        ui, &mut words, &mut open, &buf, run, &body, &mono, text_color, strong,
+                        link_color,
+                    );
                     buf.clear();
                 }
                 open = false;
@@ -524,7 +518,9 @@ fn build_words(ui: &egui::Ui, runs: &[Run]) -> Vec<Word> {
             }
         }
         if !buf.is_empty() {
-            push_frag(ui, &mut words, &mut open, &buf, run, &body, &mono, text_color, strong, link_color);
+            push_frag(
+                ui, &mut words, &mut open, &buf, run, &body, &mono, text_color, strong, link_color,
+            );
         }
     }
     words
@@ -532,7 +528,10 @@ fn build_words(ui: &egui::Ui, runs: &[Run]) -> Vec<Word> {
 
 /// Lay out one text fragment and append it to the current word, opening a new
 /// word when none is in progress.
-#[expect(clippy::too_many_arguments, reason = "one fragment needs font, colours, text and run context")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one fragment needs font, colours, text and run context"
+)]
 fn push_frag(
     ui: &egui::Ui,
     words: &mut Vec<Word>,
@@ -657,7 +656,10 @@ fn paint(ui: &mut egui::Ui, runs: &[Run], column: f32, justify: bool) {
     // Left-aligned mode paints inside a fixed-width cell, so it reserves exactly
     // the column and clips: a single over-wide glyph must not widen the table.
     let reserved = if justify {
-        lines.iter().map(|line| natural_of(line)).fold(column, f32::max)
+        lines
+            .iter()
+            .map(|line| natural_of(line))
+            .fold(column, f32::max)
     } else {
         column
     };
@@ -675,16 +677,8 @@ fn paint(ui: &mut egui::Ui, runs: &[Run], column: f32, justify: bool) {
         let natural = natural_of(line);
         let extra = (column - natural).max(0.0);
         let last = row + 1 == lines.len();
-        let stretchable = line
-            .iter()
-            .skip(1)
-            .filter(|&&i| gaps[i] > 0.0)
-            .count();
-        let split = touches_split(
-            &split_words,
-            line,
-            lines.get(row + 1).map(Vec::as_slice),
-        );
+        let stretchable = line.iter().skip(1).filter(|&&i| gaps[i] > 0.0).count();
+        let split = touches_split(&split_words, line, lines.get(row + 1).map(Vec::as_slice));
         let grow = justified_grow(justify, last, extra, stretchable, split);
 
         let mut x = left;
@@ -709,21 +703,12 @@ fn paint(ui: &mut egui::Ui, runs: &[Run], column: f32, justify: bool) {
 /// left-aligned: stretching gaps next to a broken URL/path looks like inserted
 /// spaces.
 fn touches_split(split: &[bool], line: &[usize], next: Option<&[usize]>) -> bool {
-    line.iter().any(|&i| split[i])
-        || next
-            .and_then(|l| l.first())
-            .is_some_and(|&i| split[i])
+    line.iter().any(|&i| split[i]) || next.and_then(|l| l.first()).is_some_and(|&i| split[i])
 }
 
 /// Extra width added to every stretchable gap on a line; zero for the last line,
 /// lines with nothing to stretch, and lines touching a split token.
-fn justified_grow(
-    justify: bool,
-    last: bool,
-    extra: f32,
-    stretchable: usize,
-    split: bool,
-) -> f32 {
+fn justified_grow(justify: bool, last: bool, extra: f32, stretchable: usize, split: bool) -> f32 {
     if justify && !last && stretchable > 0 && !split {
         extra / stretchable as f32
     } else {
@@ -798,26 +783,43 @@ mod tests {
         #[test]
         fn parses_the_supported_inline_styles() {
             let runs = parse_inline("a **b** c *d* e `f` g ~~h~~ [i](https://x)");
-            assert!(runs.iter().any(|r| r.kind == RunKind::Bold && r.text == "b"));
-            assert!(runs.iter().any(|r| r.kind == RunKind::Italic && r.text == "d"));
-            assert!(runs.iter().any(|r| r.kind == RunKind::Code && r.text == "f"));
-            assert!(runs.iter().any(|r| r.kind == RunKind::Strike && r.text == "h"));
-            assert!(runs.iter().any(|r| r.kind == RunKind::Link("https://x".into()) && r.text == "i"));
+            assert!(runs
+                .iter()
+                .any(|r| r.kind == RunKind::Bold && r.text == "b"));
+            assert!(runs
+                .iter()
+                .any(|r| r.kind == RunKind::Italic && r.text == "d"));
+            assert!(runs
+                .iter()
+                .any(|r| r.kind == RunKind::Code && r.text == "f"));
+            assert!(runs
+                .iter()
+                .any(|r| r.kind == RunKind::Strike && r.text == "h"));
+            assert!(runs
+                .iter()
+                .any(|r| r.kind == RunKind::Link("https://x".into()) && r.text == "i"));
         }
 
         #[test]
         fn leaves_unbalanced_markers_literal() {
             let runs = parse_inline("a **b");
-            assert_eq!(runs.iter().map(|r| r.text.as_str()).collect::<String>(), "a **b");
+            assert_eq!(
+                runs.iter().map(|r| r.text.as_str()).collect::<String>(),
+                "a **b"
+            );
         }
 
         #[test]
         fn escapes_markers_and_code_wins_over_emphasis() {
             let runs = parse_inline(r"a \*b\* `**c**`");
-            assert!(!runs.iter().any(|r| matches!(r.kind, RunKind::Italic | RunKind::Bold)));
+            assert!(!runs
+                .iter()
+                .any(|r| matches!(r.kind, RunKind::Italic | RunKind::Bold)));
             let joined = runs.iter().map(|r| r.text.as_str()).collect::<String>();
             assert_eq!(joined, "a *b* **c**");
-            assert!(runs.iter().any(|r| r.kind == RunKind::Code && r.text == "**c**"));
+            assert!(runs
+                .iter()
+                .any(|r| r.kind == RunKind::Code && r.text == "**c**"));
         }
 
         #[test]
@@ -832,8 +834,13 @@ mod tests {
         #[test]
         fn bold_with_inner_italics_keeps_every_character() {
             let runs = parse_inline("**a*b*c**");
-            assert_eq!(runs.iter().map(|r| r.text.as_str()).collect::<String>(), "abc");
-            assert!(runs.iter().any(|r| r.kind == RunKind::BoldItalic && r.text == "b"));
+            assert_eq!(
+                runs.iter().map(|r| r.text.as_str()).collect::<String>(),
+                "abc"
+            );
+            assert!(runs
+                .iter()
+                .any(|r| r.kind == RunKind::BoldItalic && r.text == "b"));
         }
 
         #[test]
@@ -847,7 +854,10 @@ mod tests {
             assert_eq!(joined("AT&amp;T"), "AT&T");
             assert_eq!(joined("&lt;b&gt;"), "<b>");
             assert_eq!(joined("a&nbsp;b"), "a b");
-            assert_eq!(joined("&quot;q&quot; &#39;s&#39; &apos;t&apos;"), "\"q\" 's' 't'");
+            assert_eq!(
+                joined("&quot;q&quot; &#39;s&#39; &apos;t&apos;"),
+                "\"q\" 's' 't'"
+            );
             assert_eq!(joined("&bogus; &amp"), "&bogus; &amp");
         }
 
@@ -858,7 +868,9 @@ mod tests {
                 runs.iter().map(|r| r.text.as_str()).collect::<String>(),
                 "use a**b here"
             );
-            assert!(runs.iter().any(|r| r.kind == RunKind::Code && r.text == "a**b"));
+            assert!(runs
+                .iter()
+                .any(|r| r.kind == RunKind::Code && r.text == "a**b"));
             assert!(!runs
                 .iter()
                 .any(|r| r.kind != RunKind::Code && r.text.contains('*')));
@@ -867,10 +879,13 @@ mod tests {
         #[test]
         fn triple_marker_is_bold_italic() {
             let runs = parse_inline("***both***");
-            assert_eq!(runs, vec![Run {
-                text: "both".into(),
-                kind: RunKind::BoldItalic,
-            }]);
+            assert_eq!(
+                runs,
+                vec![Run {
+                    text: "both".into(),
+                    kind: RunKind::BoldItalic,
+                }]
+            );
         }
     }
 

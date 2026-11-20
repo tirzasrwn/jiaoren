@@ -27,12 +27,7 @@ pub(crate) fn column_widths(available: f32, spacing: f32, ncols: usize) -> f32 {
 /// Keep a placeholder's top edge steady across a height change. Only content
 /// whose placeholder started above the viewport is re-anchored; anything at or
 /// below the fold is left alone. Pure so it is unit-testable.
-pub(crate) fn reanchor(
-    scroll_y: f32,
-    viewport_top: f32,
-    placeholder_top: f32,
-    delta: f32,
-) -> f32 {
+pub(crate) fn reanchor(scroll_y: f32, viewport_top: f32, placeholder_top: f32, delta: f32) -> f32 {
     if placeholder_top < viewport_top {
         (scroll_y + delta).max(0.0)
     } else {
@@ -60,12 +55,7 @@ pub(crate) fn bucket_scale(bucket: u8, pixels_per_point: f32) -> f32 {
 }
 
 /// Build the [`RasterKey`] for `id` at `bucket` and display density.
-pub(crate) fn raster_key(
-    id: &str,
-    theme: Theme,
-    bucket: u8,
-    pixels_per_point: f32,
-) -> RasterKey {
+pub(crate) fn raster_key(id: &str, theme: Theme, bucket: u8, pixels_per_point: f32) -> RasterKey {
     (
         id.to_string(),
         theme.as_str(),

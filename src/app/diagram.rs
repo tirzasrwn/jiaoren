@@ -145,7 +145,8 @@ impl DiagramUi {
                 );
                 self.maybe_spawn();
                 if enqueued {
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(100));
                 }
                 // On a theme switch keep the old theme's image on screen until
                 // the new render arrives; never flash a placeholder.
@@ -206,13 +207,22 @@ impl DiagramUi {
                 let renderer = Arc::clone(&self.renderer);
                 let tx = self.result_tx.clone();
                 thread::spawn(move || {
-                    let res = renderer.render(&id, &source, theme).map_err(|e| e.to_string());
+                    let res = renderer
+                        .render(&id, &source, theme)
+                        .map_err(|e| e.to_string());
                     let _ = tx.send(WorkerMsg::Diagram((id, theme, res)));
                 });
                 continue;
             }
             let job = lock(&self.raster_queue).pop_front();
-            if let Some(RasterJob { key, path, w, h, scale }) = job {
+            if let Some(RasterJob {
+                key,
+                path,
+                w,
+                h,
+                scale,
+            }) = job
+            {
                 self.active_workers += 1;
                 let tx = self.result_tx.clone();
                 thread::spawn(move || {
@@ -271,13 +281,13 @@ impl DiagramUi {
                 Some(Raster::Ready(tex)) => {
                     let tex = tex.clone();
                     let (w, h) = (iw * self.zoom, ih * self.zoom);
-                    let response = ui.add(
-                        egui::Image::from_texture(&tex).fit_to_exact_size(egui::vec2(w, h)),
-                    );
+                    let response =
+                        ui.add(egui::Image::from_texture(&tex).fit_to_exact_size(egui::vec2(w, h)));
                     if let Some(ph) = self.placeholders.remove(id) {
                         let delta = response.rect.height() - ph.height;
                         if delta != 0.0 {
-                            let new_scroll = reanchor(self.scroll_y, ph.viewport_top, ph.top, delta);
+                            let new_scroll =
+                                reanchor(self.scroll_y, ph.viewport_top, ph.top, delta);
                             self.scroll_adjust += new_scroll - self.scroll_y;
                             ui.ctx().request_repaint();
                         }
@@ -326,7 +336,8 @@ impl DiagramUi {
                 viewport_top,
             },
         );
-        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(40));
+        ui.painter()
+            .rect_filled(rect, 0.0, egui::Color32::from_gray(40));
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -396,8 +407,10 @@ mod tests {
         fn failed_id_is_never_requeued() {
             // A failed render must not be queued again this session, even though the
             // on-disk cache never got a png/err (.err is only written for diagram errors).
-            let failures =
-                HashMap::from([(("abc".to_string(), "light"), "chromium not found".to_string())]);
+            let failures = HashMap::from([(
+                ("abc".to_string(), "light"),
+                "chromium not found".to_string(),
+            )]);
             let mut inflight = HashSet::new();
             let queue = Mutex::new(VecDeque::new());
             assert!(!enqueue_diagram(
@@ -415,8 +428,7 @@ mod tests {
         #[test]
         fn failure_is_theme_scoped() {
             // A Light-mode failure must not suppress the same id under Dark.
-            let failures =
-                HashMap::from([(("abc".to_string(), "light"), "boom".to_string())]);
+            let failures = HashMap::from([(("abc".to_string(), "light"), "boom".to_string())]);
             let mut inflight = HashSet::new();
             let queue = Mutex::new(VecDeque::new());
             assert!(!enqueue_diagram(

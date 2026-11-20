@@ -22,10 +22,12 @@ impl From<Rgb> for egui::Color32 {
     }
 }
 
-/// The Catppuccin colour roles shared by the window chrome and mermaid themes.
-// Some roles (subtext, accent) are only consumed by the mermaid theme
-// variables; keep the full Catppuccin set here as the single source.
-#[expect(dead_code, reason = "full Catppuccin role set kept as one source of truth")]
+/// The full Catppuccin role set: `visuals()` consumes the UI roles and
+/// `mermaid_variables()` the diagram roles.
+#[expect(
+    dead_code,
+    reason = "full Catppuccin role set kept as one source of truth"
+)]
 pub struct Palette {
     /// Window and diagram background.
     pub base: Rgb,
@@ -61,11 +63,11 @@ pub struct Palette {
     pub red: Rgb,
     /// Success.
     pub green: Rgb,
-    /// Accent colour.
+    /// Peach accent (Catppuccin).
     pub peach: Rgb,
-    /// Accent colour.
+    /// Mauve accent (Catppuccin).
     pub mauve: Rgb,
-    /// Accent colour.
+    /// Teal accent (Catppuccin).
     pub teal: Rgb,
 }
 

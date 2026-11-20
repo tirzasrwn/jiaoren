@@ -76,7 +76,10 @@ mod tests {
             .unwrap();
             let img = rasterize(&p, 10.0, 5.0, 2.0).unwrap();
             assert_eq!(img.size, [20, 10]);
-            assert_eq!(img.pixels[0], egui::Color32::from_rgba_premultiplied(255, 0, 0, 255));
+            assert_eq!(
+                img.pixels[0],
+                egui::Color32::from_rgba_premultiplied(255, 0, 0, 255)
+            );
             let _ = std::fs::remove_file(&p);
         }
     }

@@ -110,8 +110,7 @@ pub fn is_paragraph_start(line: &str) -> bool {
     if digits > 0 && digits < t.len() {
         let next = t.as_bytes()[digits];
         if matches!(next, b'.' | b')')
-            && (digits + 1 == t.len()
-                || matches!(t.as_bytes()[digits + 1], b' ' | b'\t' | b'\r'))
+            && (digits + 1 == t.len() || matches!(t.as_bytes()[digits + 1], b' ' | b'\t' | b'\r'))
         {
             return false;
         }
@@ -494,8 +493,14 @@ mod tests {
 
         #[test]
         fn id_is_stable_and_content_sensitive() {
-            assert_eq!(diagram_id("graph TD; A-->B;"), diagram_id("graph TD; A-->B;"));
-            assert_ne!(diagram_id("graph TD; A-->B;"), diagram_id("graph TD; A-->C;"));
+            assert_eq!(
+                diagram_id("graph TD; A-->B;"),
+                diagram_id("graph TD; A-->B;")
+            );
+            assert_ne!(
+                diagram_id("graph TD; A-->B;"),
+                diagram_id("graph TD; A-->C;")
+            );
             assert_eq!(diagram_id("x").len(), 16);
         }
 
@@ -709,7 +714,8 @@ mod tests {
 
         #[test]
         fn extracts_a_top_level_paragraph() {
-            let md = "# h\n\nHello *world*, this is a paragraph.\nStill the same paragraph.\n\n- list\n";
+            let md =
+                "# h\n\nHello *world*, this is a paragraph.\nStill the same paragraph.\n\n- list\n";
             let p = prepare(md, Path::new("/d"));
             assert_eq!(p.paragraphs.len(), 1);
             let id = p.paragraphs.keys().next().unwrap();
@@ -866,15 +872,22 @@ mod tests {
             let path = Path::new("/nope/missing.md");
             let io = std::fs::read(path).unwrap_err();
             let err = read_doc(path).unwrap_err();
-            assert_eq!(err.to_string(), format!("cannot read {}: {io}", path.display()));
+            assert_eq!(
+                err.to_string(),
+                format!("cannot read {}: {io}", path.display())
+            );
         }
 
         #[test]
         fn read_doc_invalid_utf8_message_is_unchanged() {
-            let path = std::env::temp_dir().join(format!("mdview-bad-utf8-{}.md", std::process::id()));
+            let path =
+                std::env::temp_dir().join(format!("mdview-bad-utf8-{}.md", std::process::id()));
             std::fs::write(&path, [0xff, 0xfe]).unwrap();
             let err = read_doc(&path).unwrap_err();
-            assert_eq!(err.to_string(), format!("{} is not valid UTF-8", path.display()));
+            assert_eq!(
+                err.to_string(),
+                format!("{} is not valid UTF-8", path.display())
+            );
             let _ = std::fs::remove_file(&path);
         }
     }

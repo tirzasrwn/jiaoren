@@ -98,8 +98,12 @@ mod tests {
         fn j_and_k_scroll_lines() {
             let mut s = KeyState::default();
             let now = std::time::Instant::now();
-            assert!(matches!(apply_key(&mut s, Key::J, Modifiers::NONE, now), Some(Action::ScrollLines(v)) if v > 0.0));
-            assert!(matches!(apply_key(&mut s, Key::K, Modifiers::NONE, now), Some(Action::ScrollLines(v)) if v < 0.0));
+            assert!(
+                matches!(apply_key(&mut s, Key::J, Modifiers::NONE, now), Some(Action::ScrollLines(v)) if v > 0.0)
+            );
+            assert!(
+                matches!(apply_key(&mut s, Key::K, Modifiers::NONE, now), Some(Action::ScrollLines(v)) if v < 0.0)
+            );
         }
 
         #[test]
@@ -107,9 +111,33 @@ mod tests {
             let mut s = KeyState::default();
             let t0 = std::time::Instant::now();
             assert_eq!(apply_key(&mut s, Key::G, Modifiers::NONE, t0), None);
-            assert_eq!(apply_key(&mut s, Key::G, Modifiers::NONE, t0 + std::time::Duration::from_millis(200)), Some(Action::Top));
-            assert_eq!(apply_key(&mut s, Key::G, Modifiers::NONE, t0 + std::time::Duration::from_millis(700)), None);
-            assert_eq!(apply_key(&mut s, Key::G, Modifiers::SHIFT, t0 + std::time::Duration::from_millis(2300)), Some(Action::Bottom));
+            assert_eq!(
+                apply_key(
+                    &mut s,
+                    Key::G,
+                    Modifiers::NONE,
+                    t0 + std::time::Duration::from_millis(200)
+                ),
+                Some(Action::Top)
+            );
+            assert_eq!(
+                apply_key(
+                    &mut s,
+                    Key::G,
+                    Modifiers::NONE,
+                    t0 + std::time::Duration::from_millis(700)
+                ),
+                None
+            );
+            assert_eq!(
+                apply_key(
+                    &mut s,
+                    Key::G,
+                    Modifiers::SHIFT,
+                    t0 + std::time::Duration::from_millis(2300)
+                ),
+                Some(Action::Bottom)
+            );
         }
 
         #[test]
@@ -119,7 +147,10 @@ mod tests {
             // A lone `g` arms the window...
             assert_eq!(apply_key(&mut s, Key::G, Modifiers::NONE, t0), None);
             // ...and Shift+G is bottom immediately, dropping the pending `g`.
-            assert_eq!(apply_key(&mut s, Key::G, Modifiers::SHIFT, t0), Some(Action::Bottom));
+            assert_eq!(
+                apply_key(&mut s, Key::G, Modifiers::SHIFT, t0),
+                Some(Action::Bottom)
+            );
             assert!(s.last_g.is_none());
             // The cleared state means the next `g` re-arms rather than going top.
             assert_eq!(apply_key(&mut s, Key::G, Modifiers::NONE, t0), None);
@@ -129,16 +160,24 @@ mod tests {
         fn h_and_l_pan_horizontally() {
             let mut s = KeyState::default();
             let now = std::time::Instant::now();
-            assert!(matches!(apply_key(&mut s, Key::H, Modifiers::NONE, now), Some(Action::ScrollCols(v)) if v < 0.0));
-            assert!(matches!(apply_key(&mut s, Key::L, Modifiers::NONE, now), Some(Action::ScrollCols(v)) if v > 0.0));
+            assert!(
+                matches!(apply_key(&mut s, Key::H, Modifiers::NONE, now), Some(Action::ScrollCols(v)) if v < 0.0)
+            );
+            assert!(
+                matches!(apply_key(&mut s, Key::L, Modifiers::NONE, now), Some(Action::ScrollCols(v)) if v > 0.0)
+            );
         }
 
         #[test]
         fn shifted_arrows_pan_horizontally() {
             let mut s = KeyState::default();
             let now = std::time::Instant::now();
-            assert!(matches!(apply_key(&mut s, Key::ArrowLeft, Modifiers::SHIFT, now), Some(Action::ScrollCols(v)) if v < 0.0));
-            assert!(matches!(apply_key(&mut s, Key::ArrowRight, Modifiers::SHIFT, now), Some(Action::ScrollCols(v)) if v > 0.0));
+            assert!(
+                matches!(apply_key(&mut s, Key::ArrowLeft, Modifiers::SHIFT, now), Some(Action::ScrollCols(v)) if v < 0.0)
+            );
+            assert!(
+                matches!(apply_key(&mut s, Key::ArrowRight, Modifiers::SHIFT, now), Some(Action::ScrollCols(v)) if v > 0.0)
+            );
             // Unshifted arrows keep their vertical meaning.
             assert!(apply_key(&mut s, Key::ArrowLeft, Modifiers::NONE, now).is_none());
         }
@@ -147,28 +186,58 @@ mod tests {
         fn zoom_keys_map_to_zoom_actions() {
             let mut s = KeyState::default();
             let now = std::time::Instant::now();
-            assert_eq!(apply_key(&mut s, Key::Plus, Modifiers::NONE, now), Some(Action::ZoomIn));
-            assert_eq!(apply_key(&mut s, Key::Equals, Modifiers::NONE, now), Some(Action::ZoomIn));
-            assert_eq!(apply_key(&mut s, Key::Minus, Modifiers::NONE, now), Some(Action::ZoomOut));
-            assert_eq!(apply_key(&mut s, Key::A, Modifiers::NONE, now), Some(Action::Fit));
+            assert_eq!(
+                apply_key(&mut s, Key::Plus, Modifiers::NONE, now),
+                Some(Action::ZoomIn)
+            );
+            assert_eq!(
+                apply_key(&mut s, Key::Equals, Modifiers::NONE, now),
+                Some(Action::ZoomIn)
+            );
+            assert_eq!(
+                apply_key(&mut s, Key::Minus, Modifiers::NONE, now),
+                Some(Action::ZoomOut)
+            );
+            assert_eq!(
+                apply_key(&mut s, Key::A, Modifiers::NONE, now),
+                Some(Action::Fit)
+            );
         }
 
         #[test]
         fn zero_resets_zoom_without_scrolling() {
             let mut s = KeyState::default();
             let now = std::time::Instant::now();
-            assert_eq!(apply_key(&mut s, Key::Num0, Modifiers::NONE, now), Some(Action::ResetZoom));
+            assert_eq!(
+                apply_key(&mut s, Key::Num0, Modifiers::NONE, now),
+                Some(Action::ResetZoom)
+            );
         }
 
         #[test]
         fn t_r_q_map_to_actions() {
             let mut s = KeyState::default();
             let now = std::time::Instant::now();
-            assert_eq!(apply_key(&mut s, Key::T, Modifiers::NONE, now), Some(Action::ToggleTheme));
-            assert_eq!(apply_key(&mut s, Key::R, Modifiers::NONE, now), Some(Action::Reload));
-            assert_eq!(apply_key(&mut s, Key::Q, Modifiers::NONE, now), Some(Action::Quit));
-            assert_eq!(apply_key(&mut s, Key::Space, Modifiers::NONE, now), Some(Action::ScrollPages(1.0)));
-            assert_eq!(apply_key(&mut s, Key::A, Modifiers::NONE, now), Some(Action::Fit));
+            assert_eq!(
+                apply_key(&mut s, Key::T, Modifiers::NONE, now),
+                Some(Action::ToggleTheme)
+            );
+            assert_eq!(
+                apply_key(&mut s, Key::R, Modifiers::NONE, now),
+                Some(Action::Reload)
+            );
+            assert_eq!(
+                apply_key(&mut s, Key::Q, Modifiers::NONE, now),
+                Some(Action::Quit)
+            );
+            assert_eq!(
+                apply_key(&mut s, Key::Space, Modifiers::NONE, now),
+                Some(Action::ScrollPages(1.0))
+            );
+            assert_eq!(
+                apply_key(&mut s, Key::A, Modifiers::NONE, now),
+                Some(Action::Fit)
+            );
         }
     }
 }

@@ -71,7 +71,9 @@ mod tests {
                 Some(Placeholder::Table("abc"))
             ));
             assert!(parse(r#"<mdtable id="">"#).is_none());
-            assert!(parse(r#"<mermaid id="x">"#).is_some_and(|p| matches!(p, Placeholder::Mermaid(_))));
+            assert!(
+                parse(r#"<mermaid id="x">"#).is_some_and(|p| matches!(p, Placeholder::Mermaid(_)))
+            );
             assert!(parse(r#"<mdtable id="x" class="t">"#).is_none());
             assert!(matches!(
                 parse("\n<mdtable id=\"abc\">\t"),
@@ -86,7 +88,9 @@ mod tests {
                 Some(Placeholder::Paragraph("abc"))
             ));
             assert!(parse(r#"<mdpara id="">"#).is_none());
-            assert!(parse(r#"<mdtable id="x">"#).is_some_and(|p| matches!(p, Placeholder::Table(_))));
+            assert!(
+                parse(r#"<mdtable id="x">"#).is_some_and(|p| matches!(p, Placeholder::Table(_)))
+            );
             assert!(parse(r#"<mdpara id="x" oops>"#).is_none());
             assert!(parse("").is_none());
             assert!(matches!(

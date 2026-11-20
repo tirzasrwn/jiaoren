@@ -14,7 +14,9 @@ const BOLD: &str = "FiraCodeNerdFont-Bold";
 /// Regular face. Returns `None` (keeping egui defaults) when no copy is found,
 /// so a missing font never prevents the app from starting.
 pub fn load() -> Option<egui::FontDefinitions> {
-    candidate_dirs().into_iter().find_map(|dir| load_from_dir(&dir))
+    candidate_dirs()
+        .into_iter()
+        .find_map(|dir| load_from_dir(&dir))
 }
 
 /// Search order: `~/.fonts`, `$XDG_DATA_HOME/fonts`, `~/.local/share/fonts`,
@@ -90,9 +92,7 @@ mod tests {
                 "FiraCodeNerdFont-Regular"
             );
             assert_eq!(
-                defs.families[&egui::FontFamily::Monospace]
-                    .first()
-                    .unwrap(),
+                defs.families[&egui::FontFamily::Monospace].first().unwrap(),
                 "FiraCodeNerdFont-Regular"
             );
         }

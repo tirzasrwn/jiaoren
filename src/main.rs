@@ -79,7 +79,9 @@ mod tests {
     mod parse_args {
         use super::super::*;
 
-        fn a(v: &[&str]) -> Vec<String> { v.iter().map(|s| s.to_string()).collect() }
+        fn a(v: &[&str]) -> Vec<String> {
+            v.iter().map(|s| s.to_string()).collect()
+        }
 
         #[test]
         fn parses_path_and_dark_flag() {

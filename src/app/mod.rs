@@ -145,8 +145,10 @@ pub(crate) struct App {
     scroll_bottom: bool,
     applied_theme: Option<Theme>,
     keys: KeyState,
-    // Held to keep the filesystem watch alive; never read directly.
-    #[expect(dead_code, reason = "the watcher must stay alive for the callback to fire")]
+    #[expect(
+        dead_code,
+        reason = "the watcher must stay alive for the callback to fire"
+    )]
     watcher: Option<notify::RecommendedWatcher>,
     watch_rx: Option<mpsc::Receiver<notify::Event>>,
     pending_reload: Option<Instant>,
@@ -189,13 +191,11 @@ impl App {
             let d = Rc::clone(&diagrams);
             let t = Rc::clone(&tables);
             let p = Rc::clone(&paragraphs);
-            Box::new(move |ui: &mut egui::Ui, html: &str| {
-                match parse(html) {
-                    Some(Placeholder::Paragraph(id)) => p.borrow_mut().show(ui, id),
-                    Some(Placeholder::Table(id)) => t.borrow_mut().show(ui, id),
-                    Some(Placeholder::Mermaid(id)) => d.borrow_mut().show(ui, id),
-                    None => {}
-                }
+            Box::new(move |ui: &mut egui::Ui, html: &str| match parse(html) {
+                Some(Placeholder::Paragraph(id)) => p.borrow_mut().show(ui, id),
+                Some(Placeholder::Table(id)) => t.borrow_mut().show(ui, id),
+                Some(Placeholder::Mermaid(id)) => d.borrow_mut().show(ui, id),
+                None => {}
             })
         };
 
@@ -478,4 +478,3 @@ mod tests {
         }
     }
 }
-

@@ -67,17 +67,23 @@ impl Renderer {
         let mermaid_js = std::env::var_os("MDVIEW_MERMAID_JS")
             .map(PathBuf::from)
             .unwrap_or_else(|| cache_dir.join("mermaid.min.js"));
-        Renderer { chromium: None, mermaid_js, cache_dir }
+        Renderer {
+            chromium: None,
+            mermaid_js,
+            cache_dir,
+        }
     }
 
     /// Cache path of the rendered SVG for `id` in `theme`.
     pub fn svg_path(&self, id: &str, theme: Theme) -> PathBuf {
-        self.cache_dir.join(format!("{id}-{}-{RENDER_VERSION}.svg", theme.as_str()))
+        self.cache_dir
+            .join(format!("{id}-{}-{RENDER_VERSION}.svg", theme.as_str()))
     }
 
     /// Cache path of the error text for `id` in `theme`.
     pub fn err_path(&self, id: &str, theme: Theme) -> PathBuf {
-        self.cache_dir.join(format!("{id}-{}-{RENDER_VERSION}.err", theme.as_str()))
+        self.cache_dir
+            .join(format!("{id}-{}-{RENDER_VERSION}.err", theme.as_str()))
     }
 
     /// Cached outcome for `id` in `theme`; `None` when nothing is cached yet.
@@ -114,7 +120,9 @@ impl Renderer {
 
         self.ensure_mermaid_js()?;
 
-        let html = self.cache_dir.join(format!("{id}-{}-{RENDER_VERSION}.html", theme.as_str()));
+        let html = self
+            .cache_dir
+            .join(format!("{id}-{}-{RENDER_VERSION}.html", theme.as_str()));
         let page = build_html(&self.mermaid_js, source, theme);
         fs::write(&html, &page).map_err(|e| RenderError::HtmlWrite(e.to_string()))?;
 
@@ -146,7 +154,11 @@ impl Renderer {
         // The script source itself contains the literal "ERR:", so look only
         // at the output div's rendered text.
         if let Some(pos) = stdout.find("id=\"out\">ERR:") {
-            let msg = stdout[pos..].split("</div>").next().unwrap_or("mermaid error").to_string();
+            let msg = stdout[pos..]
+                .split("</div>")
+                .next()
+                .unwrap_or("mermaid error")
+                .to_string();
             self.write_err(id, theme, &msg);
             return Err(RenderError::MermaidJs(msg));
         }
@@ -383,13 +395,17 @@ pub fn parse_svg_size(svg: &str) -> Option<(f32, f32)> {
     let start = svg.find("<svg")?;
     let tag = &svg[start..];
     let tag = &tag[..tag.find('>')?];
-    if let (Some(w), Some(h)) = (tag_attr(tag, "width").and_then(px_value),
-                                 tag_attr(tag, "height").and_then(px_value))
-    {
+    if let (Some(w), Some(h)) = (
+        tag_attr(tag, "width").and_then(px_value),
+        tag_attr(tag, "height").and_then(px_value),
+    ) {
         return Some((w, h));
     }
     let vb = tag_attr(tag, "viewBox")?;
-    let nums: Vec<&str> = vb.split(|c: char| c.is_whitespace() || c == ',').filter(|s| !s.is_empty()).collect();
+    let nums: Vec<&str> = vb
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|s| !s.is_empty())
+        .collect();
     if nums.len() < 4 {
         return None;
     }
@@ -404,7 +420,11 @@ mod tests {
         use super::super::*;
 
         fn test_renderer(cache: &Path) -> Renderer {
-            Renderer { chromium: None, mermaid_js: cache.join("mermaid.min.js"), cache_dir: cache.to_path_buf() }
+            Renderer {
+                chromium: None,
+                mermaid_js: cache.join("mermaid.min.js"),
+                cache_dir: cache.to_path_buf(),
+            }
         }
 
         #[test]
@@ -413,19 +433,31 @@ mod tests {
                 RenderError::ChromiumMissing.to_string(),
                 "chromium not found; set MDVIEW_CHROMIUM"
             );
-            assert_eq!(RenderError::MermaidJs("ERR:oops".into()).to_string(), "ERR:oops");
+            assert_eq!(
+                RenderError::MermaidJs("ERR:oops".into()).to_string(),
+                "ERR:oops"
+            );
             assert_eq!(
                 RenderError::Spawn("/x/chromium: nope".into()).to_string(),
                 "spawn chromium /x/chromium: nope"
             );
-            assert_eq!(RenderError::HtmlWrite("e".into()).to_string(), "write html: e");
-            assert_eq!(RenderError::NoSvg.to_string(), "no <svg> in chromium output");
+            assert_eq!(
+                RenderError::HtmlWrite("e".into()).to_string(),
+                "write html: e"
+            );
+            assert_eq!(
+                RenderError::NoSvg.to_string(),
+                "no <svg> in chromium output"
+            );
             assert_eq!(RenderError::Raster("e".into()).to_string(), "write svg: e");
         }
 
         #[test]
         fn escapes_html_metacharacters() {
-            assert_eq!(html_escape("A-->B & C<D>\"E\""), "A--&gt;B &amp; C&lt;D&gt;\"E\"");
+            assert_eq!(
+                html_escape("A-->B & C<D>\"E\""),
+                "A--&gt;B &amp; C&lt;D&gt;\"E\""
+            );
             assert_eq!(html_escape("</pre>"), "&lt;/pre&gt;");
         }
 
@@ -434,7 +466,10 @@ mod tests {
             let d = std::env::temp_dir().join("mdview-test-paths");
             let r = test_renderer(&d);
             let p = r.svg_path("abc", Theme::Dark);
-            assert_eq!(p.file_name().unwrap().to_str().unwrap(), format!("abc-dark-{RENDER_VERSION}.svg"));
+            assert_eq!(
+                p.file_name().unwrap().to_str().unwrap(),
+                format!("abc-dark-{RENDER_VERSION}.svg")
+            );
             assert_ne!(p, r.svg_path("abc", Theme::Light));
         }
 
@@ -459,13 +494,21 @@ mod tests {
         fn svg_path_uses_svg_extension_and_version() {
             let r = test_renderer(Path::new("/tmp/x"));
             let p = r.svg_path("abc", Theme::Light);
-            assert!(p.to_string_lossy().ends_with(&format!("abc-light-{RENDER_VERSION}.svg")));
+            assert!(p
+                .to_string_lossy()
+                .ends_with(&format!("abc-light-{RENDER_VERSION}.svg")));
         }
 
         #[test]
         fn parses_width_and_height() {
-            assert_eq!(parse_svg_size(r#"<svg width="120" height="40" viewBox="0 0 120 40">"#), Some((120.0, 40.0)));
-            assert_eq!(parse_svg_size(r#"<svg viewBox="0 0 120 40">"#), Some((120.0, 40.0)));
+            assert_eq!(
+                parse_svg_size(r#"<svg width="120" height="40" viewBox="0 0 120 40">"#),
+                Some((120.0, 40.0))
+            );
+            assert_eq!(
+                parse_svg_size(r#"<svg viewBox="0 0 120 40">"#),
+                Some((120.0, 40.0))
+            );
             assert_eq!(parse_svg_size("<svg>"), None);
         }
 
@@ -484,12 +527,23 @@ mod tests {
         #[test]
         fn percent_width_and_malformed_fall_back_or_return_none() {
             // Real mermaid output: width="100%", size comes from viewBox.
-            assert_eq!(parse_svg_size(r#"<svg id="d" width="100%" xmlns="u" style="max-width: 87px;" viewBox="0 0 87 160"><style>#d{font-size:16px}</style></svg>"#), Some((87.0, 160.0)));
+            assert_eq!(
+                parse_svg_size(
+                    r#"<svg id="d" width="100%" xmlns="u" style="max-width: 87px;" viewBox="0 0 87 160"><style>#d{font-size:16px}</style></svg>"#
+                ),
+                Some((87.0, 160.0))
+            );
             // stroke-width must not be picked up as width.
-            assert_eq!(parse_svg_size(r#"<svg stroke-width="2" viewBox="0 0 5 6">"#), Some((5.0, 6.0)));
+            assert_eq!(
+                parse_svg_size(r#"<svg stroke-width="2" viewBox="0 0 5 6">"#),
+                Some((5.0, 6.0))
+            );
             // Garbage must not panic.
             assert_eq!(parse_svg_size("<<svg"), None);
-            assert_eq!(parse_svg_size(r#"<svg width="auto" height="100%" viewBox="0 0">"#), None);
+            assert_eq!(
+                parse_svg_size(r#"<svg width="auto" height="100%" viewBox="0 0">"#),
+                None
+            );
         }
 
         #[test]
@@ -537,7 +591,10 @@ mod tests {
             let first_bytes = fs::read(&r.mermaid_js).unwrap();
             // A second call must not download or rewrite the file.
             r.ensure_mermaid_js().unwrap();
-            assert_eq!(first, fs::metadata(&r.mermaid_js).unwrap().modified().unwrap());
+            assert_eq!(
+                first,
+                fs::metadata(&r.mermaid_js).unwrap().modified().unwrap()
+            );
             assert_eq!(first_bytes, fs::read(&r.mermaid_js).unwrap());
             let _ = fs::remove_dir_all(&d);
         }
