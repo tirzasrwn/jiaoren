@@ -150,20 +150,37 @@ pub(crate) fn diagram_display_size(intrinsic: (f32, f32), column: f32, zoom: f32
     (w, w * ih / iw)
 }
 
-/// Resolution bucket that covers `scale` ([`diagram_display_size`]'s width ×
-/// pixels-per-point, divided by the intrinsic width), clamped to the raster
-/// budget: each side ≤ 8192 px and ≤ 16 Mpx of pixels. Rounding up keeps the
-/// raster at least as sharp as the display. Non-finite input means bucket 1.
-pub(crate) fn bucket_for_scale(scale: f32, iw: f32, ih: f32) -> u16 {
-    if !scale.is_finite() || !iw.is_finite() || !ih.is_finite() || iw <= 0.0 || ih <= 0.0 {
+/// Resolution bucket that covers `scale` ([`diagram_display_size`]'s width in
+/// points divided by the intrinsic width), clamped to the raster budget in
+/// device pixels: each side ≤ 8192 px and ≤ 16 Mpx of pixels. `ppp` converts
+/// the SVG's CSS units to device pixels, so it must not also appear in
+/// `scale` — one `ppp` factor, at texture creation ([`bucket_scale`]).
+/// Rounding up keeps the raster at least as sharp as the display. Non-finite
+/// input means bucket 1.
+pub(crate) fn bucket_for_scale(scale: f32, iw: f32, ih: f32, ppp: f32) -> u16 {
+    if !scale.is_finite()
+        || !iw.is_finite()
+        || !ih.is_finite()
+        || !ppp.is_finite()
+        || iw <= 0.0
+        || ih <= 0.0
+        || ppp <= 0.0
+    {
         return 1;
     }
-    let side = (8192.0 / iw).floor().min((8192.0 / ih).floor());
-    // `iw * ih` is finite and positive here, so the area cap is defined.
-    let area = (16_000_000.0 / (iw * ih)).sqrt().floor();
+    let (pw, ph) = (iw * ppp, ih * ppp);
+    let side = (8192.0 / pw).floor().min((8192.0 / ph).floor());
+    // `pw * ph` is finite and positive here, so the area cap is defined.
+    let area = (16_000_000.0 / (pw * ph)).sqrt().floor();
     let bucket = scale.ceil().max(1.0).min(side).min(area).max(1.0);
     // The budget caps keep this below u16::MAX (≤ 4000 even for a 1×1 SVG).
     bucket as u16
+}
+
+/// Whether a raster bucket stays when the diagram is drawn at `bucket`: that
+/// bucket and the next one down (the best-ready fallback), nothing else.
+pub(crate) fn keep_bucket(bucket: u16, other: u16) -> bool {
+    other == bucket || (other > 0 && other + 1 == bucket)
 }
 
 /// Zoom factor in the diagram popup after one step: `0.25` per step, clamped to
@@ -324,31 +341,57 @@ mod tests {
 
         #[test]
         fn bucket_covers_the_scale_needed_for_the_column() {
-            // 900 px column over an 87 SVG-unit wide diagram needs ~10.34x.
-            let scale = 900.0 * 1.0 / 87.0;
-            assert_eq!(bucket_for_scale(scale, 87.0, 160.0), 11);
+            // 900 pt column over an 87 SVG-unit wide diagram needs ~10.34x.
+            let scale = 900.0 / 87.0;
+            assert_eq!(bucket_for_scale(scale, 87.0, 160.0, 1.0), 11);
+        }
+
+        #[test]
+        fn bucket_is_one_for_an_unscaled_diagram_at_any_density() {
+            // 1:1 points: bucket 1 must already give a device-pixel-sharp raster
+            // (bucket_scale then multiplies by ppp only once).
+            assert_eq!(bucket_for_scale(1.0, 86.0, 166.0, 1.0), 1);
+            assert_eq!(bucket_for_scale(1.0, 86.0, 166.0, 1.083_333_4), 1);
+            assert_eq!(bucket_for_scale(1.0, 86.0, 166.0, 2.0), 1);
         }
 
         #[test]
         fn bucket_is_one_when_intrinsic_is_already_wide() {
-            let scale = 900.0 * 1.0 / 2000.0;
-            assert_eq!(bucket_for_scale(scale, 2000.0, 1500.0), 1);
+            let scale = 900.0 / 2000.0;
+            assert_eq!(bucket_for_scale(scale, 2000.0, 1500.0, 1.0), 1);
         }
 
         #[test]
         fn bucket_clamps_to_the_pixel_budget() {
             // 1000x over 10x10 would be 10000x10000 (area 1e8); the 16 Mpx
             // budget caps it at sqrt(16_000_000 / 100) = 400.
-            assert_eq!(bucket_for_scale(1000.0, 10.0, 10.0), 400);
+            assert_eq!(bucket_for_scale(1000.0, 10.0, 10.0, 1.0), 400);
             // Side cap wins for a long thin diagram.
-            assert_eq!(bucket_for_scale(1000.0, 100.0, 4000.0), 2);
+            assert_eq!(bucket_for_scale(1000.0, 100.0, 4000.0, 1.0), 2);
+            // Density counts: at ppp 2 the same 10x10 SVG is 20x20 device px,
+            // so the area cap is sqrt(16_000_000 / 400) = 200.
+            assert_eq!(bucket_for_scale(1000.0, 10.0, 10.0, 2.0), 200);
+            // A large intrinsic at ppp 2 hits the 8192 px side cap immediately.
+            assert_eq!(bucket_for_scale(4.0, 3000.0, 1000.0, 2.0), 1);
         }
 
         #[test]
         fn bucket_handles_non_finite_input() {
-            assert_eq!(bucket_for_scale(f32::NAN, 87.0, 160.0), 1);
-            assert_eq!(bucket_for_scale(f32::INFINITY, 87.0, 160.0), 1);
-            assert_eq!(bucket_for_scale(1.0, 0.0, 160.0), 1);
+            assert_eq!(bucket_for_scale(f32::NAN, 87.0, 160.0, 1.0), 1);
+            assert_eq!(bucket_for_scale(f32::INFINITY, 87.0, 160.0, 1.0), 1);
+            assert_eq!(bucket_for_scale(1.0, 0.0, 160.0, 1.0), 1);
+            assert_eq!(bucket_for_scale(1.0, 87.0, 160.0, 0.0), 1);
+            assert_eq!(bucket_for_scale(1.0, 87.0, 160.0, f32::NAN), 1);
+        }
+
+        #[test]
+        fn keep_bucket_keeps_current_and_one_below() {
+            assert!(keep_bucket(5, 5));
+            assert!(keep_bucket(5, 4));
+            assert!(!keep_bucket(5, 3));
+            assert!(!keep_bucket(5, 6));
+            assert!(keep_bucket(1, 1));
+            assert!(!keep_bucket(1, 0));
         }
 
         #[test]

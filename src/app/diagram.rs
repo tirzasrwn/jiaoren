@@ -9,8 +9,8 @@ use std::thread;
 use crate::mermaid::{parse_svg_size, Renderer, Theme};
 
 use super::geometry::{
-    bucket_for_scale, bucket_scale, diagram_display_size, popup_zoom_step, raster_key, reanchor,
-    RasterKey,
+    bucket_for_scale, bucket_scale, diagram_display_size, keep_bucket, popup_zoom_step, raster_key,
+    reanchor, RasterKey,
 };
 use super::lock;
 use super::raster::{rasterize, Raster, RasterJob};
@@ -52,8 +52,9 @@ fn enqueue_diagram(
 }
 
 /// Outcome of looking up (and, when needed, queuing) the raster for a drawn
-/// diagram size: the best ready texture at or below the needed bucket, the
-/// error of a failed raster, or nothing ready yet.
+/// diagram size: the best ready texture and the bucket it was drawn from, the
+/// error of a failed raster, or nothing ready yet. The bucket is what the
+/// caller keeps (plus one below) in [`DiagramUi::rasters`].
 enum RasterDraw {
     Ready(egui::TextureHandle),
     Failed(String),
@@ -324,13 +325,14 @@ impl DiagramUi {
         theme: Theme,
         intrinsic: (f32, f32),
         display_width: f32,
-    ) -> RasterDraw {
+    ) -> (RasterDraw, u16) {
         let (iw, ih) = intrinsic;
         let ppp = ctx.pixels_per_point();
         // The raster must cover the drawn size at display density, not the
         // SVG's intrinsic CSS size: a small diagram drawn large still gets a
-        // raster that matches.
-        let bucket = bucket_for_scale(display_width * ppp / iw, iw, ih);
+        // raster that matches. `display_width` is in points, so `ppp` appears
+        // only here and in `bucket_scale` — never twice.
+        let bucket = bucket_for_scale(display_width / iw, iw, ih, ppp);
         let key = raster_key(id, theme, bucket, ppp);
         // Request lazily (only when this size needs it); the `Pending` marker
         // keeps the same key from being queued twice.
@@ -350,21 +352,43 @@ impl DiagramUi {
         let mut failed: Option<String> = None;
         for b in (1..=bucket).rev() {
             match self.rasters.get(&raster_key(id, theme, b, ppp)) {
-                Some(Raster::Ready(tex)) => return RasterDraw::Ready(tex.clone()),
+                Some(Raster::Ready(tex)) => return (RasterDraw::Ready(tex.clone()), b),
                 Some(Raster::Failed(msg)) if failed.is_none() => failed = Some(msg.clone()),
                 _ => {}
             }
         }
         match failed {
-            Some(msg) => RasterDraw::Failed(msg),
-            None => RasterDraw::Pending,
+            Some(msg) => (RasterDraw::Failed(msg), bucket),
+            None => (RasterDraw::Pending, bucket),
         }
+    }
+
+    /// Evict the raster textures this diagram/theme no longer needs: keep every
+    /// bucket that is on screen (the inline diagram and the popup can differ)
+    /// plus one below each as the best-ready fallback; drop the rest. Passing
+    /// all on-screen buckets matters: pruning to just the inline one while the
+    /// popup needs a sharper bucket would evict it and re-render every frame.
+    /// `Pending` and `Failed` entries are markers, not GPU memory, and dropping
+    /// them would re-queue or retry the same work.
+    fn prune_rasters(&mut self, id: &str, theme: Theme, buckets: &[u16]) {
+        let theme = theme.as_str();
+        self.rasters.retain(|key, raster| {
+            if key.0 != id || key.1 != theme || !matches!(raster, Raster::Ready(_)) {
+                return true;
+            }
+            buckets.iter().any(|b| keep_bucket(*b, key.2))
+        });
     }
 
     fn draw_svg(&mut self, ui: &mut egui::Ui, id: &str, svg: &Path, theme: Theme) {
         let (iw, ih) = self.intrinsic(id, theme, svg).unwrap_or((640.0, 320.0));
         let (dw, dh) = diagram_display_size((iw, ih), self.column, self.zoom);
-        let draw = self.raster_for(ui.ctx(), id, svg, theme, (iw, ih), dw);
+        let (draw, bucket) = self.raster_for(ui.ctx(), id, svg, theme, (iw, ih), dw);
+        // The popup prunes this diagram's union of buckets; doing it here too
+        // would evict the sharper texture the popup is about to draw.
+        if self.popup.is_none() {
+            self.prune_rasters(id, theme, &[bucket]);
+        }
         match draw {
             RasterDraw::Ready(tex) => {
                 let response = ui
@@ -390,8 +414,9 @@ impl DiagramUi {
                     ui.ctx().request_repaint();
                 }
                 if let Some(ph) = self.placeholders.remove(id) {
+                    // While the overlay is up the document must not shift under it.
                     let delta = response.rect.height() - ph.height;
-                    if delta != 0.0 {
+                    if delta != 0.0 && self.popup.is_none() {
                         let new_scroll = reanchor(self.scroll_y, ph.viewport_top, ph.top, delta);
                         self.scroll_adjust += new_scroll - self.scroll_y;
                         ui.ctx().request_repaint();
@@ -412,14 +437,24 @@ impl DiagramUi {
             None => return,
         };
         let theme = self.theme;
-        let svg = match self.renderer.cached(&id, theme) {
-            Some(Ok(svg)) => svg,
-            // The diagram vanished (reload): drop the overlay rather than
-            // drawing an empty frame.
-            _ => {
-                self.popup = None;
-                return;
-            }
+        let other = match theme {
+            Theme::Light => Theme::Dark,
+            Theme::Dark => Theme::Light,
+        };
+        // Use this theme's render, else the other theme's (as the inline path
+        // does while a theme switch renders), else show a cached error. Only a
+        // diagram with no cached SVG at all closes the overlay.
+        let (svg, raster_theme, cached_error) = match self.renderer.cached(&id, theme) {
+            Some(Ok(svg)) => (Some(svg), theme, None),
+            Some(Err(msg)) => (None, theme, Some(msg)),
+            None => match self.renderer.cached(&id, other) {
+                Some(Ok(svg)) => (Some(svg), other, None),
+                Some(Err(msg)) => (None, other, Some(msg)),
+                None => {
+                    self.popup = None;
+                    return;
+                }
+            },
         };
         let (esc, plus, minus, wheel_up, wheel_down, h, l, j, k) = ctx.input(|i| {
             // Read wheel notches, not `smooth_scroll_delta`: the smoothed value
@@ -445,6 +480,11 @@ impl DiagramUi {
         });
         if esc {
             self.popup = None;
+            // Keep the same press from reaching the document next frame: a held
+            // `Esc` would otherwise quit right after closing the overlay.
+            ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+            });
             return;
         }
         let steps = i32::from(plus || wheel_up) - i32::from(minus || wheel_down);
@@ -466,10 +506,24 @@ impl DiagramUi {
             },
         );
 
-        let (iw, ih) = self.intrinsic(&id, theme, &svg).unwrap_or((640.0, 320.0));
+        let (iw, ih) = match &svg {
+            Some(svg) => self
+                .intrinsic(&id, raster_theme, svg)
+                .unwrap_or((640.0, 320.0)),
+            None => (640.0, 320.0),
+        };
         let (base_w, base_h) = diagram_display_size((iw, ih), column, self.zoom);
         let (dw, dh) = (base_w * zoom, base_h * zoom);
-        let draw = self.raster_for(ctx, &id, &svg, theme, (iw, ih), dw);
+        let (draw, bucket) = match (&svg, &cached_error) {
+            (Some(svg), _) => self.raster_for(ctx, &id, svg, raster_theme, (iw, ih), dw),
+            (None, Some(msg)) => (RasterDraw::Failed(msg.clone()), 1),
+            (None, None) => (RasterDraw::Pending, 1),
+        };
+        // Keep both the popup's bucket and the inline diagram's (the document
+        // is still laid out behind the overlay), each with one below.
+        let ppp = ctx.pixels_per_point();
+        let inline_bucket = bucket_for_scale(base_w / iw, iw, ih, ppp);
+        self.prune_rasters(&id, raster_theme, &[bucket, inline_bucket]);
 
         let screen = ctx.content_rect();
         let margin = 24.0;
@@ -529,7 +583,19 @@ impl DiagramUi {
                                                             .sense(egui::Sense::click()),
                                                     );
                                                 }
-                                                _ => {
+                                                RasterDraw::Failed(msg) => {
+                                                    ui.vertical(|ui| {
+                                                        ui.set_max_width(dw);
+                                                        ui.colored_label(
+                                                            egui::Color32::RED,
+                                                            format!("diagram error: {msg}"),
+                                                        );
+                                                        if let Some(src) = self.sources.get(&id) {
+                                                            ui.code(src);
+                                                        }
+                                                    });
+                                                }
+                                                RasterDraw::Pending => {
                                                     let (rect, _) = ui.allocate_exact_size(
                                                         egui::vec2(dw, dh),
                                                         egui::Sense::click(),
@@ -552,7 +618,12 @@ impl DiagramUi {
         pan = offset;
         self.popup = Some(PopupState { id, zoom, pan });
         let fresh = std::mem::take(&mut self.popup_fresh);
-        if dimmed && !fresh {
+        // Only a click on the dim background outside the frame closes: clicks
+        // on the frame's padding (or its scroll bars) keep it open.
+        let inside_panel = ctx
+            .input(|i| i.pointer.interact_pos())
+            .is_some_and(|pos| panel.contains(pos));
+        if dimmed && !fresh && !inside_panel {
             self.popup = None;
         }
     }
@@ -714,6 +785,34 @@ mod tests {
                 Theme::Light
             ));
             assert!(inflight.is_empty());
+        }
+
+        #[test]
+        fn failed_raster_is_reported_and_not_requeued() {
+            let d = std::env::temp_dir().join(format!("mdview-failed-{}", std::process::id()));
+            let r = Arc::new(Renderer {
+                chromium: None,
+                mermaid_js: d.join("mermaid.min.js"),
+                cache_dir: d,
+            });
+            let mut ui = DiagramUi::new(r, sources(), Theme::Light);
+            let ctx = egui::Context::default();
+            let key = raster_key("abc", Theme::Light, 1, ctx.pixels_per_point());
+            ui.rasters
+                .insert(key.clone(), Raster::Failed("boom".to_string()));
+            let (draw, bucket) = ui.raster_for(
+                &ctx,
+                "abc",
+                Path::new("/nope.svg"),
+                Theme::Light,
+                (86.0, 166.0),
+                86.0,
+            );
+            assert_eq!(bucket, 1);
+            assert!(matches!(draw, RasterDraw::Failed(msg) if msg == "boom"));
+            // The recorded failure stays put: no retry of the same bucket.
+            assert!(matches!(ui.rasters.get(&key), Some(Raster::Failed(_))));
+            assert!(lock(&ui.raster_queue).is_empty());
         }
 
         #[test]

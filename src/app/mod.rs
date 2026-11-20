@@ -346,9 +346,16 @@ impl eframe::App for App {
                         key,
                         modifiers,
                         pressed: true,
+                        repeat,
                         ..
                     } = ev
                     {
+                        // An `Esc` held to close the popup keeps repeating; only
+                        // a fresh press may quit. Otherwise closing the overlay
+                        // quits the app on the next repeat.
+                        if *key == egui::Key::Escape && *repeat {
+                            continue;
+                        }
                         if let Some(a) = apply_key(&mut self.keys, *key, *modifiers, now) {
                             acts.push(a);
                         }
