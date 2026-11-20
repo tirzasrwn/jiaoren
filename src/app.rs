@@ -155,6 +155,12 @@ fn reanchor(scroll_y: f32, viewport_top: f32, placeholder_top: f32, delta: f32) 
     }
 }
 
+/// Trailing space after the document so the last line can rise to mid-window
+/// when scrolled to the end. Zero for a zero-height viewport.
+fn bottom_pad(viewport_height: f32) -> f32 {
+    viewport_height * 0.5
+}
+
 fn parent_dir(path: &Path) -> &Path {
     path.parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -508,6 +514,7 @@ pub enum Action {
     ZoomIn,
     ZoomOut,
     Fit,
+    ResetZoom,
     ToggleTheme,
     Reload,
     Quit,
@@ -537,6 +544,7 @@ pub fn apply_key(
         Key::Plus | Key::Equals => Some(Action::ZoomIn),
         Key::Minus => Some(Action::ZoomOut),
         Key::A => Some(Action::Fit),
+        Key::Num0 => Some(Action::ResetZoom),
         Key::T => Some(Action::ToggleTheme),
         Key::R => Some(Action::Reload),
         Key::Q | Key::Escape => Some(Action::Quit),
@@ -572,6 +580,8 @@ pub struct App {
     html_fn: Box<dyn Fn(&mut egui::Ui, &str)>,
     scroll_y: f32,
     scroll_x: f32,
+    /// Set by `G`: jump to the bottom once the next layout reveals `max_y`.
+    scroll_bottom: bool,
     applied_theme: Option<Theme>,
     keys: KeyState,
     // Held to keep the filesystem watch alive; never read directly.
@@ -665,6 +675,7 @@ impl App {
             html_fn,
             scroll_y: 0.0,
             scroll_x: 0.0,
+            scroll_bottom: false,
             applied_theme: Some(theme),
             keys: KeyState::default(),
             watcher,
@@ -770,13 +781,14 @@ impl eframe::App for App {
                 Action::ScrollPages(f) => self.scroll_y = (self.scroll_y + f * page_h).max(0.0),
                 Action::ScrollCols(f) => self.scroll_x = (self.scroll_x + f * 40.0).max(0.0),
                 Action::Top => self.scroll_y = 0.0,
-                Action::Bottom => self.scroll_y = f32::MAX,
+                Action::Bottom => self.scroll_bottom = true,
                 Action::ZoomIn => self.zoom = (self.zoom * 1.1).min(3.0),
                 Action::ZoomOut => self.zoom = (self.zoom / 1.1).max(0.5),
                 Action::Fit => {
                     self.zoom = 1.0;
                     self.scroll_x = 0.0;
                 }
+                Action::ResetZoom => self.zoom = 1.0,
                 Action::ToggleTheme => {
                     self.theme = match self.theme {
                         Theme::Light => Theme::Dark,
@@ -814,6 +826,7 @@ impl eframe::App for App {
                 ui.colored_label(egui::Color32::RED, err);
             }
 
+            let viewport_h = ui.available_height();
             let scroll_y = self.scroll_y;
             let scroll_x = self.scroll_x;
             let output = egui::ScrollArea::both()
@@ -837,13 +850,19 @@ impl eframe::App for App {
                                 .show(ui, cache, md);
                         });
                     });
+                    ui.add_space(bottom_pad(viewport_h));
                 });
             let max_y = (output.content_size.y - output.inner_rect.height()).max(0.0);
             let max_x = (output.content_size.x - output.inner_rect.width()).max(0.0);
             let adjust = std::mem::take(&mut self.diagrams.borrow_mut().scroll_adjust);
-            self.scroll_y = (output.state.offset.y + adjust).clamp(0.0, max_y);
+            let jump_bottom = std::mem::take(&mut self.scroll_bottom);
+            self.scroll_y = if jump_bottom {
+                max_y
+            } else {
+                (output.state.offset.y + adjust).clamp(0.0, max_y)
+            };
             self.scroll_x = output.state.offset.x.clamp(0.0, max_x);
-            if adjust != 0.0 {
+            if adjust != 0.0 || jump_bottom {
                 // Re-lay out next frame at the corrected offset.
                 ui.ctx().request_repaint();
             }
@@ -1127,6 +1146,19 @@ mod key_tests {
         assert_eq!(apply_key(&mut s, Key::Equals, Modifiers::NONE, now), Some(Action::ZoomIn));
         assert_eq!(apply_key(&mut s, Key::Minus, Modifiers::NONE, now), Some(Action::ZoomOut));
         assert_eq!(apply_key(&mut s, Key::A, Modifiers::NONE, now), Some(Action::Fit));
+    }
+
+    #[test]
+    fn zero_resets_zoom_without_scrolling() {
+        let mut s = KeyState::default();
+        let now = std::time::Instant::now();
+        assert_eq!(apply_key(&mut s, Key::Num0, Modifiers::NONE, now), Some(Action::ResetZoom));
+    }
+
+    #[test]
+    fn bottom_pad_is_half_the_viewport() {
+        assert_eq!(super::bottom_pad(800.0), 400.0);
+        assert_eq!(super::bottom_pad(0.0), 0.0);
     }
 
     #[test]
