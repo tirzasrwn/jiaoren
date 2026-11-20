@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const RENDER_VERSION: &str = "2-mermaid11.12.0-htmlLabelsOff-2x-strict";
+pub const RENDER_VERSION: &str = "3-mermaid11.12.0-htmlLabelsOff-2x-strict-svg";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Theme {
@@ -35,8 +35,8 @@ impl Renderer {
         Renderer { chromium: None, mermaid_js, cache_dir }
     }
 
-    pub fn png_path(&self, id: &str, theme: Theme) -> PathBuf {
-        self.cache_dir.join(format!("{id}-{}-{RENDER_VERSION}.png", theme.as_str()))
+    pub fn svg_path(&self, id: &str, theme: Theme) -> PathBuf {
+        self.cache_dir.join(format!("{id}-{}-{RENDER_VERSION}.svg", theme.as_str()))
     }
 
     pub fn err_path(&self, id: &str, theme: Theme) -> PathBuf {
@@ -44,9 +44,9 @@ impl Renderer {
     }
 
     pub fn cached(&self, id: &str, theme: Theme) -> Option<Result<PathBuf, String>> {
-        let png = self.png_path(id, theme);
-        if png.exists() {
-            return Some(Ok(png));
+        let svg = self.svg_path(id, theme);
+        if svg.exists() {
+            return Some(Ok(svg));
         }
         let err = self.err_path(id, theme);
         if err.exists() {
@@ -57,9 +57,9 @@ impl Renderer {
     }
 
     pub fn render(&self, id: &str, source: &str, theme: Theme) -> Result<PathBuf, String> {
-        let png = self.png_path(id, theme);
-        if png.exists() {
-            return Ok(png);
+        let svg = self.svg_path(id, theme);
+        if svg.exists() {
+            return Ok(svg);
         }
         let err = self.err_path(id, theme);
         if err.exists() {
@@ -112,7 +112,7 @@ impl Renderer {
             return Err(msg);
         }
 
-        let svg = match slice_svg(&stdout) {
+        let svg_text = match slice_svg(&stdout) {
             Some(s) => s,
             None => {
                 let msg = "no <svg> in chromium output".to_string();
@@ -121,12 +121,8 @@ impl Renderer {
             }
         };
 
-        let bytes = rasterize(&svg).map_err(|e| {
-            self.write_err(id, theme, &e);
-            e
-        })?;
-        self.atomic_write(&png, &bytes).map_err(|e| format!("write png: {e}"))?;
-        Ok(png)
+        self.atomic_write(&svg, svg_text.as_bytes()).map_err(|e| format!("write svg: {e}"))?;
+        Ok(svg)
     }
 
     fn write_err(&self, id: &str, theme: Theme, msg: &str) {
@@ -135,7 +131,7 @@ impl Renderer {
     }
 
     fn atomic_write(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-        // Append rather than replace the extension so .png and .err of the
+        // Append rather than replace the extension so .svg and .err of the
         // same id get distinct tmp names.
         let tmp = PathBuf::from(format!("{}.tmp", path.display()));
         fs::write(&tmp, bytes)?;
@@ -294,20 +290,69 @@ fn slice_svg(stdout: &str) -> Option<&str> {
     Some(&stdout[start..end])
 }
 
-fn rasterize(svg: &str) -> Result<Vec<u8>, String> {
-    let mut opt = resvg::usvg::Options::default();
-    opt.fontdb_mut().load_system_fonts();
-    let tree = resvg::usvg::Tree::from_str(svg, &opt).map_err(|e| format!("parse svg: {e}"))?;
-    let size = tree.size();
-    let (w, h) = (size.width().ceil() as u32, size.height().ceil() as u32);
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(w * 2, h * 2)
-        .ok_or_else(|| "pixmap alloc failed".to_string())?;
-    resvg::render(
-        &tree,
-        resvg::usvg::Transform::from_scale(2.0, 2.0),
-        &mut pixmap.as_mut(),
-    );
-    pixmap.encode_png().map_err(|e| format!("encode png: {e}"))
+/// First attribute value for `name` within an opening tag, any quote style,
+/// ignoring suffixed names like `stroke-width`.
+fn tag_attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let pat = format!("{name}=");
+    let bytes = tag.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = tag[from..].find(&pat) {
+        let p = from + rel;
+        let boundary = p == 0 || bytes[p - 1].is_ascii_whitespace();
+        if boundary {
+            if let Some(v) = quoted_value(&tag[p + pat.len()..]) {
+                return Some(v);
+            }
+        }
+        from = p + name.len();
+    }
+    None
+}
+
+fn quoted_value(s: &str) -> Option<&str> {
+    let q = s.chars().next()?;
+    if q != '"' && q != '\'' {
+        return None;
+    }
+    let end = s[1..].find(q)?;
+    Some(&s[1..1 + end])
+}
+
+/// Leading float of an attribute value, tolerating unit suffixes (`120px`);
+/// rejects non-px units (`100%`), non-positive or non-finite numbers.
+fn px_value(raw: &str) -> Option<f32> {
+    let s = raw.trim();
+    if s.ends_with('%') {
+        return None;
+    }
+    (1..=s.len())
+        .rev()
+        .filter(|&i| s.is_char_boundary(i))
+        .find_map(|i| s[..i].parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+}
+
+/// Natural size of an SVG: `width`/`height` attributes in px, falling back to
+/// the viewBox's 3rd/4th numbers. `None` when neither is present or parsable;
+/// never panics on malformed input.
+#[allow(dead_code)] // consumed by app.rs in Task 2
+pub fn parse_svg_size(svg: &str) -> Option<(f32, f32)> {
+    let start = svg.find("<svg")?;
+    let tag = &svg[start..];
+    let tag = &tag[..tag.find('>')?];
+    if let (Some(w), Some(h)) = (tag_attr(tag, "width").and_then(px_value),
+                                 tag_attr(tag, "height").and_then(px_value))
+    {
+        return Some((w, h));
+    }
+    let vb = tag_attr(tag, "viewBox")?;
+    let nums: Vec<&str> = vb.split_whitespace().collect();
+    if nums.len() < 4 {
+        return None;
+    }
+    let w = px_value(nums[2]);
+    let h = px_value(nums[3]);
+    Some((w?, h?))
 }
 
 #[cfg(test)]
@@ -320,17 +365,17 @@ mod tests {
         assert_eq!(html_escape("</pre>"), "&lt;/pre&gt;");
     }
 
-    fn renderer(cache: &Path) -> Renderer {
+    fn test_renderer(cache: &Path) -> Renderer {
         Renderer { chromium: None, mermaid_js: cache.join("mermaid.min.js"), cache_dir: cache.to_path_buf() }
     }
 
     #[test]
     fn cache_paths_include_theme_and_render_version() {
         let d = std::env::temp_dir().join("mdview-test-paths");
-        let r = renderer(&d);
-        let p = r.png_path("abc", Theme::Dark);
-        assert_eq!(p.file_name().unwrap().to_str().unwrap(), format!("abc-dark-{RENDER_VERSION}.png"));
-        assert_ne!(p, r.png_path("abc", Theme::Light));
+        let r = test_renderer(&d);
+        let p = r.svg_path("abc", Theme::Dark);
+        assert_eq!(p.file_name().unwrap().to_str().unwrap(), format!("abc-dark-{RENDER_VERSION}.svg"));
+        assert_ne!(p, r.svg_path("abc", Theme::Light));
     }
 
     #[test]
@@ -338,12 +383,37 @@ mod tests {
         let d = std::env::temp_dir().join(format!("mdview-test-cache-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        let r = renderer(&d);
+        let r = test_renderer(&d);
         assert!(r.cached("k", Theme::Light).is_none());
         std::fs::write(r.err_path("k", Theme::Light), "boom").unwrap();
         assert!(matches!(r.cached("k", Theme::Light), Some(Err(_))));
-        std::fs::write(r.png_path("k", Theme::Light), b"png").unwrap();
+        std::fs::write(r.svg_path("k", Theme::Light), b"svg").unwrap();
         assert!(matches!(r.cached("k", Theme::Light), Some(Ok(_))));
+    }
+
+    #[test]
+    fn svg_path_uses_svg_extension_and_version() {
+        let r = test_renderer(Path::new("/tmp/x"));
+        let p = r.svg_path("abc", Theme::Light);
+        assert!(p.to_string_lossy().ends_with(&format!("abc-light-{RENDER_VERSION}.svg")));
+    }
+
+    #[test]
+    fn parses_width_and_height() {
+        assert_eq!(parse_svg_size(r#"<svg width="120" height="40" viewBox="0 0 120 40">"#), Some((120.0, 40.0)));
+        assert_eq!(parse_svg_size(r#"<svg viewBox="0 0 120 40">"#), Some((120.0, 40.0)));
+        assert_eq!(parse_svg_size("<svg>"), None);
+    }
+
+    #[test]
+    fn percent_width_and_malformed_fall_back_or_return_none() {
+        // Real mermaid output: width="100%", size comes from viewBox.
+        assert_eq!(parse_svg_size(r#"<svg id="d" width="100%" xmlns="u" style="max-width: 87px;" viewBox="0 0 87 160"><style>#d{font-size:16px}</style></svg>"#), Some((87.0, 160.0)));
+        // stroke-width must not be picked up as width.
+        assert_eq!(parse_svg_size(r#"<svg stroke-width="2" viewBox="0 0 5 6">"#), Some((5.0, 6.0)));
+        // Garbage must not panic.
+        assert_eq!(parse_svg_size("<<svg"), None);
+        assert_eq!(parse_svg_size(r#"<svg width="auto" height="100%" viewBox="0 0">"#), None);
     }
 
     #[test]
@@ -366,7 +436,7 @@ mod tests {
         let d = std::env::temp_dir().join(format!("mdview-js-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
-        let r = renderer(&d);
+        let r = test_renderer(&d);
         fs::write(&r.mermaid_js, b"// already here").unwrap();
         r.ensure_mermaid_js().unwrap();
         let first = fs::metadata(&r.mermaid_js).unwrap().modified().unwrap();

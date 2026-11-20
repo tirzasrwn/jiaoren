@@ -255,6 +255,12 @@ impl DiagramUi {
         let key = format!("{id}-{}", theme.as_str());
         if !self.textures.contains_key(&key) {
             if let Ok(bytes) = std::fs::read(png) {
+                // Task-1 shim: the cache now holds SVG; skip PNG decode for
+                // non-PNG bytes so nothing is drawn until Task 2 wires the
+                // SVG loader (upgrade path: egui_extras image loader).
+                if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                    return;
+                }
                 if let Ok(img) = image::load_from_memory(&bytes) {
                     let rgba = img.to_rgba8();
                     let (w, h) = rgba.dimensions();
