@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const RENDER_VERSION: &str = "1-mermaid11.12.0-htmlLabelsOff-2x";
+pub const RENDER_VERSION: &str = "2-mermaid11.12.0-htmlLabelsOff-2x-strict";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Theme {
@@ -83,6 +83,8 @@ impl Renderer {
             .arg("--headless")
             .arg("--no-sandbox")
             .arg("--disable-gpu")
+            // No network egress from the render page; diagram source is untrusted.
+            .arg("--host-resolver-rules=MAP * ~NOTFOUND")
             .arg("--dump-dom")
             .arg("--virtual-time-budget=5000")
             .arg(format!("file://{}", html.display()))
@@ -140,7 +142,7 @@ impl Renderer {
         fs::rename(&tmp, path)
     }
 
-    fn ensure_mermaid_js(&self) -> Result<(), String> {
+    pub(crate) fn ensure_mermaid_js(&self) -> Result<(), String> {
         if self.mermaid_js.exists() {
             return Ok(());
         }
@@ -192,7 +194,16 @@ pub fn find_chromium() -> Option<PathBuf> {
                 .unwrap_or(false)
         })
         .collect();
-    entries.sort_by(|a, b| b.cmp(a)); // descending: newest version first
+    // Descending numeric suffix: chromium-1255 is newer than chromium-999.
+    entries.sort_by_key(|p| {
+        std::cmp::Reverse(
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_prefix("chromium-"))
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0),
+        )
+    });
     for e in entries {
         let chrome = e.join("chrome-linux64/chrome");
         if chrome.exists() {
@@ -202,11 +213,18 @@ pub fn find_chromium() -> Option<PathBuf> {
     None
 }
 
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
 fn find_in_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         let cand = dir.join(name);
-        if cand.is_file() {
+        if is_executable(&cand) {
             return Some(cand);
         }
     }
@@ -226,7 +244,7 @@ fn html_escape(s: &str) -> String {
     out
 }
 
-fn file_url(path: &Path) -> String {
+pub(crate) fn file_url(path: &Path) -> String {
     let mut out = String::new();
     for c in path.to_string_lossy().chars() {
         match c {
@@ -257,7 +275,7 @@ fn build_html(mermaid_js: &Path, source: &str, theme: Theme) -> String {
 <script src=\"{js_src}\"></script>\n\
 <script>\n\
 mermaid.initialize({{startOnLoad:false, htmlLabels:false, theme:\"{theme}\", fontFamily:\"sans-serif\",\n\
-  flowchart:{{htmlLabels:false}}, securityLevel:\"loose\"}});\n\
+  flowchart:{{htmlLabels:false}}, securityLevel:\"strict\"}});\n\
 mermaid.render(\"d\", document.getElementById(\"src\").textContent)\n\
   .then(r => {{ document.getElementById(\"out\").innerHTML = r.svg; }})\n\
   .catch(e => {{ document.getElementById(\"out\").textContent = \"ERR:\" + e.message; }});\n\
@@ -340,11 +358,46 @@ mod tests {
     }
 
     #[test]
+    fn ensure_mermaid_js_is_idempotent() {
+        let d = std::env::temp_dir().join(format!("mdview-js-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        let r = renderer(&d);
+        fs::write(&r.mermaid_js, b"// already here").unwrap();
+        r.ensure_mermaid_js().unwrap();
+        let first = fs::metadata(&r.mermaid_js).unwrap().modified().unwrap();
+        let first_bytes = fs::read(&r.mermaid_js).unwrap();
+        // A second call must not download or rewrite the file.
+        r.ensure_mermaid_js().unwrap();
+        assert_eq!(first, fs::metadata(&r.mermaid_js).unwrap().modified().unwrap());
+        assert_eq!(first_bytes, fs::read(&r.mermaid_js).unwrap());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
     #[ignore]
     fn renders_real_diagram() {
         let r = Renderer::new();
         let p = r.render("smoke", "graph TD; A-->B;", Theme::Light).unwrap();
         assert!(p.exists());
         assert!(fs::metadata(&p).unwrap().len() > 1000);
+    }
+
+    #[test]
+    #[ignore]
+    fn renders_two_real_diagrams() {
+        let r = Renderer::new();
+        let docs = [
+            ("smoke-flow", "graph LR; A-->B;", Theme::Light),
+            (
+                "smoke-seq",
+                "sequenceDiagram\n  A->>B: hello\n  B-->>A: world",
+                Theme::Dark,
+            ),
+        ];
+        for (id, src, theme) in docs {
+            let p = r.render(id, src, theme).unwrap();
+            assert!(fs::metadata(&p).unwrap().len() > 1000, "{id} too small");
+        }
     }
 }

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::mermaid::file_url;
+
 #[allow(dead_code)] // fields consumed by app.rs in later tasks
 pub struct Prepared {
     #[allow(dead_code)] // read by app.rs render pass
@@ -34,7 +36,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
             },
             Some((ch, len, info, oline)) => {
                 if is_close(t, ch, len) {
-                    if info.trim() == "mermaid" {
+                    if info.split_whitespace().next() == Some("mermaid") {
                         let id = diagram_id(&body);
                         diagrams.insert(id.clone(), body.trim().to_string());
                         // Trailing blank line terminates the CommonMark HTML block so
@@ -78,6 +80,28 @@ fn is_close(t: &str, ch: char, open_len: usize) -> bool {
     t.chars().all(|c| c == ch) && t.chars().count() >= open_len
 }
 
+/// Split the text after `](` into the link body and the index just past the
+/// closing `)`. Parentheses are balanced, so `x(1).png` is one target; a
+/// closing paren inside a `"title"` does not end the link.
+fn link_inner(s: &str) -> Option<(&str, usize)> {
+    let mut depth = 0usize;
+    let mut in_quote = false;
+    for (i, c) in s.char_indices() {
+        match c {
+            '"' => in_quote = !in_quote,
+            '(' if !in_quote => depth += 1,
+            ')' if !in_quote => {
+                if depth == 0 {
+                    return Some((&s[..i], i + 1));
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn rewrite_images(mut rest: &str, doc_dir: &Path) -> String {
     let mut out = String::with_capacity(rest.len());
     while let Some(start) = rest.find("![") {
@@ -87,14 +111,14 @@ fn rewrite_images(mut rest: &str, doc_dir: &Path) -> String {
             Some(j) => j,
             None => break,
         };
-        let end = match rest[mid..].find(')') {
-            Some(k) => mid + k,
+        let (inner, end) = match link_inner(&rest[mid + 2..]) {
+            Some(v) => v,
             None => break,
         };
         let alt = &rest[2..mid];
-        let target = &rest[mid + 2..end];
+        // Drop an optional `"title"` (and any other trailing link text).
+        let target = inner.split_whitespace().next().unwrap_or("");
         let skip = target.is_empty()
-            || target.contains('\n')
             || target.starts_with('/')
             || target.starts_with('#')
             || target.starts_with("data:")
@@ -104,8 +128,11 @@ fn rewrite_images(mut rest: &str, doc_dir: &Path) -> String {
             rest = &rest[2..];
             continue;
         }
-        out.push_str(&format!("![{alt}](file://{})", doc_dir.join(target).display()));
-        rest = &rest[end + 1..];
+        out.push_str(&format!(
+            "![{alt}](file://{})",
+            file_url(&doc_dir.join(target))
+        ));
+        rest = &rest[mid + 2 + end..];
     }
     out.push_str(rest);
     out
@@ -140,6 +167,22 @@ mod tests {
         assert!(out.contains("![a](file:///docs/img/x.png)"));
         assert!(out.contains("![b](/abs.png)"));
         assert!(out.contains("![c](https://h/c.png)"));
+    }
+
+    #[test]
+    fn balanced_parens_and_title_in_image_targets() {
+        let md = "![a](x(1).png \"caption\") ![b](a#b.png)";
+        let out = prepare(md, Path::new("/docs")).markdown;
+        assert!(out.contains("![a](file:///docs/x(1).png)"));
+        assert!(out.contains("![b](file:///docs/a%23b.png)"));
+    }
+
+    #[test]
+    fn mermaid_fence_matches_first_info_token() {
+        let md = "```mermaid title=\"x\"\ngraph TD; A-->B;\n```\n";
+        let p = prepare(md, Path::new("/x"));
+        assert_eq!(p.diagrams.len(), 1);
+        assert!(p.markdown.contains("<mermaid"));
     }
 
     #[test]

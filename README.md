@@ -38,7 +38,7 @@ mdview [--dark] file.md
 | `G` (shift+g) | jump to bottom |
 | `+` / `=` | zoom in |
 | `-` | zoom out |
-| `a` | fit width (reset zoom) |
+| `a` | reset zoom to 100% |
 | `t` | toggle light/dark theme |
 | `r` | reload from disk |
 | `q` / `esc` | quit |
@@ -48,8 +48,8 @@ mdview [--dark] file.md
 Rendering ```mermaid fences into images requires **Chromium (headless)**, which
 mdview runs to let mermaid.js rasterize each diagram.
 
-Chromium is already present on this machine via the playwright cache
-(`~/.cache/ms-playwright/chromium-1255/chrome-linux64/chrome`) and is detected
+Chromium is already present on this machine via the playwright cache; mdview
+uses the newest `chromium-*` directory under `~/.cache/ms-playwright/`
 automatically. To point mdview at a different binary, set:
 
 ```bash
@@ -62,14 +62,26 @@ shown; diagrams simply won't render.
 ## Cache
 
 Rendered diagrams are cached under `~/.cache/mdview/` (keyed by diagram content
-and theme), so reopening a document is instant. The bundled `mermaid.min.js`
-also lives there. Clear it with:
+and theme), so reopening a document is instant. `mermaid.min.js` is downloaded
+there on first run, not bundled. Clear it with:
 
 ```bash
 rm -rf ~/.cache/mdview
 ```
 
 The directory and `mermaid.min.js` are recreated on the next run.
+
+## Trust boundary
+
+Markdown and diagram source are untrusted input. Diagrams are rasterized by a
+headless browser whose render page runs with Mermaid `securityLevel: "strict"`
+and with networking blocked (`--host-resolver-rules=MAP * ~NOTFOUND`), so a
+document cannot exfiltrate data or load remote resources during rendering.
+
+## Known limitations
+
+- Wide tables and long code lines wrap instead of getting a horizontal
+  scrollbar. Use `+` to zoom in when a wrapped line is hard to read.
 
 ## Non-goals
 

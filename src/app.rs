@@ -48,6 +48,29 @@ fn parse_placeholder(html: &str) -> Option<&str> {
     Some(id)
 }
 
+/// Apply the app theme to egui so the window chrome and the mermaid renders
+/// agree. `set_theme` selects the style; `set_visuals` guarantees the exact
+/// light/dark palette even when the OS preference is the other one.
+fn apply_theme(ctx: &egui::Context, theme: Theme) {
+    let (egui_theme, visuals) = match theme {
+        Theme::Light => (egui::Theme::Light, egui::Visuals::light()),
+        Theme::Dark => (egui::Theme::Dark, egui::Visuals::dark()),
+    };
+    ctx.set_theme(egui_theme);
+    ctx.set_visuals(visuals);
+}
+
+/// Keep a placeholder's top edge steady across a height change. Only content
+/// whose placeholder started above the viewport is re-anchored; anything at or
+/// below the fold is left alone. Pure so it is unit-testable.
+fn reanchor(scroll_y: f32, viewport_top: f32, placeholder_top: f32, delta: f32) -> f32 {
+    if placeholder_top < viewport_top {
+        (scroll_y + delta).max(0.0)
+    } else {
+        scroll_y.max(0.0)
+    }
+}
+
 fn parent_dir(path: &Path) -> &Path {
     path.parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -95,6 +118,14 @@ fn enqueue_diagram(
     }
 }
 
+/// Last drawn placeholder for a diagram, in screen coordinates.
+#[derive(Clone, Copy)]
+struct Placeholder {
+    top: f32,
+    height: f32,
+    viewport_top: f32,
+}
+
 /// Shared, interior-mutable state backing the markdown html hook and the worker pool.
 pub struct DiagramUi {
     renderer: Arc<Renderer>,
@@ -108,6 +139,11 @@ pub struct DiagramUi {
     result_tx: mpsc::Sender<DiagramResult>,
     result_rx: mpsc::Receiver<DiagramResult>,
     active_workers: usize,
+    placeholders: HashMap<String, Placeholder>,
+    /// Mirror of the app's scroll offset, for the pure re-anchor arithmetic.
+    scroll_y: f32,
+    /// Scroll offset change to apply after this frame's layout.
+    scroll_adjust: f32,
 }
 
 impl DiagramUi {
@@ -125,7 +161,21 @@ impl DiagramUi {
             result_tx: tx,
             result_rx: rx,
             active_workers: 0,
+            placeholders: HashMap::new(),
+            scroll_y: 0.0,
+            scroll_adjust: 0.0,
         }
+    }
+
+    /// Drop pending work and per-document state on reload. Running workers keep
+    /// their `active_workers` slots until they report back in `poll`.
+    fn reset_for_reload(&mut self, sources: HashMap<String, String>) {
+        self.sources = sources;
+        self.textures.clear();
+        self.inflight.clear();
+        self.failures.clear();
+        self.queue.lock().unwrap().clear();
+        self.placeholders.clear();
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, id: &str) {
@@ -160,7 +210,7 @@ impl DiagramUi {
                 if let Some(Ok(png)) = self.renderer.cached(id, other) {
                     self.draw_png(ui, id, &png, other, col);
                 } else {
-                    self.draw_placeholder(ui);
+                    self.draw_placeholder(ui, id);
                 }
             }
         }
@@ -228,7 +278,18 @@ impl DiagramUi {
                 let s = col / w;
                 (w, h) = (w * s, h * s);
             }
-            ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(w, h)));
+            let tex = tex.clone();
+            let response =
+                ui.add(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(w, h)));
+            if let Some(ph) = self.placeholders.remove(id) {
+                let delta = response.rect.height() - ph.height;
+                if delta != 0.0 {
+                    let new_scroll =
+                        reanchor(self.scroll_y, ph.viewport_top, ph.top, delta);
+                    self.scroll_adjust += new_scroll - self.scroll_y;
+                    ui.ctx().request_repaint();
+                }
+            }
         } else {
             ui.colored_label(egui::Color32::RED, "diagram: failed to load image");
         }
@@ -241,9 +302,18 @@ impl DiagramUi {
         }
     }
 
-    fn draw_placeholder(&self, ui: &mut egui::Ui) {
+    fn draw_placeholder(&mut self, ui: &mut egui::Ui, id: &str) {
         let (w, h) = (640.0 * self.zoom, 320.0 * self.zoom);
+        let viewport_top = ui.clip_rect().top();
         let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
+        self.placeholders.insert(
+            id.to_string(),
+            Placeholder {
+                top: rect.top(),
+                height: rect.height(),
+                viewport_top,
+            },
+        );
         ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(40));
         ui.painter().text(
             rect.center(),
@@ -330,6 +400,7 @@ pub struct App {
     diagrams: Rc<RefCell<DiagramUi>>,
     html_fn: Box<dyn Fn(&mut egui::Ui, &str)>,
     scroll_y: f32,
+    applied_theme: Option<Theme>,
     keys: KeyState,
     // Held to keep the filesystem watch alive; never read directly.
     #[allow(dead_code)]
@@ -341,10 +412,17 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(path: PathBuf, dark: bool) -> Self {
+    pub fn new(path: PathBuf, dark: bool, ctx: &egui::Context) -> Self {
         let theme = if dark { Theme::Dark } else { Theme::Light };
+        apply_theme(ctx, theme);
         let mut renderer = Renderer::new();
         renderer.chromium = find_chromium();
+        // First-run download happens here, once, on the UI thread, before any
+        // render worker can spawn: concurrent workers must never race on the
+        // shared temp file.
+        if renderer.chromium.is_some() {
+            let _ = renderer.ensure_mermaid_js();
+        }
         let shared = Arc::new(Renderer {
             chromium: renderer.chromium.clone(),
             mermaid_js: renderer.mermaid_js.clone(),
@@ -378,9 +456,14 @@ impl App {
 
         let dir = parent_dir(&path).to_path_buf();
         let (tx, rx) = mpsc::channel();
+        let watch_ctx = ctx.clone();
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             if let Ok(ev) = res {
-                let _ = tx.send(ev);
+                // Wake the UI only for real changes, not our own read events.
+                if !matches!(ev.kind, notify::EventKind::Access(_)) {
+                    let _ = tx.send(ev);
+                    watch_ctx.request_repaint();
+                }
             }
         })
         .ok();
@@ -407,6 +490,7 @@ impl App {
             diagrams,
             html_fn,
             scroll_y: 0.0,
+            applied_theme: Some(theme),
             keys: KeyState::default(),
             watcher,
             watch_rx,
@@ -430,24 +514,17 @@ impl App {
         self.load();
         self.cache = CommonMarkCache::default();
         let sources = self.prepared.diagrams.clone();
-        let mut d = self.diagrams.borrow_mut();
-        d.sources = sources;
-        d.textures.clear();
-        d.inflight.clear();
-        d.failures.clear();
+        self.diagrams.borrow_mut().reset_for_reload(sources);
     }
 
     /// Drive live reload: drain watcher events (or poll mtime when the watcher
     /// is unavailable), debounce 100 ms, then reload once.
     fn watch_tick(&mut self, ctx: &egui::Context) {
-        // Keep the event loop waking so watcher events (which arrive while the
-        // UI is idle) get drained even when the user does nothing.
-        ctx.request_repaint_after(Duration::from_millis(100));
         let now = Instant::now();
         if let Some(rx) = &self.watch_rx {
+            // The watcher callback requests a repaint, so an idle app does not
+            // need a timer; drain whatever arrived after that wake-up.
             while let Ok(ev) = rx.try_recv() {
-                // Ignore read access events (our own reads fire them); react to
-                // content/name changes only.
                 if matches!(ev.kind, notify::EventKind::Access(_)) {
                     continue;
                 }
@@ -456,6 +533,7 @@ impl App {
                 }
             }
         } else if now.duration_since(self.last_poll) >= Duration::from_millis(500) {
+            // No watcher: fall back to polling mtime.
             self.last_poll = now;
             if let Ok(meta) = std::fs::metadata(&self.path) {
                 if let Ok(m) = meta.modified() {
@@ -466,6 +544,7 @@ impl App {
                     self.last_mtime = Some(m);
                 }
             }
+            ctx.request_repaint_after(Duration::from_millis(500));
         }
         if let Some(t) = self.pending_reload {
             if now.duration_since(t) >= Duration::from_millis(100) {
@@ -486,6 +565,11 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Keep egui's window chrome and the mermaid renders on one theme.
+        if self.applied_theme != Some(self.theme) {
+            apply_theme(ui.ctx(), self.theme);
+            self.applied_theme = Some(self.theme);
+        }
         // Turn this frame's key presses into viewer actions.
         let now = Instant::now();
         let mut acts: Vec<Action> = Vec::new();
@@ -529,6 +613,7 @@ impl eframe::App for App {
             let mut d = self.diagrams.borrow_mut();
             d.theme = self.theme;
             d.zoom = self.zoom;
+            d.scroll_y = self.scroll_y;
         }
 
         egui::CentralPanel::default().show(ui, |ui| {
@@ -573,7 +658,12 @@ impl eframe::App for App {
                     });
                 });
             let max_y = (output.content_size.y - output.inner_rect.height()).max(0.0);
-            self.scroll_y = output.state.offset.y.clamp(0.0, max_y);
+            let adjust = std::mem::take(&mut self.diagrams.borrow_mut().scroll_adjust);
+            self.scroll_y = (output.state.offset.y + adjust).clamp(0.0, max_y);
+            if adjust != 0.0 {
+                // Re-lay out next frame at the corrected offset.
+                ui.ctx().request_repaint();
+            }
         });
     }
 }
@@ -693,6 +783,73 @@ mod tests {
             Theme::Light
         ));
         assert!(inflight.is_empty());
+    }
+
+    #[test]
+    fn reload_drops_queued_jobs() {
+        let d = std::env::temp_dir().join(format!("mdview-reload-{}", std::process::id()));
+        let r = Arc::new(Renderer {
+            chromium: None,
+            mermaid_js: d.join("mermaid.min.js"),
+            cache_dir: d,
+        });
+        let mut ui = DiagramUi::new(r, sources(), Theme::Light);
+        assert!(enqueue_diagram(
+            &ui.failures,
+            &mut ui.inflight,
+            &ui.sources,
+            &ui.queue,
+            "abc",
+            Theme::Light
+        ));
+        assert_eq!(ui.queue.lock().unwrap().len(), 1);
+        ui.reset_for_reload(HashMap::new());
+        assert!(ui.queue.lock().unwrap().is_empty());
+        assert!(ui.inflight.is_empty());
+        assert!(ui.sources.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::reanchor;
+
+    #[test]
+    fn placeholder_above_viewport_is_reanchored() {
+        assert_eq!(reanchor(500.0, 100.0, 50.0, 200.0), 700.0);
+    }
+
+    #[test]
+    fn placeholder_below_viewport_is_not_reanchored() {
+        assert_eq!(reanchor(500.0, 100.0, 400.0, 200.0), 500.0);
+    }
+
+    #[test]
+    fn partially_visible_placeholder_is_reanchored() {
+        // Top above the fold, bottom still visible.
+        assert_eq!(reanchor(500.0, 100.0, 50.0, -120.0), 380.0);
+    }
+
+    #[test]
+    fn zero_and_negative_delta_are_clamped() {
+        assert_eq!(reanchor(500.0, 100.0, 50.0, 0.0), 500.0);
+        assert_eq!(reanchor(50.0, 100.0, 20.0, -100.0), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::{apply_theme, Theme};
+
+    #[test]
+    fn applying_theme_updates_active_visuals() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx, Theme::Light);
+        assert_eq!(ctx.theme(), egui::Theme::Light);
+        assert!(!ctx.global_style().visuals.dark_mode);
+        apply_theme(&ctx, Theme::Dark);
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+        assert!(ctx.global_style().visuals.dark_mode);
     }
 }
 

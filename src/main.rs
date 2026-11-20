@@ -47,7 +47,7 @@ fn main() -> Result<(), eframe::Error> {
         eframe::NativeOptions::default(),
         Box::new(move |cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(app::App::new(opts.path, opts.dark)))
+            Ok(Box::new(app::App::new(opts.path, opts.dark, &cc.egui_ctx)))
         }),
     )
 }
