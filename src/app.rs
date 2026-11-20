@@ -620,6 +620,7 @@ impl App {
                 Prepared {
                     markdown: String::new(),
                     diagrams: HashMap::new(),
+                    tables: HashMap::new(),
                 },
             ),
         };
