@@ -10,7 +10,7 @@ use egui::{Key, Modifiers};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use notify::{RecursiveMode, Watcher};
 
-use crate::doc::{prepare, Prepared};
+use crate::doc::{prepare, Prepared, TableSpec};
 use crate::mermaid::{find_chromium, parse_svg_size, Renderer, Theme};
 
 /// A render job handed to a worker thread: (diagram id, mermaid source, theme).
@@ -128,6 +128,41 @@ fn parse_placeholder(html: &str) -> Option<&str> {
         return None;
     }
     Some(id)
+}
+
+/// Returns the table id when `html` is exactly a `<mdtable id="…">` placeholder.
+/// Rejects an empty id and never matches the `<mermaid …>` placeholder.
+fn parse_table_placeholder(html: &str) -> Option<&str> {
+    let s = html.trim();
+    let rest = s.strip_prefix("<mdtable")?;
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix("id=")?;
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    let id = &rest[..end];
+    if id.is_empty() {
+        return None;
+    }
+    let after = &rest[end + 1..];
+    let after = after.trim_end();
+    if !after.ends_with('>') {
+        return None;
+    }
+    if !after[..after.len() - 1].trim().is_empty() {
+        return None;
+    }
+    Some(id)
+}
+
+/// Per-column width for a table spanning `available` points with `ncols`
+/// columns and `spacing` between them. Exact division, floored at 80 px.
+fn column_widths(available: f32, spacing: f32, ncols: usize) -> f32 {
+    if ncols == 0 {
+        return available;
+    }
+    let w = (available - spacing * (ncols - 1) as f32) / ncols as f32;
+    w.max(80.0)
 }
 
 /// Apply the app theme to egui so the window chrome and the mermaid renders
@@ -497,6 +532,79 @@ impl DiagramUi {
     }
 }
 
+/// Shared, interior-mutable state backing the `<mdtable>` render path in the
+/// html hook. Holds the parsed specs, a per-cell `CommonMarkCache` separate
+/// from the outer viewer's (a cell never re-borrows the outer cache), and a
+/// per-id occurrence counter so identical tables each get a distinct egui `Id`.
+pub struct TableUi {
+    tables: HashMap<String, TableSpec>,
+    cell_cache: CommonMarkCache,
+    occurrences: HashMap<String, usize>,
+}
+
+impl TableUi {
+    fn new(tables: HashMap<String, TableSpec>) -> Self {
+        TableUi {
+            tables,
+            cell_cache: CommonMarkCache::default(),
+            occurrences: HashMap::new(),
+        }
+    }
+
+    /// Restart occurrence counters at the top of the document, once per frame.
+    fn begin_frame(&mut self) {
+        self.occurrences.clear();
+    }
+
+    fn reset(&mut self, tables: HashMap<String, TableSpec>) {
+        self.tables = tables;
+        self.cell_cache = CommonMarkCache::default();
+        self.occurrences.clear();
+    }
+
+    fn show(&mut self, ui: &mut egui::Ui, id: &str) {
+        // Clone so the spec outlives the immutable borrow while `cell_cache` is
+        // borrowed mutably below. Tables are small; the clone is the cheap fix.
+        let spec = match self.tables.get(id) {
+            Some(s) => s.clone(),
+            None => return, // unknown id: draw nothing, never panic
+        };
+        let ncols = spec.header.len();
+        if ncols == 0 {
+            return;
+        }
+        let occurrence = *self.occurrences.entry(id.to_string()).or_insert(0);
+        *self.occurrences.get_mut(id).unwrap() += 1;
+        let w = column_widths(ui.available_width(), ui.spacing().item_spacing.x, ncols);
+        // A distinct id per occurrence so two identical tables never share state.
+        let grid_id = ui.id().with(("mdtable", id, occurrence));
+        egui::Grid::new(grid_id).striped(true).show(ui, |ui| {
+            for cell in &spec.header {
+                render_cell(ui, w, cell, &mut self.cell_cache);
+            }
+            ui.end_row();
+            for row in &spec.rows {
+                for cell in row {
+                    render_cell(ui, w, cell, &mut self.cell_cache);
+                }
+                ui.end_row();
+            }
+        });
+    }
+}
+
+/// Render one cell as its own little Markdown view, capped at `w` so text wraps
+/// and inline formatting (bold, code, links) still applies.
+fn render_cell(ui: &mut egui::Ui, w: f32, cell_md: &str, cache: &mut CommonMarkCache) {
+    // A vertical scope reports the real content height back to the grid; a
+    // zero-height `allocate_ui_with_layout` would collapse every row to 0 and
+    // let wrapped text paint over the next row.
+    ui.vertical(|ui| {
+        ui.set_width(w);
+        CommonMarkViewer::new().show(ui, cache, cell_md);
+    });
+}
+
 /// Keys pressed on the keyboard, with no egui Context dependency (unit-testable).
 #[derive(Default)]
 pub struct KeyState {
@@ -577,6 +685,7 @@ pub struct App {
     error: Option<String>,
     cache: CommonMarkCache,
     diagrams: Rc<RefCell<DiagramUi>>,
+    tables: Rc<RefCell<TableUi>>,
     html_fn: Box<dyn Fn(&mut egui::Ui, &str)>,
     scroll_y: f32,
     scroll_x: f32,
@@ -630,10 +739,14 @@ impl App {
             prepared.diagrams.clone(),
             theme,
         )));
+        let tables = Rc::new(RefCell::new(TableUi::new(prepared.tables.clone())));
         let html_fn: Box<dyn Fn(&mut egui::Ui, &str)> = {
             let d = Rc::clone(&diagrams);
+            let t = Rc::clone(&tables);
             Box::new(move |ui: &mut egui::Ui, html: &str| {
-                if let Some(id) = parse_placeholder(html) {
+                if let Some(id) = parse_table_placeholder(html) {
+                    t.borrow_mut().show(ui, id);
+                } else if let Some(id) = parse_placeholder(html) {
                     d.borrow_mut().show(ui, id);
                 }
             })
@@ -673,6 +786,7 @@ impl App {
             error,
             cache: CommonMarkCache::default(),
             diagrams,
+            tables,
             html_fn,
             scroll_y: 0.0,
             scroll_x: 0.0,
@@ -702,6 +816,7 @@ impl App {
         self.cache = CommonMarkCache::default();
         let sources = self.prepared.diagrams.clone();
         self.diagrams.borrow_mut().reset_for_reload(sources);
+        self.tables.borrow_mut().reset(self.prepared.tables.clone());
     }
 
     /// Drive live reload: drain watcher events (or poll mtime when the watcher
@@ -845,6 +960,7 @@ impl eframe::App for App {
                             let html_fn = &self.html_fn;
                             let cache = &mut self.cache;
                             let md = &self.prepared.markdown;
+                            self.tables.borrow_mut().begin_frame();
                             CommonMarkViewer::new()
                                 .max_image_width(Some(col as usize))
                                 .render_html_fn(Some(&**html_fn))
@@ -883,6 +999,19 @@ mod tests {
         );
         assert_eq!(super::parse_placeholder("<div>hi</div>"), None);
         assert_eq!(super::parse_placeholder(r#"<mermaid id="">"#), None);
+    }
+
+    #[test]
+    fn parses_table_placeholder_ids() {
+        assert_eq!(super::parse_table_placeholder(r#"<mdtable id="abc">"#), Some("abc"));
+        assert_eq!(super::parse_table_placeholder(r#"<mdtable id="">"#), None);
+        assert_eq!(super::parse_table_placeholder(r#"<mermaid id="x">"#), None);
+    }
+
+    #[test]
+    fn column_width_leaves_room_for_spacing() {
+        assert!((super::column_widths(900.0, 8.0, 3) - 294.666_7).abs() < 0.01);
+        assert_eq!(super::column_widths(100.0, 8.0, 10), 80.0);
     }
 
     #[test]
