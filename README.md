@@ -38,7 +38,8 @@ mdview [--dark] file.md
 | `G` (shift+g) | jump to bottom |
 | `+` / `=` | zoom in |
 | `-` | zoom out |
-| `a` | reset zoom to 100% |
+| `a` | reset zoom to 100% and pan back to the left |
+| `h` / `l`, `shift+←` / `shift+→` | pan left / right (for zoomed-in content) |
 | `t` | toggle light/dark theme |
 | `r` | reload from disk |
 | `q` / `esc` | quit |
@@ -61,9 +62,10 @@ shown; diagrams simply won't render.
 
 ## Cache
 
-Rendered diagrams are cached under `~/.cache/mdview/` (keyed by diagram content
-and theme), so reopening a document is instant. `mermaid.min.js` is downloaded
-there on first run, not bundled. Clear it with:
+Rendered diagrams are cached as SVG under `~/.cache/mdview/` (keyed by diagram
+content and theme), so reopening a document is instant and diagrams stay sharp
+at any zoom level. `mermaid.min.js` is downloaded there on first run, not
+bundled. Clear it with:
 
 ```bash
 rm -rf ~/.cache/mdview
