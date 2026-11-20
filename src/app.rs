@@ -155,6 +155,12 @@ fn parse_table_placeholder(html: &str) -> Option<&str> {
     Some(id)
 }
 
+/// Width of the reading column: the window minus 64 px of margins, capped at
+/// 900 px scaled by zoom. Floored at 0 so a tiny window never goes negative.
+fn content_column(available: f32, zoom: f32) -> f32 {
+    (available - 64.0).min(900.0 * zoom).max(0.0)
+}
+
 /// Per-column width for a table spanning `available` points with `ncols`
 /// columns and `spacing` between them. Exact division, floored at 80 px.
 fn column_widths(available: f32, spacing: f32, ncols: usize) -> f32 {
@@ -951,7 +957,7 @@ impl eframe::App for App {
                 .horizontal_scroll_offset(scroll_x)
                 .show(ui, |ui| {
                     let available = ui.available_width();
-                    let col = (available - 64.0).min(900.0).max(0.0);
+                    let col = content_column(available, z);
                     let indent = ((available - col) * 0.5).max(0.0);
                     ui.horizontal(|ui| {
                         ui.add_space(indent);
@@ -1006,6 +1012,16 @@ mod tests {
         assert_eq!(super::parse_table_placeholder(r#"<mdtable id="abc">"#), Some("abc"));
         assert_eq!(super::parse_table_placeholder(r#"<mdtable id="">"#), None);
         assert_eq!(super::parse_table_placeholder(r#"<mermaid id="x">"#), None);
+    }
+
+    #[test]
+    fn column_grows_with_zoom() {
+        assert_eq!(super::content_column(1800.0, 1.0), 900.0);
+        assert_eq!(super::content_column(1800.0, 2.0), 1736.0);
+        assert_eq!(super::content_column(1800.0, 3.0), 1736.0);
+        assert_eq!(super::content_column(600.0, 1.0), 536.0);
+        assert_eq!(super::content_column(1800.0, 0.5), 450.0);
+        assert_eq!(super::content_column(40.0, 1.0), 0.0);
     }
 
     #[test]
