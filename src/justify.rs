@@ -609,7 +609,8 @@ fn layout(ui: &egui::Ui, text: &str, format: &TextFormat) -> Arc<Galley> {
 pub enum Marker {
     /// `•`, a top-level bullet.
     Bullet,
-    /// `◦`, a nested bullet.
+    /// `○`, a nested bullet. U+25E6 `◦` is not used: it is missing from
+    /// FiraCode Nerd Font and from egui's fallback set, so it renders as tofu.
     Hollow,
     /// `{n}.`, an ordered item keeping its source number.
     Number(u64),
@@ -622,7 +623,7 @@ impl Marker {
     pub fn label(self) -> String {
         match self {
             Marker::Bullet => "•".to_string(),
-            Marker::Hollow => "◦".to_string(),
+            Marker::Hollow => "○".to_string(),
             Marker::Number(n) => format!("{n}."),
             Marker::Task(true) => "☑".to_string(),
             Marker::Task(false) => "☐".to_string(),
@@ -1017,10 +1018,28 @@ mod tests {
         #[test]
         fn labels_match_the_marker_kind() {
             assert_eq!(Marker::Bullet.label(), "•");
-            assert_eq!(Marker::Hollow.label(), "◦");
+            assert_eq!(Marker::Hollow.label(), "○");
             assert_eq!(Marker::Number(3).label(), "3.");
             assert_eq!(Marker::Task(true).label(), "☑");
             assert_eq!(Marker::Task(false).label(), "☐");
+        }
+
+        #[test]
+        fn bullet_and_task_labels_are_single_supported_chars() {
+            for label in [
+                Marker::Bullet.label(),
+                Marker::Hollow.label(),
+                Marker::Task(true).label(),
+                Marker::Task(false).label(),
+            ] {
+                assert_eq!(label.chars().count(), 1, "{label}");
+            }
+            // Exact code points so a future glyph swap is deliberate: U+2022,
+            // U+25CB, U+2611, U+2610 all exist in FiraCode Nerd Font.
+            assert_eq!(Marker::Bullet.label(), "\u{2022}");
+            assert_eq!(Marker::Hollow.label(), "\u{25cb}");
+            assert_eq!(Marker::Task(true).label(), "\u{2611}");
+            assert_eq!(Marker::Task(false).label(), "\u{2610}");
         }
 
         #[test]
