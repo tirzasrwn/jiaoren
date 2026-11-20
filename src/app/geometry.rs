@@ -6,7 +6,7 @@ use crate::mermaid::Theme;
 /// Identity of one raster: diagram, theme, resolution bucket and display
 /// density (rounded to two decimals) so a DPI change never serves a stale
 /// image. Matches the `(id, theme, bucket, ppp_rounded_2dp)` interface.
-pub(crate) type RasterKey = (String, &'static str, u8, i32);
+pub(crate) type RasterKey = (String, &'static str, u16, i32);
 
 /// Width of the reading column: the window minus 64 px of margins, capped at
 /// 900 px scaled by zoom. Floored at 0 so a tiny window never goes negative.
@@ -136,21 +136,44 @@ pub(crate) fn bottom_pad(viewport_height: f32) -> f32 {
     viewport_height * 0.5
 }
 
-/// Resolution bucket covering a zoom factor: the smallest of `1..=3` whose
-/// scale (bucket × DPI) is at least the on-screen zoom. Zoom is clamped to
-/// `0.5..=3.0`, so this never exceeds 3.
-pub(crate) fn bucket_for(zoom: f32) -> u8 {
-    (zoom.ceil() as u8).clamp(1, 3)
+/// Displayed size of a diagram: small diagrams keep their intrinsic size
+/// (times app zoom) and are centred in the column; wide ones are capped to the
+/// column. Height always follows the intrinsic aspect ratio. A non-finite or
+/// non-positive intrinsic width falls back to a 2:1 box no wider than 320 × zoom.
+pub(crate) fn diagram_display_size(intrinsic: (f32, f32), column: f32, zoom: f32) -> (f32, f32) {
+    let (iw, ih) = intrinsic;
+    if !iw.is_finite() || !ih.is_finite() || iw <= 0.0 {
+        let w = column.min(320.0 * zoom);
+        return (w, w * 0.5);
+    }
+    let w = (iw * zoom).min(column);
+    (w, w * ih / iw)
+}
+
+/// Resolution bucket that covers `scale` ([`diagram_display_size`]'s width ×
+/// pixels-per-point, divided by the intrinsic width), clamped to the raster
+/// budget: each side ≤ 8192 px and ≤ 16 Mpx of pixels. Rounding up keeps the
+/// raster at least as sharp as the display. Non-finite input means bucket 1.
+pub(crate) fn bucket_for_scale(scale: f32, iw: f32, ih: f32) -> u16 {
+    if !scale.is_finite() || !iw.is_finite() || !ih.is_finite() || iw <= 0.0 || ih <= 0.0 {
+        return 1;
+    }
+    let side = (8192.0 / iw).floor().min((8192.0 / ih).floor());
+    // `iw * ih` is finite and positive here, so the area cap is defined.
+    let area = (16_000_000.0 / (iw * ih)).sqrt().floor();
+    let bucket = scale.ceil().max(1.0).min(side).min(area).max(1.0);
+    // The budget caps keep this below u16::MAX (≤ 4000 even for a 1×1 SVG).
+    bucket as u16
 }
 
 /// Pixel scale for `bucket` at a given display density. Textures are rendered
 /// at `bucket × pixels_per_point` texels per SVG unit.
-pub(crate) fn bucket_scale(bucket: u8, pixels_per_point: f32) -> f32 {
+pub(crate) fn bucket_scale(bucket: u16, pixels_per_point: f32) -> f32 {
     bucket as f32 * pixels_per_point
 }
 
 /// Build the [`RasterKey`] for `id` at `bucket` and display density.
-pub(crate) fn raster_key(id: &str, theme: Theme, bucket: u8, pixels_per_point: f32) -> RasterKey {
+pub(crate) fn raster_key(id: &str, theme: Theme, bucket: u16, pixels_per_point: f32) -> RasterKey {
     (
         id.to_string(),
         theme.as_str(),
@@ -255,12 +278,67 @@ mod tests {
         }
 
         #[test]
-        fn buckets_cover_the_zoom() {
-            assert_eq!(bucket_for(0.5), 1);
-            assert_eq!(bucket_for(1.0), 1);
-            assert_eq!(bucket_for(1.4), 2);
-            assert_eq!(bucket_for(2.6), 3);
-            assert_eq!(bucket_for(3.0), 3);
+        fn display_size_keeps_small_diagrams_small() {
+            assert_eq!(
+                diagram_display_size((87.0, 160.0), 900.0, 1.0),
+                (87.0, 160.0)
+            );
+            // Zoom doubles the intrinsic size, still under the column.
+            assert_eq!(
+                diagram_display_size((87.0, 160.0), 900.0, 2.0),
+                (174.0, 320.0)
+            );
+        }
+
+        #[test]
+        fn display_size_caps_wide_diagrams_to_the_column() {
+            let (w, h) = diagram_display_size((1400.0, 300.0), 900.0, 1.0);
+            assert_eq!(w, 900.0);
+            assert!((h - 900.0 * 300.0 / 1400.0).abs() < 0.01);
+            assert!((h - 192.857).abs() < 0.01);
+            // Zoom widens the column elsewhere, but the cap still applies.
+            assert_eq!(diagram_display_size((1400.0, 300.0), 900.0, 2.0).0, 900.0);
+        }
+
+        #[test]
+        fn display_size_guards_zero_width() {
+            assert_eq!(
+                diagram_display_size((0.0, 160.0), 900.0, 1.0),
+                (320.0, 160.0)
+            );
+            assert_eq!(
+                diagram_display_size((0.0, 160.0), 100.0, 1.0),
+                (100.0, 50.0)
+            );
+        }
+
+        #[test]
+        fn bucket_covers_the_scale_needed_for_the_column() {
+            // 900 px column over an 87 SVG-unit wide diagram needs ~10.34x.
+            let scale = 900.0 * 1.0 / 87.0;
+            assert_eq!(bucket_for_scale(scale, 87.0, 160.0), 11);
+        }
+
+        #[test]
+        fn bucket_is_one_when_intrinsic_is_already_wide() {
+            let scale = 900.0 * 1.0 / 2000.0;
+            assert_eq!(bucket_for_scale(scale, 2000.0, 1500.0), 1);
+        }
+
+        #[test]
+        fn bucket_clamps_to_the_pixel_budget() {
+            // 1000x over 10x10 would be 10000x10000 (area 1e8); the 16 Mpx
+            // budget caps it at sqrt(16_000_000 / 100) = 400.
+            assert_eq!(bucket_for_scale(1000.0, 10.0, 10.0), 400);
+            // Side cap wins for a long thin diagram.
+            assert_eq!(bucket_for_scale(1000.0, 100.0, 4000.0), 2);
+        }
+
+        #[test]
+        fn bucket_handles_non_finite_input() {
+            assert_eq!(bucket_for_scale(f32::NAN, 87.0, 160.0), 1);
+            assert_eq!(bucket_for_scale(f32::INFINITY, 87.0, 160.0), 1);
+            assert_eq!(bucket_for_scale(1.0, 0.0, 160.0), 1);
         }
 
         #[test]

@@ -424,6 +424,7 @@ impl eframe::App for App {
                             self.tables.borrow_mut().begin_frame();
                             self.lists.borrow_mut().begin_frame(col);
                             self.paragraphs.borrow_mut().begin_frame(col);
+                            self.diagrams.borrow_mut().begin_frame(col);
                             CommonMarkViewer::new()
                                 .max_image_width(Some(col as usize))
                                 .render_html_fn(Some(&**html_fn))

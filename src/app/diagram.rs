@@ -8,7 +8,9 @@ use std::thread;
 
 use crate::mermaid::{parse_svg_size, Renderer, Theme};
 
-use super::geometry::{bucket_for, bucket_scale, raster_key, reanchor, RasterKey};
+use super::geometry::{
+    bucket_for_scale, bucket_scale, diagram_display_size, raster_key, reanchor, RasterKey,
+};
 use super::lock;
 use super::raster::{rasterize, Raster, RasterJob};
 
@@ -62,6 +64,9 @@ pub(crate) struct DiagramUi {
     sources: HashMap<String, String>,
     pub(crate) theme: Theme,
     pub(crate) zoom: f32,
+    /// Reading column in effect this frame, set from the same `col` the viewer
+    /// is given via `ui.set_width(col)`.
+    column: f32,
     /// Intrinsic SVG size per diagram id (keyed `id-theme`); `None` when the
     /// file has no parsable size, and absent until first read succeeds.
     sizes: HashMap<String, Option<(f32, f32)>>,
@@ -95,6 +100,7 @@ impl DiagramUi {
             sources,
             theme,
             zoom: 1.0,
+            column: 0.0,
             sizes: HashMap::new(),
             inflight: HashSet::new(),
             failures: HashMap::new(),
@@ -123,6 +129,12 @@ impl DiagramUi {
         // frees the GPU textures.
         self.rasters.clear();
         lock(&self.raster_queue).clear();
+    }
+
+    /// Record the document's reading column once per frame, before the viewer
+    /// runs. `ui.available_width()` inside the html hook is not that column.
+    pub(crate) fn begin_frame(&mut self, column: f32) {
+        self.column = column;
     }
 
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, id: &str) {
@@ -255,9 +267,13 @@ impl DiagramUi {
     fn draw_svg(&mut self, ui: &mut egui::Ui, id: &str, svg: &Path, theme: Theme) {
         let (iw, ih) = self.intrinsic(id, theme, svg).unwrap_or((640.0, 320.0));
         let ppp = ui.ctx().pixels_per_point();
-        let bucket = bucket_for(self.zoom);
+        let (dw, dh) = diagram_display_size((iw, ih), self.column, self.zoom);
+        // The raster must cover the drawn size at display density, not the
+        // SVG's intrinsic CSS size: a small diagram is drawn 1:1, a wide one is
+        // capped to the column and still gets a raster that matches.
+        let bucket = bucket_for_scale(dw * ppp / iw, iw, ih);
         let key = raster_key(id, theme, bucket, ppp);
-        // Request the exact bucket lazily (only when this zoom needs it); the
+        // Request the exact bucket lazily (only when this size needs it); the
         // `Pending` marker keeps the same key from being queued twice.
         if !self.rasters.contains_key(&key) {
             let scale = bucket_scale(bucket, ppp);
@@ -280,9 +296,18 @@ impl DiagramUi {
             match self.rasters.get(&raster_key(id, theme, b, ppp)) {
                 Some(Raster::Ready(tex)) => {
                     let tex = tex.clone();
-                    let (w, h) = (iw * self.zoom, ih * self.zoom);
-                    let response =
-                        ui.add(egui::Image::from_texture(&tex).fit_to_exact_size(egui::vec2(w, h)));
+                    let response = ui
+                        .allocate_ui_with_layout(
+                            egui::vec2(self.column, dh),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |ui| {
+                                ui.add(
+                                    egui::Image::from_texture(&tex)
+                                        .fit_to_exact_size(egui::vec2(dw, dh)),
+                                )
+                            },
+                        )
+                        .inner;
                     if let Some(ph) = self.placeholders.remove(id) {
                         let delta = response.rect.height() - ph.height;
                         if delta != 0.0 {
@@ -325,9 +350,15 @@ impl DiagramUi {
             .intrinsic(id, self.theme, &path)
             .or_else(|| self.intrinsic(id, other, &other_path))
             .unwrap_or((640.0, 320.0));
-        let (w, h) = (w * self.zoom, h * self.zoom);
+        let (w, h) = diagram_display_size((w, h), self.column, self.zoom);
         let viewport_top = ui.clip_rect().top();
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
+        let (rect, _) = ui
+            .allocate_ui_with_layout(
+                egui::vec2(self.column, h),
+                egui::Layout::top_down(egui::Align::Center),
+                |ui| ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover()),
+            )
+            .inner;
         self.placeholders.insert(
             id.to_string(),
             Placeholder {
