@@ -2,12 +2,17 @@
 //! [`SearchState`] plus the block texts and content positions recorded while
 //! the document is drawn, and the `/` command line buffer.
 
+use crate::justify::CharSpan;
 use crate::search::SearchState;
+
+use super::selection::{hit_test_distance, SelPoint, SelectionState};
 
 /// Search state backing the `/` command line, the status line and `n`/`N`.
 pub(crate) struct SearchUi {
     /// Confirmed pattern and its hits.
     pub(crate) state: SearchState,
+    /// Live text selection over the same block registry.
+    pub(crate) selection: SelectionState,
     /// `Some(buffer)` while the command line is open.
     pub(crate) input: Option<String>,
     /// Block texts in draw order, rebuilt every frame. Keys run before the
@@ -21,18 +26,22 @@ pub(crate) struct SearchUi {
     heights: Vec<f32>,
     /// Content-space block heights from the last completed frame.
     hs: Vec<f32>,
+    /// Char maps (fragment rects in screen space) from the last completed frame.
+    maps: Vec<Vec<CharSpan>>,
 }
 
 impl SearchUi {
     pub(crate) fn new() -> Self {
         SearchUi {
             state: SearchState::default(),
+            selection: SelectionState::default(),
             input: None,
             texts: Vec::new(),
             tops: Vec::new(),
             ys: Vec::new(),
             heights: Vec::new(),
             hs: Vec::new(),
+            maps: Vec::new(),
         }
     }
 
@@ -41,6 +50,7 @@ impl SearchUi {
         self.texts.clear();
         self.tops.clear();
         self.heights.clear();
+        self.maps.clear();
     }
 
     /// Record one searchable block at the ui's current cursor position. Returns
@@ -50,7 +60,47 @@ impl SearchUi {
         self.texts.push(text);
         self.tops.push(ui.cursor().min.y);
         self.heights.push(0.0);
+        self.maps.push(Vec::new());
         index
+    }
+
+    /// Store a block's painted char map for pointer hit testing.
+    pub(crate) fn set_char_map(&mut self, index: usize, chars: Vec<CharSpan>) {
+        if let Some(slot) = self.maps.get_mut(index) {
+            *slot = chars;
+        }
+    }
+
+    /// Selected char range in `block`, if any.
+    pub(crate) fn selection_range(&self, block: usize) -> Option<(usize, usize)> {
+        let len = self.texts.get(block)?.chars().count();
+        self.selection.range_for(block, len)
+    }
+
+    /// Nearest block/char under `pos` from the last frame's char maps.
+    pub(crate) fn hit(&self, pos: egui::Pos2) -> Option<SelPoint> {
+        self.hit_distance(pos).map(|(point, _)| point)
+    }
+
+    /// Like [`Self::hit`], but only when the pointer is close to painted text;
+    /// an empty margin press must fall through to document panning/clearing.
+    pub(crate) fn hit_near(&self, pos: egui::Pos2) -> Option<SelPoint> {
+        const SLOP: f32 = 6.0;
+        self.hit_distance(pos)
+            .filter(|(_, distance)| *distance <= SLOP * SLOP)
+            .map(|(point, _)| point)
+    }
+
+    fn hit_distance(&self, pos: egui::Pos2) -> Option<(SelPoint, f32)> {
+        let mut best: Option<(SelPoint, f32)> = None;
+        for (block, map) in self.maps.iter().enumerate() {
+            if let Some((char, distance)) = hit_test_distance(map, pos) {
+                if best.is_none_or(|(_, d)| distance < d) {
+                    best = Some((SelPoint { block, char }, distance));
+                }
+            }
+        }
+        best
     }
 
     /// Set a block height measured by its painter (code blocks, table cells).

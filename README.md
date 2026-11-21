@@ -74,9 +74,11 @@ To go back to the defaults, delete (or comment out) the
 | `t` | toggle light/dark theme |
 | `r` | reload from disk |
 | `yy` | copy the whole document as Markdown |
+| drag | select text across blocks |
+| `y` | copy the text selection; with no selection the first `y` arms `yy` |
 | `/` | search: type a pattern, `Enter` confirms and jumps to the first match |
 | `n` / `N` | next / previous match, wrapping |
-| `esc` / `ctrl+c` | cancel the search prompt, else clear the active search, else quit |
+| `esc` / `ctrl+c` | cancel prompt, else clear search, else clear selection, else quit |
 | `q` | quit |
 
 Search indexes the text `justify` paints: soft-wrapped source lines join with one
@@ -90,8 +92,9 @@ is highlighted in place, with a stronger fill for the current one; `n`/`N` wrap
 around and scroll the current hit's block into view.
 
 Mouse: drag anywhere to pan the document in both axes (the wheel still
-scrolls, `gg` returns to the start). A plain click on a diagram or local image
-opens the zoom popup; dragging from it pans the document instead.
+scrolls, `gg` returns to the start). Dragging across text selects it; a plain
+click clears the selection. A plain click on a diagram or local image opens the
+zoom popup; dragging from it pans the document instead.
 
 Every table also carries a small copy icon at its top-right (tooltip: “Copy
 table as CSV”); clicking it copies the table as CSV (header row first, Markdown

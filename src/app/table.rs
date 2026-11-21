@@ -107,16 +107,19 @@ impl TableUi {
                             let (ranges, current) = search.highlights(block);
                             (ranges, current, Some(block))
                         };
-                        let height = render_cell(
+                        let selection = block.and_then(|b| search.selection_range(b));
+                        let painted = render_cell(
                             ui,
                             cell_width(&widths, i),
                             cell,
                             &mut self.cell_cache,
                             &ranges,
                             current,
+                            selection,
                         );
                         if let Some(block) = block {
-                            search.set_height(block, height);
+                            search.set_height(block, painted.height);
+                            search.set_char_map(block, painted.chars);
                         }
                     }
                     ui.end_row();
@@ -130,16 +133,19 @@ impl TableUi {
                                 let (ranges, current) = search.highlights(block);
                                 (ranges, current, Some(block))
                             };
-                            let height = render_cell(
+                            let selection = block.and_then(|b| search.selection_range(b));
+                            let painted = render_cell(
                                 ui,
                                 cell_width(&widths, i),
                                 cell,
                                 &mut self.cell_cache,
                                 &ranges,
                                 current,
+                                selection,
                             );
                             if let Some(block) = block {
-                                search.set_height(block, height);
+                                search.set_height(block, painted.height);
+                                search.set_char_map(block, painted.chars);
                             }
                         }
                         ui.end_row();
@@ -416,7 +422,8 @@ fn render_cell(
     cache: &mut CommonMarkCache,
     highlights: &[(usize, usize)],
     current: Option<usize>,
-) -> f32 {
+    selection: Option<(usize, usize)>,
+) -> crate::justify::PaintedBlock {
     // A vertical scope reports the real content height back to the grid; a
     // zero-height `allocate_ui_with_layout` would collapse every row to 0 and
     // let wrapped text paint over the next row.
@@ -424,13 +431,19 @@ fn render_cell(
         ui.set_width(w);
         if cell_needs_library_fallback(cell_md) {
             CommonMarkViewer::new().show(ui, cache, cell_md);
-            return ui.min_rect().height();
+            return crate::justify::PaintedBlock {
+                height: ui.min_rect().height(),
+                chars: Vec::new(),
+            };
         }
         let runs = crate::justify::parse_inline(cell_md);
         if runs.is_empty() {
             // Keep an all-blank row from collapsing to zero height.
             ui.add_space(ui.spacing().interact_size.y);
-            return ui.min_rect().height();
+            return crate::justify::PaintedBlock {
+                height: ui.min_rect().height(),
+                chars: Vec::new(),
+            };
         }
         crate::justify::draw_left(
             ui,
@@ -439,6 +452,7 @@ fn render_cell(
             crate::justify::MatchHighlight {
                 ranges: highlights,
                 current,
+                selection,
             },
         )
     })

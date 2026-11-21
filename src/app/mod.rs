@@ -25,6 +25,7 @@ mod list;
 mod placeholder;
 mod raster;
 mod searchui;
+mod selection;
 mod table;
 mod widgets;
 
@@ -39,6 +40,7 @@ use keys::{apply_key, cancel_action, quit_suppressed, Action, CancelAction, Copy
 use list::ListUi;
 use placeholder::{parse, Placeholder};
 use searchui::SearchUi;
+use selection::selected_text;
 use table::TableUi;
 
 /// Re-export of [`crate::doc::read_doc`] for the app's reload path.
@@ -146,17 +148,20 @@ impl ParagraphUi {
         }
         let block = search.record(ui, crate::justify::search_text(&source));
         let (ranges, current) = search.highlights(block);
+        let selection = search.selection_range(block);
         let runs = crate::justify::parse_inline(&source);
-        let height = crate::justify::draw(
+        let painted = crate::justify::draw(
             ui,
             &runs,
             self.column,
             crate::justify::MatchHighlight {
                 ranges: &ranges,
                 current,
+                selection,
             },
         );
-        search.set_height(block, height);
+        search.set_height(block, painted.height);
+        search.set_char_map(block, painted.chars);
     }
 }
 
@@ -235,6 +240,10 @@ pub(crate) struct App {
     keys: KeyState,
     /// One Ctrl+C Copy event per Ctrl hold; autorepeats are ignored.
     copy_guard: CopyGuard,
+    /// Screen position where a selection drag started, for plain-click detection.
+    select_press: Option<egui::Pos2>,
+    /// Pointer moved far enough during this press to count as a drag.
+    select_moved: bool,
     #[expect(
         dead_code,
         reason = "the watcher must stay alive for the callback to fire"
@@ -364,6 +373,8 @@ impl App {
             applied_theme: Some(theme),
             keys: KeyState::default(),
             copy_guard: CopyGuard::default(),
+            select_press: None,
+            select_moved: false,
             watcher,
             watch_rx,
             pending_reload: None,
@@ -403,6 +414,8 @@ impl App {
         self.code.borrow_mut().reset(self.prepared.code.clone());
         // Old hits point into blocks that no longer exist.
         self.search.borrow_mut().state.clear();
+        self.search.borrow_mut().selection.clear();
+        self.jump_to = None;
     }
 
     /// Show a clipboard confirmation for [`STATUS_DURATION`].
@@ -488,11 +501,64 @@ impl App {
         ctx.request_repaint();
     }
 
-    /// Route Esc/Ctrl+C: cancel the prompt, clear a committed search, or quit.
+    /// Update the text selection from this frame's pointer events, using the
+    /// previous frame's char maps. A plain click (press+release without moving)
+    /// clears instead of selecting a char.
+    fn process_selection(&mut self, ui: &egui::Ui) {
+        let (pressed, released, down, pos) = ui.input(|i| {
+            (
+                i.pointer.primary_pressed(),
+                i.pointer.primary_released(),
+                i.pointer.primary_down(),
+                i.pointer.interact_pos(),
+            )
+        });
+        let mut s = self.search.borrow_mut();
+        if pressed {
+            let hit = pos.and_then(|p| s.hit_near(p));
+            match (pos, hit) {
+                (Some(p), Some(point)) => {
+                    s.selection.begin(point);
+                    self.select_press = Some(p);
+                    self.select_moved = false;
+                }
+                _ => {
+                    s.selection.clear();
+                    self.select_press = None;
+                }
+            }
+        }
+        if down && s.selection.dragging {
+            if let Some(p) = pos {
+                if self
+                    .select_press
+                    .is_some_and(|start| p.distance(start) > 3.0)
+                {
+                    self.select_moved = true;
+                }
+                if let Some(point) = s.hit(p) {
+                    s.selection.extend(point);
+                }
+            }
+        }
+        if released && s.selection.dragging {
+            s.selection.dragging = false;
+            // A plain click, or a drag that stayed within one char, is not a
+            // range selection.
+            if !self.select_moved || !s.selection.is_active() {
+                s.selection.clear();
+            }
+            self.select_press = None;
+        }
+    }
+
+    /// Route Esc/Ctrl+C: cancel the prompt, clear a committed search, clear the
+    /// selection, or quit.
     fn cancel_search(&mut self, ctx: &egui::Context) {
         let prompt_open = self.search.borrow().is_open();
         let search_active = self.search.borrow().state.pattern.is_some();
-        match cancel_action(prompt_open, search_active) {
+        let selection_active = self.search.borrow().selection.is_active();
+        match cancel_action(prompt_open, search_active, selection_active) {
             CancelAction::CancelPrompt => {
                 self.search.borrow_mut().cancel();
                 self.jump_to = None;
@@ -501,6 +567,10 @@ impl App {
             CancelAction::ClearSearch => {
                 self.search.borrow_mut().state.clear();
                 self.jump_to = None;
+                ctx.request_repaint();
+            }
+            CancelAction::ClearSelection => {
+                self.search.borrow_mut().selection.clear();
                 ctx.request_repaint();
             }
             CancelAction::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
@@ -621,6 +691,11 @@ impl eframe::App for App {
         if !popup_open && prompt_open {
             self.draw_search_prompt(ui.ctx());
         }
+        // Pointer selection runs before the scroll area so a press on text can
+        // suppress drag-panning in the same frame.
+        if !popup_open && !prompt_open {
+            self.process_selection(ui);
+        }
         let mut acts: Vec<Action> = Vec::new();
         if !popup_open && prompt_open {
             // While the command line owns the keyboard, document keys are
@@ -718,6 +793,15 @@ impl eframe::App for App {
                         {
                             continue;
                         }
+                        // `y` copies an active drag selection; with none it
+                        // keeps arming `yy`.
+                        if *key == egui::Key::Y
+                            && !modifiers.any()
+                            && self.search.borrow().selection.is_active()
+                        {
+                            acts.push(Action::CopySelection);
+                            continue;
+                        }
                         if let Some(a) = apply_key(&mut self.keys, *key, *modifiers, now) {
                             search_opened = a == Action::SearchOpen;
                             acts.push(a);
@@ -793,7 +877,19 @@ impl eframe::App for App {
                 }
                 Action::SearchNext => self.step_search(1, ui.ctx()),
                 Action::SearchPrev => self.step_search(-1, ui.ctx()),
-                // Esc/Ctrl+C: prompt, then active search, then quit.
+                Action::CopySelection => {
+                    let text = {
+                        let s = self.search.borrow();
+                        selected_text(s.texts(), &s.selection)
+                    };
+                    if let Some(text) = text {
+                        if !text.is_empty() {
+                            ui.ctx().copy_text(text);
+                            self.set_status("copied selection");
+                        }
+                    }
+                }
+                // Esc/Ctrl+C: prompt, search, selection, then quit.
                 Action::CancelOrQuit => self.cancel_search(ui.ctx()),
                 Action::Quit => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
             }
@@ -869,8 +965,9 @@ impl eframe::App for App {
                 .on_hover_cursor(egui::CursorIcon::Grab)
                 .scroll_source(egui::scroll_area::ScrollSource {
                     scroll_bar: true,
-                    // Mouse drag pans both axes; the popup freezes the document.
-                    drag: if popup_open {
+                    // Mouse drag pans both axes; a text selection owns the drag,
+                    // and the popup freezes the document.
+                    drag: if popup_open || self.search.borrow().selection.dragging {
                         egui::scroll_area::DragScroll::Never
                     } else {
                         egui::scroll_area::DragScroll::Always

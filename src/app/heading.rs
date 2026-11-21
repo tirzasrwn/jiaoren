@@ -63,6 +63,7 @@ impl HeadingUi {
             let highlights = justify::MatchHighlight {
                 ranges: &ranges,
                 current,
+                selection: search.selection_range(block),
             };
             if runs.is_empty() {
                 // `#` still owns a heading row, not just the gaps.
@@ -70,8 +71,9 @@ impl HeadingUi {
                 ui.allocate_space(egui::vec2(column, row_h));
                 search.set_height(block, row_h);
             } else {
-                let height = justify::draw_with(ui, &runs, column, font, color, false, highlights);
-                search.set_height(block, height);
+                let painted = justify::draw_with(ui, &runs, column, font, color, false, highlights);
+                search.set_height(block, painted.height);
+                search.set_char_map(block, painted.chars);
             }
             if spec.space_after {
                 ui.add_space(after);

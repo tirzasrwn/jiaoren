@@ -55,6 +55,7 @@ impl ListUi {
                 let highlights = justify::MatchHighlight {
                     ranges: &ranges,
                     current,
+                    selection: search.selection_range(block),
                 };
                 let marker = match item.kind {
                     ListKind::Bullet if item.depth % 2 == 1 => Marker::Hollow,
@@ -64,8 +65,9 @@ impl ListUi {
                 };
                 let runs = justify::parse_inline(&item.text);
                 let indent = justify::list_indent(item.depth, space);
-                let height = justify::draw_indented(ui, &runs, column, indent, marker, highlights);
-                search.set_height(block, height);
+                let painted = justify::draw_indented(ui, &runs, column, indent, marker, highlights);
+                search.set_height(block, painted.height);
+                search.set_char_map(block, painted.chars);
             }
             ui.add_space(pad);
         });

@@ -70,11 +70,15 @@ impl CodeUi {
             .unwrap_or_else(|| egui::FontId::monospace(14.0));
         let block = search.record(ui, spec.text.clone());
         let (ranges, current) = search.highlights(block);
+        let selection = search.selection_range(block);
         let row_h = ui.fonts_mut(|f| f.row_height(&mono));
         let lines = code_lines(&spec.text);
         let line_marks = line_highlights(&spec.text, &ranges, current);
+        let sel_ranges: Vec<(usize, usize)> = selection.into_iter().collect();
+        let sel_marks = line_highlights(&spec.text, &sel_ranges, None);
         let other_fill = crate::justify::highlight_color(ui, false);
         let current_fill = crate::justify::highlight_color(ui, true);
+        let selection_fill = crate::justify::selection_color(ui);
         let widest = widest_line(&lines, &|s| line_width(ui, s, &mono));
         let pad = row_h * 0.5;
         // Widest line plus padding, never narrower than the reading column: the
@@ -86,10 +90,23 @@ impl CodeUi {
         let painter = ui.painter().clone();
         painter.rect_filled(rect, 2.0, ui.visuals().code_bg_color);
         let color = ui.visuals().text_color();
+        let mut chars = Vec::new();
+        let mut line_start = 0usize;
         for (row, line) in lines.iter().enumerate() {
             let pos = egui::Pos2::new(rect.left() + pad, rect.top() + pad + row as f32 * row_h);
-            // Highlights first, behind the glyphs. A match spanning lines
-            // contributes its remainder to the next line.
+            let line_len = line.chars().count();
+            // Selection first, then search hits, both behind the glyphs.
+            for &(start, end, _) in &sel_marks[row] {
+                let prefix: String = line.chars().take(start).collect();
+                let piece: String = line.chars().skip(start).take(end - start).collect();
+                let x = pos.x + line_width(ui, &prefix, &mono);
+                let w = line_width(ui, &piece, &mono);
+                painter.rect_filled(
+                    egui::Rect::from_min_size(egui::Pos2::new(x, pos.y), egui::vec2(w, row_h)),
+                    2.0,
+                    selection_fill,
+                );
+            }
             for &(start, end, is_current) in &line_marks[row] {
                 let prefix: String = line.chars().take(start).collect();
                 let piece: String = line.chars().skip(start).take(end - start).collect();
@@ -103,11 +120,20 @@ impl CodeUi {
                 );
             }
             if line.is_empty() {
+                line_start += 1; // the newline itself
                 continue; // the row is still reserved by `height`
             }
             let galley = ui.fonts_mut(|f| f.layout_no_wrap(line.to_string(), mono.clone(), color));
+            let line_w = galley.size().x.max(1.0);
+            chars.push(crate::justify::CharSpan {
+                start: line_start,
+                len: line_len,
+                rect: egui::Rect::from_min_size(pos, egui::vec2(line_w, row_h)),
+            });
             painter.galley(pos, galley, color);
+            line_start += line_len + 1; // the newline itself
         }
+        search.set_char_map(block, chars);
         // Overlay the copy icon inside the block's top-right corner, at the
         // reading-column edge for over-wide code, so it never takes layout
         // space or moves with horizontal panning.

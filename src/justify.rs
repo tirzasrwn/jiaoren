@@ -848,14 +848,33 @@ pub fn list_indent(depth: u8, space_width: f32) -> f32 {
     depth.min(5) as f32 * 2.0 * space_width
 }
 
+/// One painted fragment's char range and screen rect, used for pointer hit
+/// testing. `start`/`len` are char offsets in the block's recorded text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CharSpan {
+    pub start: usize,
+    pub len: usize,
+    pub rect: Rect,
+}
+
+/// Result of painting one block: its used height and the char map for
+/// selection hit testing.
+#[derive(Clone, Debug, Default)]
+pub struct PaintedBlock {
+    pub height: f32,
+    pub chars: Vec<CharSpan>,
+}
+
 /// Highlight ranges for one block, as char ranges into its recorded search
-/// text, plus which range is the current match.
+/// text, plus which range is the current match and the text selection.
 #[derive(Clone, Copy, Default)]
 pub struct MatchHighlight<'a> {
     /// Block-local char ranges.
     pub ranges: &'a [(usize, usize)],
     /// Index into `ranges` of the current match, if it belongs to this block.
     pub current: Option<usize>,
+    /// Selected char range in this block, painted below search hits.
+    pub selection: Option<(usize, usize)>,
 }
 
 /// Fill colour behind a match: the theme selection colour for all hits, and a
@@ -870,6 +889,13 @@ pub(crate) fn highlight_color(ui: &egui::Ui, current: bool) -> Color32 {
     } else {
         selection
     }
+}
+
+/// Fill colour behind the text selection: the search selection ink at a lower
+/// alpha, so search hits stay readable on top.
+pub(crate) fn selection_color(ui: &egui::Ui) -> Color32 {
+    let [r, g, b, _] = ui.visuals().selection.bg_fill.to_srgba_unmultiplied();
+    Color32::from_rgba_unmultiplied(r, g, b, 0x40)
 }
 
 /// Intersection of `ranges` with the char span `[start, start + text.chars())`,
@@ -899,7 +925,12 @@ pub(crate) fn local_ranges(
 /// Paint `runs` as a fully justified paragraph in a `column`-wide slot starting
 /// at the current cursor. Every line but the last (and any line without a
 /// stretchable gap) is spread so its right edge lands on `cursor.left() + column`.
-pub fn draw(ui: &mut egui::Ui, runs: &[Run], column: f32, highlights: MatchHighlight<'_>) -> f32 {
+pub fn draw(
+    ui: &mut egui::Ui,
+    runs: &[Run],
+    column: f32,
+    highlights: MatchHighlight<'_>,
+) -> PaintedBlock {
     paint(ui, runs, column, true, highlights)
 }
 
@@ -913,7 +944,7 @@ pub fn draw_indented(
     indent: f32,
     marker: Marker,
     highlights: MatchHighlight<'_>,
-) -> f32 {
+) -> PaintedBlock {
     let column = column.max(0.0);
     let space = space_width(ui);
     let galley = layout(ui, &marker.label(), &marker_format(ui));
@@ -921,7 +952,7 @@ pub fn draw_indented(
     let offset = indent + marker_width + space;
     let text_width = (column - offset).max(0.0);
     if text_width <= 0.0 {
-        return 0.0;
+        return PaintedBlock::default();
     }
     paint_at(
         ui,
@@ -942,7 +973,7 @@ pub fn draw_left(
     runs: &[Run],
     column: f32,
     highlights: MatchHighlight<'_>,
-) -> f32 {
+) -> PaintedBlock {
     paint(ui, runs, column, false, highlights)
 }
 
@@ -957,7 +988,7 @@ pub fn draw_with(
     color: Color32,
     justify: bool,
     highlights: MatchHighlight<'_>,
-) -> f32 {
+) -> PaintedBlock {
     paint_at(
         ui,
         runs,
@@ -976,7 +1007,7 @@ fn paint(
     column: f32,
     justify: bool,
     highlights: MatchHighlight<'_>,
-) -> f32 {
+) -> PaintedBlock {
     paint_at(ui, runs, column, justify, 0.0, None, None, highlights)
 }
 
@@ -1024,10 +1055,10 @@ fn paint_at(
     marker: Option<(f32, Arc<Galley>)>,
     face: Option<(FontId, Color32)>,
     highlights: MatchHighlight<'_>,
-) -> f32 {
+) -> PaintedBlock {
     let column = column.max(0.0);
     if column <= 0.0 {
-        return 0.0;
+        return PaintedBlock::default();
     }
     let body = face
         .as_ref()
@@ -1045,9 +1076,12 @@ fn paint_at(
                 galley,
                 ui.visuals().text_color(),
             );
-            return row_h;
+            return PaintedBlock {
+                height: row_h,
+                chars: Vec::new(),
+            };
         }
-        return 0.0;
+        return PaintedBlock::default();
     }
     let widths: Vec<f32> = words.iter().map(|w| w.width).collect();
     let gaps: Vec<f32> = words
@@ -1091,6 +1125,7 @@ fn paint_at(
         );
     }
     let split_words: Vec<bool> = words.iter().map(|w| w.split).collect();
+    let mut chars = Vec::new();
 
     for (row, line) in lines.iter().enumerate() {
         let natural = natural_of(line);
@@ -1111,11 +1146,22 @@ fn paint_at(
             for frag in &word.frags {
                 let pos = Pos2::new(x, y);
                 paint_frag(ui, &painter, pos, frag, highlights);
+                let len = frag.text.chars().count();
+                if len > 0 {
+                    chars.push(CharSpan {
+                        start: frag.offset,
+                        len,
+                        rect: Rect::from_min_size(pos, egui::vec2(frag.width, row_h)),
+                    });
+                }
                 x += frag.width;
             }
         }
     }
-    used_height
+    PaintedBlock {
+        height: used_height,
+        chars,
+    }
 }
 
 /// A line borders a split token when it holds any piece of one (head or
@@ -1205,17 +1251,34 @@ fn paint_highlights(
     highlights: MatchHighlight<'_>,
 ) {
     for (start, end, index) in local_ranges(frag.offset, &frag.text, highlights.ranges) {
-        let prefix: String = frag.text.chars().take(start).collect();
-        let piece: String = frag.text.chars().skip(start).take(end - start).collect();
-        let prefix_w = layout(ui, &prefix, &frag.format).size().x;
-        let piece_w = layout(ui, &piece, &frag.format).size().x;
         let color = highlight_color(ui, highlights.current == Some(index));
-        let rect = Rect::from_min_size(
-            Pos2::new(pos.x + prefix_w, pos.y),
-            egui::vec2(piece_w, frag.galley.size().y),
-        );
-        painter.rect_filled(rect, 2.0, color);
+        paint_char_range(ui, painter, pos, frag, start, end, color);
     }
+}
+
+/// Paint one local char range of a fragment with the fragment's own format, so
+/// partial words get an exact-width rect.
+fn paint_char_range(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    pos: Pos2,
+    frag: &Frag,
+    start: usize,
+    end: usize,
+    color: Color32,
+) {
+    if start >= end {
+        return;
+    }
+    let prefix: String = frag.text.chars().take(start).collect();
+    let piece: String = frag.text.chars().skip(start).take(end - start).collect();
+    let prefix_w = layout(ui, &prefix, &frag.format).size().x;
+    let piece_w = layout(ui, &piece, &frag.format).size().x;
+    let rect = Rect::from_min_size(
+        Pos2::new(pos.x + prefix_w, pos.y),
+        egui::vec2(piece_w, frag.galley.size().y),
+    );
+    painter.rect_filled(rect, 2.0, color);
 }
 
 fn paint_frag(
@@ -1229,6 +1292,12 @@ fn paint_frag(
     if frag.kind == RunKind::Code {
         let bg = Rect::from_min_size(pos, size).expand2(egui::vec2(1.0, 0.0));
         painter.rect_filled(bg, 2.0, ui.visuals().code_bg_color);
+    }
+    // Selection first, then search hits, both below the glyphs.
+    if let Some((start, end)) = highlights.selection {
+        for (start, end, _) in local_ranges(frag.offset, &frag.text, &[(start, end)]) {
+            paint_char_range(ui, painter, pos, frag, start, end, selection_color(ui));
+        }
     }
     // Above the code background, below the glyphs.
     paint_highlights(ui, painter, pos, frag, highlights);

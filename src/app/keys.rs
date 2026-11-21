@@ -47,6 +47,8 @@ pub enum Action {
     SearchNext,
     /// Jump to the previous search match, wrapping.
     SearchPrev,
+    /// Copy the active text selection.
+    CopySelection,
     /// Clear the active search, cancel the prompt, or quit when neither applies.
     CancelOrQuit,
     /// Close the window.
@@ -60,16 +62,24 @@ pub enum CancelAction {
     CancelPrompt,
     /// Clear the committed pattern, hits and highlights.
     ClearSearch,
+    /// Clear the drag selection (after a search was already clear).
+    ClearSelection,
     /// Close the window.
     Quit,
 }
 
-/// Route Esc/Ctrl+C: prompt first, then an active search, then quit.
-pub fn cancel_action(prompt_open: bool, search_active: bool) -> CancelAction {
+/// Route Esc/Ctrl+C: prompt, then search, then selection, then quit.
+pub fn cancel_action(
+    prompt_open: bool,
+    search_active: bool,
+    selection_active: bool,
+) -> CancelAction {
     if prompt_open {
         CancelAction::CancelPrompt
     } else if search_active {
         CancelAction::ClearSearch
+    } else if selection_active {
+        CancelAction::ClearSelection
     } else {
         CancelAction::Quit
     }
@@ -450,11 +460,18 @@ mod tests {
         }
 
         #[test]
-        fn cancel_action_is_prompt_then_search_then_quit() {
-            assert_eq!(cancel_action(true, false), CancelAction::CancelPrompt);
-            assert_eq!(cancel_action(true, true), CancelAction::CancelPrompt);
-            assert_eq!(cancel_action(false, true), CancelAction::ClearSearch);
-            assert_eq!(cancel_action(false, false), CancelAction::Quit);
+        fn cancel_action_is_prompt_then_search_then_selection_then_quit() {
+            assert_eq!(
+                cancel_action(true, false, false),
+                CancelAction::CancelPrompt
+            );
+            assert_eq!(cancel_action(true, true, true), CancelAction::CancelPrompt);
+            assert_eq!(cancel_action(false, true, true), CancelAction::ClearSearch);
+            assert_eq!(
+                cancel_action(false, false, true),
+                CancelAction::ClearSelection
+            );
+            assert_eq!(cancel_action(false, false, false), CancelAction::Quit);
         }
 
         #[test]
@@ -470,7 +487,7 @@ mod tests {
             }
             // Enter+Copy batch routing uses the prompt-open snapshot: Copy is
             // processed first, so the prompt rung is the one that acts.
-            assert_eq!(cancel_action(true, true), CancelAction::CancelPrompt);
+            assert_eq!(cancel_action(true, true, true), CancelAction::CancelPrompt);
             // Releasing Ctrl re-arms: a queued autorepeat after key-up is still
             // ignored; the next fresh press may advance the ladder.
             guard.observe_modifiers(false);
