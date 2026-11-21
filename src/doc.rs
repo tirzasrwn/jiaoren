@@ -185,11 +185,17 @@ fn is_thematic_break(t: &str) -> bool {
     }
 }
 
-/// An ATX heading: 1–6 `#` at column 0, then a space (or end of line).
+/// An ATX heading: 0–3 leading spaces, 1–6 `#`, then a space or tab (or end
+/// of line). Four or more leading spaces is an indented code block.
 fn is_atx_heading(line: &str) -> bool {
     let t = line.trim_end_matches(['\r', '\n']);
-    let hashes = t.chars().take_while(|&c| c == '#').count();
-    (1..=6).contains(&hashes) && matches!(t.as_bytes().get(hashes), None | Some(b' '))
+    let indent = t.len() - t.trim_start_matches(' ').len();
+    if indent > 3 {
+        return false;
+    }
+    let s = &t[indent..];
+    let hashes = s.chars().take_while(|&c| c == '#').count();
+    (1..=6).contains(&hashes) && matches!(s.as_bytes().get(hashes), None | Some(b' ' | b'\t'))
 }
 
 /// Emit a spacer placeholder before a heading, unless the document has no
@@ -206,8 +212,19 @@ fn push_space_before(out: &mut String) {
 }
 
 /// Emit a spacer placeholder after a heading.
+///
+/// `<mdspace>` is deliberately an empty HTML block: the library renders each
+/// block as exactly one row, and that row is the breathing room. The html hook
+/// runs in a left-to-right layout where `ui.add_space` has no vertical effect,
+/// so the space must come from the block's own row.
 fn push_space_after(out: &mut String) {
     out.push_str("<mdspace>\n\n");
+}
+
+/// True when `lines[from..]` still holds a non-blank line, i.e. a spacer
+/// emitted now would not sit at the end of the document.
+fn has_content_after(lines: &[&str], from: usize) -> bool {
+    lines[from..].iter().any(|l| !l.trim().is_empty())
 }
 
 /// A setext underline: one or more `=` or `-` and nothing else (up to 3 spaces
@@ -265,6 +282,22 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                     i += 1;
                 }
                 None => {
+                    // Raw HTML block: the line starts with `<` at ≤3 spaces of
+                    // indent and is not an inline tag. Emit through to the next
+                    // blank line verbatim and run no Markdown logic inside, so
+                    // a spacer's blank line can never terminate the block and
+                    // expose `# …` as a heading.
+                    if opens_raw_html_block(line) {
+                        let mut j = i + 1;
+                        while j < lines.len() && !lines[j].trim().is_empty() {
+                            j += 1;
+                        }
+                        for l in &lines[i..j] {
+                            out.push_str(l);
+                        }
+                        i = j;
+                        continue;
+                    }
                     // Table block: consecutive `|`-lines starting at a top-level
                     // line (GFM headers may omit the leading pipe); block-level
                     // structures end the run. ponytail: an emphasis header like
@@ -353,7 +386,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                             for l in &lines[i..end] {
                                 out.push_str(&rewrite_images(l, doc_dir));
                             }
-                            if end < lines.len() {
+                            if has_content_after(&lines, end) {
                                 push_space_after(&mut out);
                             }
                             i = end;
@@ -380,7 +413,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                     if is_atx_heading(line) {
                         push_space_before(&mut out);
                         out.push_str(&rewrite_images(line, doc_dir));
-                        if i + 1 < lines.len() {
+                        if has_content_after(&lines, i + 1) {
                             push_space_after(&mut out);
                         }
                         i += 1;
@@ -515,6 +548,37 @@ fn open_fence(t: &str) -> Option<(char, usize, &str)> {
 
 fn is_close(t: &str, ch: char, open_len: usize) -> bool {
     t.chars().all(|c| c == ch) && t.chars().count() >= open_len
+}
+
+/// HTML elements CommonMark treats as inline. A line starting with one of
+/// these stays ordinary paragraph text; any other `<…>` line opens a raw HTML
+/// block (types 1–7, simplified here to "ends at the next blank line").
+const INLINE_HTML_TAGS: &[&str] = &[
+    "a", "abbr", "b", "bdi", "bdo", "br", "cite", "code", "data", "del", "dfn", "em", "i", "img",
+    "ins", "kbd", "mark", "q", "rp", "rt", "ruby", "s", "samp", "small", "span", "strong", "sub",
+    "sup", "time", "u", "var", "wbr",
+];
+
+/// True when `line` opens a raw HTML block: at most three leading spaces, then
+/// `<`, and either no tag name (comment, declaration, processing instruction,
+/// CDATA) or a block-level tag name.
+fn opens_raw_html_block(line: &str) -> bool {
+    let t = line.trim_end_matches(['\r', '\n']);
+    let indent = t.len() - t.trim_start_matches(' ').len();
+    if indent > 3 {
+        return false;
+    }
+    let Some(rest) = t[indent..].strip_prefix('<') else {
+        return false;
+    };
+    let body = rest.strip_prefix('/').unwrap_or(rest);
+    let name: String = body
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    !INLINE_HTML_TAGS
+        .iter()
+        .any(|tag| tag.eq_ignore_ascii_case(&name))
 }
 
 /// A table run ends (and cannot start) on such a line: fenced code, headings,
@@ -1290,6 +1354,15 @@ mod tests {
         }
 
         #[test]
+        fn consecutive_headings_get_two_spacers() {
+            // Each `<mdspace>` is one empty HTML row, so `# A` then `# B` gets
+            // two rows between them. Deliberately not deduplicated.
+            let p = prepare("# A\n# B\n", Path::new("/d"));
+            assert_eq!(spaces(&p.markdown), 2);
+            assert!(p.markdown.contains("<mdspace>\n\n<mdspace>"));
+        }
+
+        #[test]
         fn document_starting_with_a_heading_has_no_leading_spacer() {
             let p = prepare("# Title\n\nbody\n", Path::new("/d"));
             assert_eq!(spaces(&p.markdown), 1);
@@ -1297,10 +1370,54 @@ mod tests {
         }
 
         #[test]
-        fn heading_at_eof_has_no_trailing_spacer() {
+        fn setext_heading_at_document_start_has_no_leading_spacer() {
+            let p = prepare("Title\n===\n\nbody\n", Path::new("/d"));
+            assert_eq!(spaces(&p.markdown), 1);
+            assert!(p.markdown.starts_with("Title\n==="));
+            assert!(p.markdown.find("<mdspace>").unwrap() > p.markdown.find("===").unwrap());
+        }
+
+        #[test]
+        fn heading_at_eof_without_newline_has_no_trailing_spacer() {
             let p = prepare("body\n\n## Last", Path::new("/d"));
             assert_eq!(spaces(&p.markdown), 1);
             assert!(p.markdown.ends_with("## Last"));
+        }
+
+        #[test]
+        fn heading_at_eof_with_trailing_blank_line_has_no_trailing_spacer() {
+            let p = prepare("body\n\n## Last\n\n", Path::new("/d"));
+            assert_eq!(spaces(&p.markdown), 1);
+            assert!(p.markdown.ends_with("## Last\n\n"));
+        }
+
+        #[test]
+        fn thematic_break_after_blank_line_gets_no_spacers() {
+            let p = prepare("body\n\n---\n", Path::new("/d"));
+            assert_eq!(spaces(&p.markdown), 0);
+            assert!(p.markdown.contains("---"));
+        }
+
+        #[test]
+        fn indented_atx_heading_gets_spacers() {
+            let p = prepare("before\n\n  ## indented\n\nafter\n", Path::new("/d"));
+            assert_eq!(spaces(&p.markdown), 2);
+            assert!(p.markdown.contains("  ## indented"));
+        }
+
+        #[test]
+        fn four_space_indented_heading_stays_code() {
+            let p = prepare("before\n\n    ## code\n\nafter\n", Path::new("/d"));
+            assert_eq!(spaces(&p.markdown), 0);
+            assert!(p.markdown.contains("    ## code"));
+        }
+
+        #[test]
+        fn raw_html_block_keeps_hash_line_literal() {
+            let p = prepare("<div>\n# not a heading\n</div>\n", Path::new("/d"));
+            assert_eq!(spaces(&p.markdown), 0);
+            assert!(p.markdown.contains("<div>\n# not a heading\n</div>"));
+            assert!(p.paragraphs.is_empty());
         }
 
         #[test]

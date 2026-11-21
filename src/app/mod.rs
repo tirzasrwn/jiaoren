@@ -27,7 +27,7 @@ use geometry::{bottom_pad, content_column};
 use keys::{apply_key, quit_suppressed, Action, KeyState};
 use list::ListUi;
 use placeholder::{parse, Placeholder};
-use table::{table_pad, TableUi};
+use table::TableUi;
 
 /// Re-export of [`crate::doc::read_doc`] for the app's reload path.
 pub use crate::doc::read_doc;
@@ -208,9 +208,6 @@ impl App {
                 Some(Placeholder::Table(id)) => t.borrow_mut().show(ui, id),
                 Some(Placeholder::List(id)) => l.borrow_mut().show(ui, id),
                 Some(Placeholder::Mermaid(id)) => d.borrow_mut().show(ui, id),
-                Some(Placeholder::Space) => {
-                    ui.add_space(table_pad(ui.text_style_height(&egui::TextStyle::Body)))
-                }
                 None => {}
             })
         };

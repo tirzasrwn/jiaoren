@@ -1,6 +1,6 @@
 //! Detection of the HTML placeholders the Markdown render hook replaces:
-//! `<mdpara id="…">`, `<mdtable id="…">`, `<mdlist id="…">`, `<mermaid id="…">`
-//! and the id-less `<mdspace>`.
+//! `<mdpara id="…">`, `<mdtable id="…">`, `<mdlist id="…">` and
+//! `<mermaid id="…">`.
 
 /// One placeholder found in the hook's HTML, holding the referenced id.
 pub(crate) enum Placeholder<'a> {
@@ -8,29 +8,17 @@ pub(crate) enum Placeholder<'a> {
     List(&'a str),
     Table(&'a str),
     Paragraph(&'a str),
-    /// Breathing room around a heading.
-    Space,
 }
 
 /// Parse `html` as exactly one placeholder. Checked in hook dispatch order:
-/// space, paragraph, table, list, mermaid. Whitespace around the tag is
-/// ignored; trailing attributes and empty ids are rejected.
+/// paragraph, table, list, mermaid. Whitespace around the tag is ignored;
+/// trailing attributes and empty ids are rejected.
 pub(crate) fn parse(html: &str) -> Option<Placeholder<'_>> {
-    if parse_space(html) {
-        return Some(Placeholder::Space);
-    }
     parse_kind(html, "<mdpara")
         .map(Placeholder::Paragraph)
         .or_else(|| parse_kind(html, "<mdtable").map(Placeholder::Table))
         .or_else(|| parse_kind(html, "<mdlist").map(Placeholder::List))
         .or_else(|| parse_kind(html, "<mermaid").map(Placeholder::Mermaid))
-}
-
-/// `<mdspace>` and nothing else: no id, no attributes, no trailing junk.
-fn parse_space(html: &str) -> bool {
-    html.trim()
-        .strip_prefix("<mdspace>")
-        .is_some_and(|rest| rest.trim().is_empty())
 }
 
 fn parse_kind<'a>(html: &'a str, prefix: &str) -> Option<&'a str> {
@@ -60,15 +48,6 @@ fn parse_kind<'a>(html: &'a str, prefix: &str) -> Option<&'a str> {
 mod tests {
     mod placeholder {
         use super::super::{parse, Placeholder};
-
-        #[test]
-        fn parses_space_placeholder() {
-            assert!(matches!(parse("<mdspace>"), Some(Placeholder::Space)));
-            assert!(matches!(parse("  <mdspace>  \n"), Some(Placeholder::Space)));
-            assert!(parse("<mdspace id=\"x\">").is_none());
-            assert!(parse("<mdspacex>").is_none());
-            assert!(parse("<mdspace> junk").is_none());
-        }
 
         #[test]
         fn parses_placeholder_ids() {
