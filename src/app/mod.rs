@@ -1,5 +1,6 @@
 //! The eframe application: window state, scrolling and zoom, and the Markdown
-//! render hook that swaps placeholders for diagrams, tables and paragraphs.
+//! render hook that swaps placeholders for diagrams, tables, lists, headings,
+//! code, images and paragraphs.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -14,8 +15,10 @@ use notify::{RecursiveMode, Watcher};
 use crate::doc::{prepare, Prepared};
 use crate::mermaid::{ensure_chromium, Renderer, Theme};
 
+mod code;
 mod diagram;
 mod geometry;
+mod heading;
 mod image;
 mod keys;
 mod list;
@@ -23,8 +26,10 @@ mod placeholder;
 mod raster;
 mod table;
 
+use code::CodeUi;
 use diagram::DiagramUi;
 use geometry::{bottom_pad, content_column, home_scroll, home_target, overscroll_pad};
+use heading::HeadingUi;
 use image::ImageUi;
 use keys::{apply_key, quit_suppressed, Action, KeyState};
 use list::ListUi;
@@ -164,6 +169,8 @@ pub(crate) struct App {
     lists: Rc<RefCell<ListUi>>,
     paragraphs: Rc<RefCell<ParagraphUi>>,
     images: Rc<RefCell<ImageUi>>,
+    headings: Rc<RefCell<HeadingUi>>,
+    code: Rc<RefCell<CodeUi>>,
     html_fn: HtmlFn,
     scroll_y: f32,
     scroll_x: f32,
@@ -227,16 +234,22 @@ impl App {
         let lists = Rc::new(RefCell::new(ListUi::new(prepared.lists.clone())));
         let paragraphs = Rc::new(RefCell::new(ParagraphUi::new(prepared.paragraphs.clone())));
         let images = Rc::new(RefCell::new(ImageUi::new(prepared.images.clone())));
+        let headings = Rc::new(RefCell::new(HeadingUi::new(prepared.headings.clone())));
+        let code = Rc::new(RefCell::new(CodeUi::new(prepared.code.clone())));
         let html_fn: HtmlFn = {
             let d = Rc::clone(&diagrams);
             let t = Rc::clone(&tables);
             let l = Rc::clone(&lists);
             let p = Rc::clone(&paragraphs);
             let i = Rc::clone(&images);
+            let h = Rc::clone(&headings);
+            let c = Rc::clone(&code);
             Box::new(move |ui: &mut egui::Ui, html: &str| match parse(html) {
                 Some(Placeholder::Paragraph(id)) => p.borrow_mut().show(ui, id),
                 Some(Placeholder::Table(id)) => t.borrow_mut().show(ui, id),
                 Some(Placeholder::List(id)) => l.borrow_mut().show(ui, id),
+                Some(Placeholder::Heading(id)) => h.borrow_mut().show(ui, id),
+                Some(Placeholder::Code(id)) => c.borrow_mut().show(ui, id),
                 Some(Placeholder::Image(id)) => i.borrow_mut().show(ui, id),
                 Some(Placeholder::Mermaid(id)) => d.borrow_mut().show(ui, id),
                 None => {}
@@ -282,6 +295,8 @@ impl App {
             lists,
             paragraphs,
             images,
+            headings,
+            code,
             html_fn,
             scroll_y: 0.0,
             scroll_x: 0.0,
@@ -322,6 +337,10 @@ impl App {
             .borrow_mut()
             .reset(self.prepared.paragraphs.clone());
         self.images.borrow_mut().reset(self.prepared.images.clone());
+        self.headings
+            .borrow_mut()
+            .reset(self.prepared.headings.clone());
+        self.code.borrow_mut().reset(self.prepared.code.clone());
     }
 
     /// Show a clipboard confirmation for [`STATUS_DURATION`].
@@ -576,6 +595,8 @@ impl eframe::App for App {
                         self.tables.borrow_mut().begin_frame();
                         self.lists.borrow_mut().begin_frame(col);
                         self.paragraphs.borrow_mut().begin_frame(col);
+                        self.headings.borrow_mut().begin_frame(col);
+                        self.code.borrow_mut().begin_frame(col);
                         self.diagrams.borrow_mut().begin_frame(col);
                         self.images.borrow_mut().begin_frame(col, z);
                         CommonMarkViewer::new()

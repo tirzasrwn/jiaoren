@@ -1,6 +1,6 @@
 //! Detection of the HTML placeholders the Markdown render hook replaces:
-//! `<mdpara id="…">`, `<mdtable id="…">`, `<mdlist id="…">`, `<mdimg id="…">`
-//! and `<mermaid id="…">`.
+//! `<mdpara id="…">`, `<mdtable id="…">`, `<mdlist id="…">`, `<mdheading id="…">`,
+//! `<mdcode id="…">`, `<mdimg id="…">` and `<mermaid id="…">`.
 
 /// One placeholder found in the hook's HTML, holding the referenced id.
 pub(crate) enum Placeholder<'a> {
@@ -9,16 +9,20 @@ pub(crate) enum Placeholder<'a> {
     Table(&'a str),
     Paragraph(&'a str),
     Image(&'a str),
+    Heading(&'a str),
+    Code(&'a str),
 }
 
 /// Parse `html` as exactly one placeholder. Checked in hook dispatch order:
-/// paragraph, table, list, image, mermaid. Whitespace around the tag is
-/// ignored; trailing attributes and empty ids are rejected.
+/// paragraph, table, list, heading, code, image, mermaid. Whitespace around the
+/// tag is ignored; trailing attributes and empty ids are rejected.
 pub(crate) fn parse(html: &str) -> Option<Placeholder<'_>> {
     parse_kind(html, "<mdpara")
         .map(Placeholder::Paragraph)
         .or_else(|| parse_kind(html, "<mdtable").map(Placeholder::Table))
         .or_else(|| parse_kind(html, "<mdlist").map(Placeholder::List))
+        .or_else(|| parse_kind(html, "<mdheading").map(Placeholder::Heading))
+        .or_else(|| parse_kind(html, "<mdcode").map(Placeholder::Code))
         .or_else(|| parse_kind(html, "<mdimg").map(Placeholder::Image))
         .or_else(|| parse_kind(html, "<mermaid").map(Placeholder::Mermaid))
 }
@@ -131,6 +135,21 @@ mod tests {
                 parse(" <mdpara id=\"abc\"> "),
                 Some(Placeholder::Paragraph("abc"))
             ));
+        }
+        #[test]
+        fn parses_heading_and_code_placeholder_ids() {
+            assert!(matches!(
+                parse(r#"<mdheading id="h1">"#),
+                Some(Placeholder::Heading("h1"))
+            ));
+            assert!(matches!(
+                parse(" <mdcode id=\"c1\"> "),
+                Some(Placeholder::Code("c1"))
+            ));
+            assert!(parse(r#"<mdheading id="">"#).is_none());
+            assert!(parse(r#"<mdcode id="x" data-lang="rust">"#).is_none());
+            // The longer tag never matches the shorter prefix.
+            assert!(parse(r#"<mdcodex id="x">"#).is_none());
         }
     }
 }

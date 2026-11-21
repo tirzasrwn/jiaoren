@@ -479,22 +479,43 @@ struct Word {
 }
 
 /// Layout every word fragment with the real egui font metrics. Words are split
-/// on whitespace; a code span stays one atomic word.
-fn build_words(ui: &egui::Ui, runs: &[Run]) -> Vec<Word> {
-    let body = ui
-        .style()
-        .text_styles
-        .get(&TextStyle::Body)
-        .cloned()
-        .unwrap_or_else(|| FontId::proportional(14.0));
-    let mono = ui
+/// on whitespace; a code span stays one atomic word. `face` overrides the body
+/// font (headings scale it); the strong colour follows the body colour so a
+/// heading's bold runs stay one ink.
+fn build_words(ui: &egui::Ui, runs: &[Run], face: Option<&(FontId, Color32)>) -> Vec<Word> {
+    let body = face.map_or_else(
+        || {
+            ui.style()
+                .text_styles
+                .get(&TextStyle::Body)
+                .cloned()
+                .unwrap_or_else(|| FontId::proportional(14.0))
+        },
+        |(font, _)| font.clone(),
+    );
+    let mono_style = ui
         .style()
         .text_styles
         .get(&TextStyle::Monospace)
         .cloned()
         .unwrap_or_else(|| FontId::monospace(14.0));
-    let text_color = ui.visuals().text_color();
-    let strong = ui.visuals().strong_text_color();
+    // Inline code in a heading scales with it instead of going microscopic.
+    let mono = match face {
+        Some((font, _)) if font.size > 0.0 => {
+            let base = ui
+                .style()
+                .text_styles
+                .get(&TextStyle::Body)
+                .map_or(font.size, |b| b.size);
+            FontId::new(
+                mono_style.size * font.size / base,
+                mono_style.family.clone(),
+            )
+        }
+        _ => mono_style,
+    };
+    let text_color = face.map_or_else(|| ui.visuals().text_color(), |(_, color)| *color);
+    let strong = face.map_or_else(|| ui.visuals().strong_text_color(), |(_, color)| *color);
     let link_color = ui.visuals().hyperlink_color;
 
     let mut words: Vec<Word> = Vec::new();
@@ -657,7 +678,15 @@ pub fn draw_indented(ui: &mut egui::Ui, runs: &[Run], column: f32, indent: f32, 
     if text_width <= 0.0 {
         return;
     }
-    paint_at(ui, runs, text_width, true, offset, Some((indent, galley)));
+    paint_at(
+        ui,
+        runs,
+        text_width,
+        true,
+        offset,
+        Some((indent, galley)),
+        None,
+    );
 }
 
 /// Left-aligned variant of [`draw`]: same wrapping, splitting and painting, but
@@ -666,11 +695,25 @@ pub fn draw_left(ui: &mut egui::Ui, runs: &[Run], column: f32) {
     paint(ui, runs, column, false);
 }
 
-fn paint(ui: &mut egui::Ui, runs: &[Run], column: f32, justify: bool) {
-    paint_at(ui, runs, column, justify, 0.0, None);
+/// Paint `runs` with an explicit body font and text colour. `justify` selects
+/// stretched or ragged rows, exactly like [`draw`] and [`draw_left`]. Used by
+/// headings, which scale the body font per level instead of using the style.
+pub fn draw_with(
+    ui: &mut egui::Ui,
+    runs: &[Run],
+    column: f32,
+    font: FontId,
+    color: Color32,
+    justify: bool,
+) {
+    paint_at(ui, runs, column, justify, 0.0, None, Some((font, color)));
 }
 
-fn body_font(ui: &egui::Ui) -> FontId {
+fn paint(ui: &mut egui::Ui, runs: &[Run], column: f32, justify: bool) {
+    paint_at(ui, runs, column, justify, 0.0, None, None);
+}
+
+pub(crate) fn body_font(ui: &egui::Ui) -> FontId {
     ui.style()
         .text_styles
         .get(&TextStyle::Body)
@@ -679,8 +722,12 @@ fn body_font(ui: &egui::Ui) -> FontId {
 }
 
 pub(crate) fn space_width(ui: &egui::Ui) -> f32 {
+    space_width_for(ui, &body_font(ui))
+}
+
+fn space_width_for(ui: &egui::Ui, font: &FontId) -> f32 {
     ui.fonts_mut(|f| {
-        f.layout_no_wrap(" ".to_string(), body_font(ui), Color32::PLACEHOLDER)
+        f.layout_no_wrap(" ".to_string(), font.clone(), Color32::PLACEHOLDER)
             .size()
             .x
     })
@@ -696,7 +743,7 @@ fn marker_format(ui: &egui::Ui) -> TextFormat {
 
 /// The paragraph painter, with an optional hanging indent: `offset` shifts every
 /// row's text right of the allocated `rect`, and `marker` (x, galley) is painted
-/// once at the first row.
+/// once at the first row. `face` overrides the body font and ink colour.
 fn paint_at(
     ui: &mut egui::Ui,
     runs: &[Run],
@@ -704,16 +751,19 @@ fn paint_at(
     justify: bool,
     offset: f32,
     marker: Option<(f32, Arc<Galley>)>,
+    face: Option<(FontId, Color32)>,
 ) {
     let column = column.max(0.0);
     if column <= 0.0 {
         return;
     }
-    let body = body_font(ui);
+    let body = face
+        .as_ref()
+        .map_or_else(|| body_font(ui), |(font, _)| font.clone());
     let row_h = ui.fonts_mut(|f| f.row_height(&body));
-    let space = space_width(ui);
+    let space = space_width_for(ui, &body);
 
-    let words = split_overwide(ui, build_words(ui, runs), column);
+    let words = split_overwide(ui, build_words(ui, runs, face.as_ref()), column);
     if words.is_empty() {
         // An empty item still shows its marker and keeps its row.
         if let Some((x, galley)) = marker {

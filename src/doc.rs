@@ -1,6 +1,6 @@
 //! Pre-parse a Markdown document, extracting mermaid diagrams, GFM tables,
-//! list blocks, standalone local images and paragraph placeholders before
-//! rendering.
+//! list blocks, headings, fenced code, standalone local images and paragraph
+//! placeholders before rendering.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -50,6 +50,36 @@ pub struct Prepared {
     pub paragraphs: HashMap<String, String>,
     /// Standalone local images keyed by [`image_id`].
     pub images: HashMap<String, ImageSpec>,
+    /// Headings keyed by [`heading_id`].
+    pub headings: HashMap<String, HeadingSpec>,
+    /// Fenced code blocks keyed by [`code_id`].
+    pub code: HashMap<String, CodeSpec>,
+}
+
+/// A top-level heading, parsed out of the Markdown before rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadingSpec {
+    /// Heading level, 1–6.
+    pub level: u8,
+    /// Heading text with the markers stripped, inline Markdown intact.
+    pub text: String,
+    /// Stable id, also the map key and the placeholder's `id="…"`.
+    pub id: String,
+    /// Whether the document needs a gap above this heading. Decided here so the
+    /// renderer keeps the leading-heading and EOF rules in one place.
+    pub space_before: bool,
+    /// Whether the document needs a gap below this heading (no trailing gap at
+    /// EOF).
+    pub space_after: bool,
+}
+
+/// A fenced code block, extracted verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeSpec {
+    /// Verbatim block text, without the fences and the trailing newline.
+    pub text: String,
+    /// First token of the info string, empty when absent.
+    pub lang: String,
 }
 
 /// A local image extracted from a paragraph that held nothing else.
@@ -156,6 +186,23 @@ pub fn image_id(src: &str, alt: &str) -> String {
     hex.as_str()[..16].to_string()
 }
 
+/// Stable 16-hex-character id for a heading's level and text.
+pub fn heading_id(level: u8, text: &str) -> String {
+    let canon = format!("{level}\u{1f}{text}");
+    let hex = blake3::hash(canon.as_bytes()).to_hex();
+    hex.as_str()[..16].to_string()
+}
+
+/// Stable 16-hex-character id for a code block's language and text.
+pub fn code_id(lang: &str, text: &str) -> String {
+    let mut canon = String::with_capacity(lang.len() + text.len() + 1);
+    canon.push_str(lang);
+    canon.push('\u{1f}');
+    canon.push_str(text);
+    let hex = blake3::hash(canon.as_bytes()).to_hex();
+    hex.as_str()[..16].to_string()
+}
+
 /// True when `line` may open a top-level paragraph: it starts at column 0, is
 /// non-blank, and carries no block marker the library must own.
 pub fn is_paragraph_start(line: &str) -> bool {
@@ -205,40 +252,74 @@ fn is_thematic_break(t: &str) -> bool {
     }
 }
 
-/// An ATX heading: 0–3 leading spaces, 1–6 `#`, then a space or tab (or end
-/// of line). Four or more leading spaces is an indented code block.
-fn is_atx_heading(line: &str) -> bool {
+/// Emit a placeholder as its own HTML block: blank line first, blank line after.
+fn push_placeholder(out: &mut String, tag: &str, id: &str) {
+    if !out.is_empty() && !out.ends_with("\n\n") {
+        out.push('\n');
+    }
+    out.push_str(&format!("<{tag} id=\"{id}\">\n\n"));
+}
+
+/// Split an ATX heading line into its level and text. `None` for a line that is
+/// not one: 0–3 leading spaces, 1–6 `#`, then a space/tab or end of line.
+fn atx_heading(line: &str) -> Option<(u8, &str)> {
     let t = line.trim_end_matches(['\r', '\n']);
     let indent = t.len() - t.trim_start_matches(' ').len();
     if indent > 3 {
-        return false;
+        return None;
     }
     let s = &t[indent..];
     let hashes = s.chars().take_while(|&c| c == '#').count();
-    (1..=6).contains(&hashes) && matches!(s.as_bytes().get(hashes), None | Some(b' ' | b'\t'))
+    if !(1..=6).contains(&hashes) {
+        return None;
+    }
+    let rest = match s.as_bytes().get(hashes) {
+        None => "",
+        Some(b' ' | b'\t') => &s[hashes + 1..],
+        Some(_) => return None,
+    };
+    // An optional closing sequence: trailing `#`s preceded by a space (or the
+    // whole content). Without the space they are part of the text.
+    let body = rest.trim_end();
+    let closing = body.chars().rev().take_while(|&c| c == '#').count();
+    let text = if closing > 0 {
+        let before = &body[..body.len() - closing];
+        if before.is_empty() || before.ends_with([' ', '\t']) {
+            before.trim_end()
+        } else {
+            body
+        }
+    } else {
+        body
+    };
+    Some((hashes as u8, text.trim_start()))
 }
 
-/// Emit a spacer placeholder before a heading, unless the document has no
-/// content yet (a leading heading needs no gap).
-fn push_space_before(out: &mut String) {
-    if out.trim().is_empty() {
-        return;
+/// Level of a setext underline (`=` → 1, `-` → 2), `None` when not one.
+fn setext_level(line: &str) -> Option<u8> {
+    if !is_setext_underline(line) {
+        return None;
     }
-    // Spot the placeholder as its own HTML block: a blank line first.
-    if !out.ends_with("\n\n") {
-        out.push('\n');
+    match line.trim().chars().next() {
+        Some('=') => Some(1),
+        Some('-') => Some(2),
+        _ => None,
     }
-    out.push_str("<mdspace>\n\n");
 }
 
-/// Emit a spacer placeholder after a heading.
-///
-/// `<mdspace>` is deliberately an empty HTML block: the library renders each
-/// block as exactly one row, and that row is the breathing room. The html hook
-/// runs in a left-to-right layout where `ui.add_space` has no vertical effect,
-/// so the space must come from the block's own row.
-fn push_space_after(out: &mut String) {
-    out.push_str("<mdspace>\n\n");
+/// Open a fence only at 0–3 spaces of indent (4+ is an indented code block).
+fn fence_open(line: &str) -> Option<(char, usize, &str)> {
+    let t = line.trim_end_matches(['\r', '\n']);
+    if t.len() - t.trim_start_matches(' ').len() > 3 {
+        return None;
+    }
+    open_fence(t.trim_start())
+}
+
+/// Drop the single trailing newline of a code block body (and a CR before it).
+fn strip_one_newline(s: &str) -> &str {
+    let s = s.strip_suffix('\n').unwrap_or(s);
+    s.strip_suffix('\r').unwrap_or(s)
 }
 
 /// True when `lines[from..]` still holds a non-blank line, i.e. a spacer
@@ -288,6 +369,8 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
     let mut lists = HashMap::new();
     let mut paragraphs = HashMap::new();
     let mut images = HashMap::new();
+    let mut headings = HashMap::new();
+    let mut code = HashMap::new();
     // (fence char, run length, info string, verbatim open line)
     let mut open: Option<(char, usize, String, String)> = None;
     let mut body = String::new();
@@ -297,7 +380,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
         let line = lines[i];
         let t = line.trim();
         match open.take() {
-            None => match open_fence(t) {
+            None => match fence_open(line) {
                 Some((ch, len, info)) => {
                     open = Some((ch, len, info.to_string(), line.to_string()));
                     i += 1;
@@ -403,13 +486,24 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                                 .map(|k| i + 2 + k)
                         };
                         if let Some(end) = setext_end {
-                            push_space_before(&mut out);
-                            for l in &lines[i..end] {
-                                out.push_str(&rewrite_images(l, doc_dir));
-                            }
-                            if has_content_after(&lines, end) {
-                                push_space_after(&mut out);
-                            }
+                            let level = setext_level(lines[end - 1]).unwrap_or(1);
+                            let text = lines[i..end - 1]
+                                .iter()
+                                .map(|l| l.trim())
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            let id = heading_id(level, &text);
+                            headings.insert(
+                                id.clone(),
+                                HeadingSpec {
+                                    level,
+                                    text,
+                                    id: id.clone(),
+                                    space_before: !out.trim().is_empty(),
+                                    space_after: has_content_after(&lines, end),
+                                },
+                            );
+                            push_placeholder(&mut out, "mdheading", &id);
                             i = end;
                             continue;
                         }
@@ -448,12 +542,19 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         i = j;
                         continue;
                     }
-                    if is_atx_heading(line) {
-                        push_space_before(&mut out);
-                        out.push_str(&rewrite_images(line, doc_dir));
-                        if has_content_after(&lines, i + 1) {
-                            push_space_after(&mut out);
-                        }
+                    if let Some((level, text)) = atx_heading(line) {
+                        let id = heading_id(level, text);
+                        headings.insert(
+                            id.clone(),
+                            HeadingSpec {
+                                level,
+                                text: text.to_string(),
+                                id: id.clone(),
+                                space_before: !out.trim().is_empty(),
+                                space_after: has_content_after(&lines, i + 1),
+                            },
+                        );
+                        push_placeholder(&mut out, "mdheading", &id);
                         i += 1;
                         continue;
                     }
@@ -470,9 +571,11 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         // a paragraph directly after the fence is not absorbed into it.
                         out.push_str(&format!("<mermaid id=\"{id}\">\n\n"));
                     } else {
-                        out.push_str(&oline);
-                        out.push_str(&body);
-                        out.push_str(line);
+                        let lang = info.split_whitespace().next().unwrap_or("").to_string();
+                        let text = strip_one_newline(&body).to_string();
+                        let id = code_id(&lang, &text);
+                        code.insert(id.clone(), CodeSpec { text, lang });
+                        push_placeholder(&mut out, "mdcode", &id);
                     }
                     body.clear();
                 } else {
@@ -496,6 +599,8 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
         lists,
         paragraphs,
         images,
+        headings,
+        code,
     }
 }
 
@@ -888,14 +993,80 @@ mod tests {
         use super::super::*;
 
         #[test]
-        fn extracts_mermaid_and_leaves_other_code() {
+        fn extracts_mermaid_and_code_separately() {
             let md = "text\n\n```mermaid\ngraph TD; A-->B;\n```\n\n```rust\nfn x() {}\n```\n";
             let p = prepare(md, Path::new("/docs"));
             assert_eq!(p.diagrams.len(), 1);
             let id = diagram_id("graph TD; A-->B;");
             assert!(p.markdown.contains(&format!("<mermaid id=\"{id}\">")));
-            assert!(p.markdown.contains("```rust\nfn x() {}"));
             assert!(!p.markdown.contains("```mermaid"));
+            assert_eq!(p.code.len(), 1);
+            let spec = p.code.values().next().unwrap();
+            assert_eq!(spec.lang, "rust");
+            assert_eq!(spec.text, "fn x() {}");
+            let code = code_id("rust", "fn x() {}");
+            assert!(p.markdown.contains(&format!("<mdcode id=\"{code}\">\n\n")));
+            assert!(!p.markdown.contains("```"));
+        }
+
+        #[test]
+        fn code_fence_without_info_has_empty_lang() {
+            let p = prepare("```\nplain\n```\n", Path::new("/d"));
+            let spec = p.code.values().next().unwrap();
+            assert_eq!(spec.lang, "");
+            assert_eq!(spec.text, "plain");
+            let id = code_id("", "plain");
+            assert!(p.markdown.contains(&format!("<mdcode id=\"{id}\">")));
+        }
+
+        #[test]
+        fn code_text_is_verbatim_with_leading_spaces_and_blank_lines() {
+            let md = "```\n    indented\n\nlast\n```\n";
+            let p = prepare(md, Path::new("/d"));
+            assert_eq!(p.code.values().next().unwrap().text, "    indented\n\nlast");
+        }
+
+        #[test]
+        fn tilde_code_fence_extracts() {
+            let p = prepare("~~~sh\necho hi\n~~~\n", Path::new("/d"));
+            let spec = p.code.values().next().unwrap();
+            assert_eq!((spec.lang.as_str(), spec.text.as_str()), ("sh", "echo hi"));
+            assert!(p.markdown.contains("<mdcode"));
+        }
+
+        #[test]
+        fn crlf_code_fence_strips_the_trailing_newline() {
+            let p = prepare("```\r\nx\r\n```\r\n", Path::new("/d"));
+            assert_eq!(p.code.values().next().unwrap().text, "x");
+        }
+
+        #[test]
+        fn unclosed_code_fence_at_eof_stays_verbatim() {
+            let p = prepare("text\n\n```rust\nfn x() {}", Path::new("/d"));
+            assert!(p.code.is_empty());
+            assert!(p.markdown.contains("```rust"));
+            assert!(p.markdown.contains("fn x() {}"));
+        }
+
+        #[test]
+        fn code_inside_quotes_and_indented_code_is_untouched() {
+            let quoted = prepare("> ```\n> code\n> ```\n", Path::new("/d"));
+            assert!(quoted.code.is_empty());
+            assert!(quoted.markdown.contains("> ```"));
+            let indented = prepare("    ```\n    code\n    ```\n", Path::new("/d"));
+            assert!(indented.code.is_empty());
+            assert!(indented.markdown.contains("    ```"));
+            let listed = prepare("- item\n  ```\n  code\n  ```\n", Path::new("/d"));
+            assert!(listed.code.is_empty());
+            assert_eq!(listed.lists.len(), 1);
+        }
+
+        #[test]
+        fn code_id_is_stable_and_content_sensitive() {
+            assert_eq!(code_id("rust", "x"), code_id("rust", "x"));
+            assert_ne!(code_id("rust", "x"), code_id("sh", "x"));
+            assert_ne!(code_id("rust", "x"), code_id("rust", "y"));
+            assert_eq!(code_id("rust", "x").len(), 16);
         }
 
         #[test]
@@ -994,7 +1165,7 @@ mod tests {
             let md = "# h\n\n| a | b |\n|---|---|\n| c | d |\n\nafter\n";
             let p = prepare(md, Path::new("/d"));
             assert_eq!(p.tables.len(), 1);
-            assert!(p.markdown.contains("# h"));
+            assert!(p.headings.values().any(|h| h.text == "h"));
             assert!(p.paragraphs.values().any(|src| src == "after"));
             assert!(!p.markdown.contains("| a |"));
         }
@@ -1067,7 +1238,7 @@ mod tests {
             assert_eq!(p.tables.len(), 1);
             let spec = p.tables.values().next().unwrap();
             assert_eq!(spec.rows.len(), 1);
-            assert!(p.markdown.contains("## h | x"));
+            assert!(p.headings.values().any(|h| h.text == "h | x"));
             assert_eq!(p.lists.len(), 1);
             assert_eq!(
                 p.lists.values().next().unwrap().items[0].text,
@@ -1253,7 +1424,7 @@ mod tests {
         fn list_inside_fence_stays_untouched() {
             let p = prepare("```\n- a\n```\n", Path::new("/d"));
             assert!(p.lists.is_empty());
-            assert!(p.markdown.contains("- a"));
+            assert!(p.code.values().any(|c| c.text == "- a"));
         }
 
         #[test]
@@ -1354,7 +1525,7 @@ mod tests {
             assert_eq!(p.paragraphs.len(), 2);
             assert!(p.paragraphs.values().any(|s| s == "body right after"));
             assert!(p.paragraphs.values().any(|s| s == "after table"));
-            assert!(p.markdown.contains("## h"));
+            assert!(p.headings.values().any(|h| h.text == "h"));
             assert!(!p.markdown.contains("body right after"));
         }
 
@@ -1389,7 +1560,7 @@ mod tests {
             assert!(p.paragraphs.values().any(|s| s == "para2"));
             assert_eq!(p.lists.len(), 1);
             assert!(p.markdown.contains("<mdlist id="));
-            assert!(p.markdown.contains("# h"));
+            assert!(p.headings.values().any(|h| h.text == "h"));
         }
 
         #[test]
@@ -1397,7 +1568,11 @@ mod tests {
             let md = "Title\n===\n";
             let p = prepare(md, Path::new("/d"));
             assert!(p.paragraphs.is_empty());
-            assert!(p.markdown.contains("Title\n==="));
+            assert!(p
+                .headings
+                .values()
+                .any(|h| h.level == 1 && h.text == "Title"));
+            assert!(!p.markdown.contains("==="));
         }
 
         #[test]
@@ -1405,7 +1580,11 @@ mod tests {
             let md = "Title\n---\n";
             let p = prepare(md, Path::new("/d"));
             assert!(p.paragraphs.is_empty());
-            assert!(p.markdown.contains("Title\n---"));
+            assert!(p
+                .headings
+                .values()
+                .any(|h| h.level == 2 && h.text == "Title"));
+            assert!(!p.markdown.contains("Title\n---"));
         }
 
         #[test]
@@ -1441,84 +1620,147 @@ mod tests {
     mod headings {
         use super::super::*;
 
-        fn spaces(out: &str) -> usize {
-            out.matches("<mdspace>").count()
+        fn only(p: &Prepared) -> &HeadingSpec {
+            assert_eq!(p.headings.len(), 1, "{:?}", p.headings);
+            p.headings.values().next().unwrap()
         }
 
         #[test]
-        fn heading_between_paragraphs_gets_spacers_on_both_sides() {
+        fn atx_levels_one_to_six() {
+            let md = "# h1\n\n## h2\n\n### h3\n\n#### h4\n\n##### h5\n\n###### h6\n";
+            let p = prepare(md, Path::new("/d"));
+            let mut levels: Vec<(u8, String)> = p
+                .headings
+                .values()
+                .map(|h| (h.level, h.text.clone()))
+                .collect();
+            levels.sort();
+            assert_eq!(
+                levels,
+                vec![
+                    (1, "h1".to_string()),
+                    (2, "h2".to_string()),
+                    (3, "h3".to_string()),
+                    (4, "h4".to_string()),
+                    (5, "h5".to_string()),
+                    (6, "h6".to_string()),
+                ]
+            );
+            for h in p.headings.values() {
+                assert!(p
+                    .markdown
+                    .contains(&format!("<mdheading id=\"{}\">\n\n", h.id)));
+            }
+            assert!(!p.markdown.contains("# h1"));
+        }
+
+        #[test]
+        fn atx_text_drops_closing_hashes_and_markers() {
+            assert_eq!(atx_heading("# Title ###"), Some((1, "Title")));
+            assert_eq!(atx_heading("### foo#bar"), Some((3, "foo#bar")));
+            assert_eq!(atx_heading("  # indented"), Some((1, "indented")));
+            assert_eq!(atx_heading("#no-space"), None);
+            assert_eq!(atx_heading("####### seven"), None);
+        }
+
+        #[test]
+        fn setext_equals_is_level_one_and_dash_level_two() {
+            let p = prepare("Title\n===\n\nSub\n---\n", Path::new("/d"));
+            let mut levels: Vec<(u8, String)> = p
+                .headings
+                .values()
+                .map(|h| (h.level, h.text.clone()))
+                .collect();
+            levels.sort();
+            assert_eq!(
+                levels,
+                vec![(1, "Title".to_string()), (2, "Sub".to_string())]
+            );
+            assert!(p.paragraphs.is_empty());
+            assert!(!p.markdown.contains("==="));
+        }
+
+        #[test]
+        fn multiline_setext_title_joins_with_a_space() {
+            let p = prepare("Long\nTitle\n===\n", Path::new("/d"));
+            assert_eq!(only(&p).text, "Long Title");
+        }
+
+        #[test]
+        fn heading_at_document_start_has_no_top_gap() {
+            let p = prepare("# Title\n\nbody\n", Path::new("/d"));
+            let h = only(&p);
+            assert!(!h.space_before);
+            assert!(h.space_after);
+            assert!(p.markdown.starts_with("<mdheading"));
+        }
+
+        #[test]
+        fn heading_at_eof_has_no_bottom_gap() {
+            for md in ["body\n\n## Last", "body\n\n## Last\n\n"] {
+                let p = prepare(md, Path::new("/d"));
+                let h = only_final(&p);
+                assert!(h.space_before, "{md:?}");
+                assert!(!h.space_after, "{md:?}");
+            }
+        }
+
+        fn only_final(p: &Prepared) -> &HeadingSpec {
+            p.headings.values().find(|h| h.text == "Last").unwrap()
+        }
+
+        #[test]
+        fn heading_between_paragraphs_gets_gaps_on_both_sides() {
             let p = prepare("before\n\n# Title\n\nafter\n", Path::new("/d"));
             assert_eq!(p.paragraphs.len(), 2);
-            assert_eq!(spaces(&p.markdown), 2);
-            let before = p.markdown.find("<mdspace>").unwrap();
-            let title = p.markdown.find("# Title").unwrap();
-            let after = p.markdown.rfind("<mdspace>").unwrap();
-            assert!(before < title && title < after);
+            let h = only(&p);
+            assert!(h.space_before);
+            assert!(h.space_after);
         }
 
         #[test]
-        fn consecutive_headings_get_two_spacers() {
-            // Each `<mdspace>` is one empty HTML row, so `# A` then `# B` gets
-            // two rows between them. Deliberately not deduplicated.
+        fn consecutive_headings_keep_both_gaps() {
             let p = prepare("# A\n# B\n", Path::new("/d"));
-            assert_eq!(spaces(&p.markdown), 2);
-            assert!(p.markdown.contains("<mdspace>\n\n<mdspace>"));
+            let a = p.headings.values().find(|h| h.text == "A").unwrap();
+            let b = p.headings.values().find(|h| h.text == "B").unwrap();
+            assert!(a.space_after);
+            assert!(b.space_before);
         }
 
         #[test]
-        fn document_starting_with_a_heading_has_no_leading_spacer() {
-            let p = prepare("# Title\n\nbody\n", Path::new("/d"));
-            assert_eq!(spaces(&p.markdown), 1);
-            assert!(p.markdown.starts_with("# Title"));
-        }
-
-        #[test]
-        fn setext_heading_at_document_start_has_no_leading_spacer() {
+        fn setext_heading_at_document_start_has_no_top_gap() {
             let p = prepare("Title\n===\n\nbody\n", Path::new("/d"));
-            assert_eq!(spaces(&p.markdown), 1);
-            assert!(p.markdown.starts_with("Title\n==="));
-            assert!(p.markdown.find("<mdspace>").unwrap() > p.markdown.find("===").unwrap());
+            let h = only(&p);
+            assert!(!h.space_before);
+            assert!(h.space_after);
+            assert!(p.markdown.starts_with("<mdheading"));
         }
 
         #[test]
-        fn heading_at_eof_without_newline_has_no_trailing_spacer() {
-            let p = prepare("body\n\n## Last", Path::new("/d"));
-            assert_eq!(spaces(&p.markdown), 1);
-            assert!(p.markdown.ends_with("## Last"));
-        }
-
-        #[test]
-        fn heading_at_eof_with_trailing_blank_line_has_no_trailing_spacer() {
-            let p = prepare("body\n\n## Last\n\n", Path::new("/d"));
-            assert_eq!(spaces(&p.markdown), 1);
-            assert!(p.markdown.ends_with("## Last\n\n"));
-        }
-
-        #[test]
-        fn thematic_break_after_blank_line_gets_no_spacers() {
+        fn thematic_break_is_not_a_heading() {
             let p = prepare("body\n\n---\n", Path::new("/d"));
-            assert_eq!(spaces(&p.markdown), 0);
+            assert!(p.headings.is_empty());
             assert!(p.markdown.contains("---"));
         }
 
         #[test]
-        fn indented_atx_heading_gets_spacers() {
+        fn indented_atx_heading_becomes_a_heading() {
             let p = prepare("before\n\n  ## indented\n\nafter\n", Path::new("/d"));
-            assert_eq!(spaces(&p.markdown), 2);
-            assert!(p.markdown.contains("  ## indented"));
+            assert_eq!(only(&p).level, 2);
+            assert_eq!(only(&p).text, "indented");
         }
 
         #[test]
         fn four_space_indented_heading_stays_code() {
             let p = prepare("before\n\n    ## code\n\nafter\n", Path::new("/d"));
-            assert_eq!(spaces(&p.markdown), 0);
+            assert!(p.headings.is_empty());
             assert!(p.markdown.contains("    ## code"));
         }
 
         #[test]
         fn raw_html_block_keeps_hash_line_literal() {
             let p = prepare("<div>\n# not a heading\n</div>\n", Path::new("/d"));
-            assert_eq!(spaces(&p.markdown), 0);
+            assert!(p.headings.is_empty());
             assert!(p.markdown.contains("<div>\n# not a heading\n</div>"));
             assert!(p.paragraphs.is_empty());
         }
@@ -1526,28 +1768,25 @@ mod tests {
         #[test]
         fn heading_inside_a_fence_is_untouched() {
             let p = prepare("```\n# not a heading\n```\n", Path::new("/d"));
-            assert_eq!(spaces(&p.markdown), 0);
-            assert!(p.markdown.contains("# not a heading"));
-        }
-
-        #[test]
-        fn setext_heading_gets_spacers_around_title_and_underline() {
-            let p = prepare("before\n\nTitle\n===\n\nafter\n", Path::new("/d"));
-            assert_eq!(p.paragraphs.len(), 2);
-            assert_eq!(spaces(&p.markdown), 2);
-            let before = p.markdown.find("<mdspace>").unwrap();
-            let title = p.markdown.find("Title\n===").unwrap();
-            let after = p.markdown.rfind("<mdspace>").unwrap();
-            assert!(before < title && title < after);
+            assert!(p.headings.is_empty());
+            assert!(p.code.values().any(|c| c.text == "# not a heading"));
         }
 
         #[test]
         fn headings_in_quotes_lists_and_indented_code_are_untouched() {
             let p = prepare("> # q\n\n- # item\n\n    # code\n", Path::new("/d"));
-            assert_eq!(spaces(&p.markdown), 0);
+            assert!(p.headings.is_empty());
             assert!(p.markdown.contains("> # q"));
             assert!(p.markdown.contains("    # code"));
             assert_eq!(p.lists.values().next().unwrap().items[0].text, "# item");
+        }
+
+        #[test]
+        fn heading_id_is_stable_and_content_sensitive() {
+            assert_eq!(heading_id(1, "x"), heading_id(1, "x"));
+            assert_ne!(heading_id(1, "x"), heading_id(2, "x"));
+            assert_ne!(heading_id(1, "x"), heading_id(1, "y"));
+            assert_eq!(heading_id(1, "x").len(), 16);
         }
     }
 
