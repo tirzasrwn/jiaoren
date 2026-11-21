@@ -76,8 +76,8 @@ To go back to the defaults, delete (or comment out) the
 | `yy` | copy the whole document as Markdown |
 | `/` | search: type a pattern, `Enter` confirms and jumps to the first match |
 | `n` / `N` | next / previous match, wrapping |
-| `esc` | cancel the search prompt, else clear the active search, else quit |
-| `q` / `ctrl+c` | quit |
+| `esc` / `ctrl+c` | cancel the search prompt, else clear the active search, else quit |
+| `q` | quit |
 
 Search indexes the text `justify` paints: soft-wrapped source lines join with one
 space, emphasis markup is dropped, link labels and code text are kept, and code
@@ -96,8 +96,12 @@ opens the zoom popup; dragging from it pans the document instead.
 Every table also carries a small copy icon at its top-right (tooltip: “Copy
 table as CSV”); clicking it copies the table as CSV (header row first, Markdown
 stripped from cells, fields quoted when they contain commas, quotes or line
-breaks). Both clipboard actions show a 1.5-second bottom-left status line and never steal focus.
-`Ctrl+C` still quits jiaoren when no diagram overlay is open.
+breaks). Code blocks have the same icon over their top-right corner (tooltip
+“Copy code”) and copy the block verbatim. Copy buttons show a 1.5-second
+bottom-left status line and never steal focus.
+
+`Ctrl+C` follows the same cancel-then-quit ladder as `esc`; one press per Ctrl
+hold is acted on, so holding it cannot skip from clearing the search to quitting.
 
 ## Mermaid diagrams
 

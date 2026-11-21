@@ -26,6 +26,7 @@ mod placeholder;
 mod raster;
 mod searchui;
 mod table;
+mod widgets;
 
 use code::CodeUi;
 use diagram::DiagramUi;
@@ -34,7 +35,7 @@ use geometry::{
 };
 use heading::HeadingUi;
 use image::ImageUi;
-use keys::{apply_key, cancel_action, quit_suppressed, Action, CancelAction, KeyState};
+use keys::{apply_key, cancel_action, quit_suppressed, Action, CancelAction, CopyGuard, KeyState};
 use list::ListUi;
 use placeholder::{parse, Placeholder};
 use searchui::SearchUi;
@@ -232,6 +233,8 @@ pub(crate) struct App {
     scroll_bottom: bool,
     applied_theme: Option<Theme>,
     keys: KeyState,
+    /// One Ctrl+C Copy event per Ctrl hold; autorepeats are ignored.
+    copy_guard: CopyGuard,
     #[expect(
         dead_code,
         reason = "the watcher must stay alive for the callback to fire"
@@ -360,6 +363,7 @@ impl App {
             scroll_bottom: false,
             applied_theme: Some(theme),
             keys: KeyState::default(),
+            copy_guard: CopyGuard::default(),
             watcher,
             watch_rx,
             pending_reload: None,
@@ -491,10 +495,12 @@ impl App {
         match cancel_action(prompt_open, search_active) {
             CancelAction::CancelPrompt => {
                 self.search.borrow_mut().cancel();
+                self.jump_to = None;
                 ctx.request_repaint();
             }
             CancelAction::ClearSearch => {
                 self.search.borrow_mut().state.clear();
+                self.jump_to = None;
                 ctx.request_repaint();
             }
             CancelAction::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
@@ -589,6 +595,10 @@ impl eframe::App for App {
         // Turn this frame's key presses into viewer actions.
         let now = Instant::now();
         let input_time = ui.input(|i| i.time);
+        // Ctrl holds one Ctrl+C decision: autorepeats arrive as bare Copy
+        // events with no repeat flag, so re-arm only after Ctrl is released.
+        self.copy_guard
+            .observe_modifiers(ui.input(|i| i.modifiers.ctrl || i.modifiers.command));
         // X autorepeat starts after ~660 ms, outlasting the 0.30 s guard, so
         // keep the guard alive while the Ctrl that closed a popup is held.
         // After release the normal 0.30 s window applies.
@@ -633,10 +643,17 @@ impl eframe::App for App {
                 }
             });
             let ctx = ui.ctx().clone();
+            // Process Copy before keys: a same-frame Enter+Copy cancels the
+            // prompt instead of confirming and then clearing. One Copy per Ctrl
+            // hold is accepted, so autorepeats cannot advance the ladder.
+            let mut cancelled = false;
+            if copy && self.copy_guard.accept() {
+                self.cancel_search(&ctx);
+                cancelled = true;
+            }
             // A single Ctrl+C may arrive as Copy and as Key::C; only the first
             // cancel in this frame may act, so a prompt cancel never also
             // clears the committed pattern behind it.
-            let mut cancelled = false;
             for (key, modifiers) in keys {
                 match key {
                     // Enter first, so a following `n` in the same batch steps.
@@ -667,9 +684,6 @@ impl eframe::App for App {
                     }
                     _ => {}
                 }
-            }
-            if copy && !cancelled {
-                self.cancel_search(&ctx);
             }
         } else if !popup_open {
             // Once `/` opens the prompt in this batch, later keys are text for
@@ -710,7 +724,10 @@ impl eframe::App for App {
                         }
                     } else if !suppress_quit && matches!(ev, egui::Event::Copy) {
                         // winit reports Ctrl+C as `Copy` rather than `Key::C`.
-                        acts.push(Action::CancelOrQuit);
+                        // Repeats look identical, so accept one per Ctrl hold.
+                        if self.copy_guard.accept() {
+                            acts.push(Action::CancelOrQuit);
+                        }
                     }
                 }
             });
@@ -928,6 +945,9 @@ impl eframe::App for App {
         self.images.borrow_mut().draw_popup(ui.ctx(), column);
         if self.tables.borrow_mut().take_copied() {
             self.set_status("copied CSV");
+        }
+        if self.code.borrow_mut().take_copied() {
+            self.set_status("copied code");
         }
         // The prompt already occupied the bottom-left this frame; the next
         // frame shows the confirmed status instead of drawing both at once.

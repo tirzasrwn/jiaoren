@@ -84,7 +84,7 @@ impl TableUi {
         ui.vertical(|ui| {
             ui.add_space(table_pad(body_row_height));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if copy_csv_button(ui) {
+                if super::widgets::copy_button(ui, "Copy table as CSV") {
                     ui.ctx().copy_text(table_to_csv(&spec));
                     self.copied = true;
                 }
@@ -227,45 +227,6 @@ fn row_fill(dark: bool, row_index: usize) -> Option<egui::Color32> {
     } else {
         Some(body)
     }
-}
-
-/// Icon-only copy control: two overlapping rounded sheets drawn with the
-/// painter, so it never depends on a font glyph. Returns true on click.
-fn copy_csv_button(ui: &mut egui::Ui) -> bool {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::CLICK);
-    let response = response.on_hover_text("Copy table as CSV");
-    let hovered = response.hovered();
-    let visuals = ui.visuals();
-    let hover_bg = visuals.widgets.hovered.weak_bg_fill;
-    if hovered {
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::same(3), hover_bg);
-    }
-    let color = if hovered {
-        visuals.strong_text_color()
-    } else {
-        visuals.weak_text_color()
-    };
-    let stroke = egui::Stroke::new(1.0, color);
-    // A 14×14 icon: back sheet 9×9 at the top-left, front sheet 9×9 offset by
-    // 4 px. The front is filled with the local background so the back outline
-    // does not cut through it.
-    let back = egui::Rect::from_min_size(rect.min + egui::vec2(0.5, 0.5), egui::vec2(9.0, 9.0));
-    let front = egui::Rect::from_min_size(rect.min + egui::vec2(4.5, 4.5), egui::vec2(9.0, 9.0));
-    let radius = egui::CornerRadius::same(1);
-    let painter = ui.painter();
-    painter.rect_stroke(back, radius, stroke, egui::StrokeKind::Inside);
-    painter.rect_filled(
-        front,
-        radius,
-        if hovered {
-            hover_bg
-        } else {
-            visuals.panel_fill
-        },
-    );
-    painter.rect_stroke(front, radius, stroke, egui::StrokeKind::Inside);
-    response.clicked()
 }
 
 /// CSV for one table: the header row, then every data row, `\n`-separated.

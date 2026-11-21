@@ -75,6 +75,40 @@ pub fn cancel_action(prompt_open: bool, search_active: bool) -> CancelAction {
     }
 }
 
+/// Fresh-press guard for Ctrl+C's `Event::Copy`. egui-winit discards key-repeat
+/// information for Copy events, so while Ctrl stays held every event looks like
+/// a new press. One Copy is accepted per Ctrl hold; releasing Ctrl re-arms it.
+#[derive(Default)]
+pub struct CopyGuard {
+    held: bool,
+    saw_release: bool,
+}
+
+impl CopyGuard {
+    /// Sync with the current Ctrl/Cmd state. Re-arm only on a fresh press after
+    /// a release frame, so a Copy event queued just after key-up cannot act as
+    /// a second press.
+    pub fn observe_modifiers(&mut self, ctrl_held: bool) {
+        if !ctrl_held {
+            self.saw_release = true;
+        } else if self.saw_release {
+            self.held = false;
+            self.saw_release = false;
+        }
+    }
+
+    /// True for the first Copy of a Ctrl press, false for autorepeats and for a
+    /// Copy left over after the key was released.
+    pub fn accept(&mut self) -> bool {
+        if self.held {
+            false
+        } else {
+            self.held = true;
+            true
+        }
+    }
+}
+
 /// How long a first `g` waits for a second one.
 const GG_WINDOW: Duration = Duration::from_millis(500);
 
@@ -421,6 +455,28 @@ mod tests {
             assert_eq!(cancel_action(true, true), CancelAction::CancelPrompt);
             assert_eq!(cancel_action(false, true), CancelAction::ClearSearch);
             assert_eq!(cancel_action(false, false), CancelAction::Quit);
+        }
+
+        #[test]
+        fn copy_guard_ignores_held_repeats_and_rearms_after_release() {
+            let mut guard = CopyGuard::default();
+            // First Copy of a Ctrl hold acts.
+            guard.observe_modifiers(true);
+            assert!(guard.accept());
+            // Autorepeats in later frames look identical; only the first acts.
+            for _ in 0..3 {
+                guard.observe_modifiers(true);
+                assert!(!guard.accept());
+            }
+            // Enter+Copy batch routing uses the prompt-open snapshot: Copy is
+            // processed first, so the prompt rung is the one that acts.
+            assert_eq!(cancel_action(true, true), CancelAction::CancelPrompt);
+            // Releasing Ctrl re-arms: a queued autorepeat after key-up is still
+            // ignored; the next fresh press may advance the ladder.
+            guard.observe_modifiers(false);
+            assert!(!guard.accept());
+            guard.observe_modifiers(true);
+            assert!(guard.accept());
         }
 
         #[test]

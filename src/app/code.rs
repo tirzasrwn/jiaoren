@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use super::searchui::SearchUi;
+use super::widgets;
 use crate::doc::CodeSpec;
 
 /// Shared, interior-mutable state backing the `<mdcode>` render path. Holds the
@@ -14,21 +15,39 @@ pub(crate) struct CodeUi {
     /// Reading column in effect this frame; `ui.available_width()` inside the
     /// html hook is not that column.
     column: f32,
+    /// Per-id occurrence counter so identical code blocks get distinct ids.
+    occurrences: HashMap<String, usize>,
+    /// Set when a block's copy button was clicked this frame.
+    copied: bool,
 }
 
 impl CodeUi {
     pub(crate) fn new(specs: HashMap<String, CodeSpec>) -> Self {
-        CodeUi { specs, column: 0.0 }
+        CodeUi {
+            specs,
+            column: 0.0,
+            occurrences: HashMap::new(),
+            copied: false,
+        }
     }
 
     /// Record the document's reading column once per frame, before the viewer
     /// runs.
     pub(crate) fn begin_frame(&mut self, column: f32) {
         self.column = column;
+        self.occurrences.clear();
     }
 
     pub(crate) fn reset(&mut self, specs: HashMap<String, CodeSpec>) {
         self.specs = specs;
+        self.occurrences.clear();
+        self.copied = false;
+    }
+
+    /// Take the "a code block was copied" flag for the frame, if the button
+    /// fired.
+    pub(crate) fn take_copied(&mut self) -> bool {
+        std::mem::take(&mut self.copied)
     }
 
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, id: &str, search: &mut SearchUi) {
@@ -36,6 +55,12 @@ impl CodeUi {
         let spec = match self.specs.get(id) {
             Some(s) => s.clone(),
             None => return, // unknown id: draw nothing, never panic
+        };
+        let occurrence = {
+            let count = self.occurrences.entry(id.to_string()).or_insert(0);
+            let occurrence = *count;
+            *count += 1;
+            occurrence
         };
         let mono = ui
             .style()
@@ -82,6 +107,25 @@ impl CodeUi {
             }
             let galley = ui.fonts_mut(|f| f.layout_no_wrap(line.to_string(), mono.clone(), color));
             painter.galley(pos, galley, color);
+        }
+        // Overlay the copy icon inside the block's top-right corner, at the
+        // reading-column edge for over-wide code, so it never takes layout
+        // space or moves with horizontal panning.
+        let right = (rect.left() + self.column).min(rect.right()) - pad - 2.0;
+        let icon = egui::Rect::from_min_size(
+            egui::Pos2::new(right - 14.0, rect.top() + 2.0),
+            egui::vec2(14.0, 14.0),
+        );
+        let backdrop = ui.visuals().code_bg_color;
+        if widgets::copy_button_at(
+            ui,
+            icon,
+            ui.id().with(("code-copy", id, occurrence)),
+            "Copy code",
+            backdrop,
+        ) {
+            ui.ctx().copy_text(spec.text.clone());
+            self.copied = true;
         }
     }
 }
