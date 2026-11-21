@@ -161,6 +161,7 @@ pub fn hit_test_distance(map: &[CharSpan], pos: Pos2) -> Option<(usize, f32)> {
 mod tests {
     mod text {
         use super::super::{selected_text, SelPoint, SelectionState};
+        use crate::justify::search_text;
 
         fn blocks(texts: &[&str]) -> Vec<String> {
             texts.iter().map(|s| (*s).to_string()).collect()
@@ -224,6 +225,23 @@ mod tests {
             s.begin(SelPoint { block: 0, char: 1 });
             assert_eq!(selected_text(&b, &s).as_deref(), Some(""));
             assert!(!s.is_active());
+        }
+
+        #[test]
+        fn exact_bytes_keep_interior_spaces() {
+            let b = blocks(&["hello world"]);
+            assert_eq!(
+                selected_text(&b, &sel((0, 3), (0, 8))).as_deref(),
+                Some("lo wo")
+            );
+            // Inline code keeps its literal double space in the recorded text.
+            let code = search_text("`a  b`");
+            assert_eq!(code, "a  b");
+            let b = vec![code];
+            assert_eq!(
+                selected_text(&b, &sel((0, 0), (0, 4))).as_deref(),
+                Some("a  b")
+            );
         }
 
         #[test]

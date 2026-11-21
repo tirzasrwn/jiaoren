@@ -911,7 +911,9 @@ pub(crate) fn merge_selection_spans(spans: &[(usize, f32, f32)]) -> Vec<(usize, 
             continue;
         }
         match out.last_mut() {
-            Some((last_line, last_left, last_right)) if *last_line == line => {
+            Some((last_line, last_left, last_right))
+                if *last_line == line && left <= *last_right =>
+            {
                 *last_left = last_left.min(left);
                 *last_right = last_right.max(right);
             }
@@ -919,6 +921,27 @@ pub(crate) fn merge_selection_spans(spans: &[(usize, f32, f32)]) -> Vec<(usize, 
         }
     }
     out
+}
+
+/// Ordered draw passes for one painted row. Code backgrounds must be below a
+/// merged selection span, and both below glyphs/search highlights.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowPass {
+    CodeBackgrounds,
+    Selection,
+    Text,
+}
+
+fn row_passes(has_code: bool, has_selection: bool) -> Vec<RowPass> {
+    let mut passes = Vec::new();
+    if has_code {
+        passes.push(RowPass::CodeBackgrounds);
+    }
+    if has_selection {
+        passes.push(RowPass::Selection);
+    }
+    passes.push(RowPass::Text);
+    passes
 }
 
 /// Intersection of `ranges` with the char span `[start, start + text.chars())`,
@@ -1173,8 +1196,10 @@ fn paint_at(
                 x += frag.width;
             }
         }
+        let mut selection_span: Option<(f32, f32)> = None;
         if let Some((sel_start, sel_end)) = highlights.selection {
-            let mut parts: Vec<(usize, f32, f32)> = Vec::new();
+            let mut lo = f32::INFINITY;
+            let mut hi = f32::NEG_INFINITY;
             for (frag, frag_x) in &placements {
                 let frag_start = frag.offset;
                 let frag_end = frag_start + frag.text.chars().count();
@@ -1192,30 +1217,55 @@ fn paint_at(
                     .collect();
                 let prefix_w = layout(ui, &prefix, &frag.format).size().x;
                 let piece_w = layout(ui, &piece, &frag.format).size().x;
-                parts.push((row, frag_x + prefix_w, frag_x + prefix_w + piece_w));
+                lo = lo.min(frag_x + prefix_w);
+                hi = hi.max(frag_x + prefix_w + piece_w);
             }
-            // One rect per line: gaps between words are covered by the span.
-            for (_, lo, hi) in merge_selection_spans(&parts) {
-                painter.rect_filled(
-                    Rect::from_min_size(Pos2::new(lo, y), egui::vec2(hi - lo, row_h)),
-                    2.0,
-                    selection_color(ui),
-                );
+            if hi > lo {
+                selection_span = Some((lo, hi));
             }
         }
-        for (frag, frag_x) in placements {
-            let pos = Pos2::new(frag_x, y);
-            paint_frag(ui, &painter, pos, frag, highlights);
-            let len = frag.text.chars().count();
-            if len > 0 {
-                chars.push(CharSpan {
-                    start: frag.offset,
-                    len,
-                    rect: Rect::from_min_size(pos, egui::vec2(frag.width, row_h)),
-                });
-            }
-            if matches!(frag.kind, RunKind::Link(_)) {
-                interactives.push(Rect::from_min_size(pos, egui::vec2(frag.width, row_h)));
+        let has_code = placements
+            .iter()
+            .any(|(frag, _)| frag.kind == RunKind::Code);
+        for pass in row_passes(has_code, selection_span.is_some()) {
+            match pass {
+                RowPass::CodeBackgrounds => {
+                    for (frag, frag_x) in &placements {
+                        if frag.kind == RunKind::Code {
+                            paint_code_background(ui, &painter, Pos2::new(*frag_x, y), frag);
+                        }
+                    }
+                }
+                RowPass::Selection => {
+                    if let Some((lo, hi)) = selection_span {
+                        // One rect covers inter-word gaps on this line.
+                        for (_, lo, hi) in merge_selection_spans(&[(row, lo, hi)]) {
+                            painter.rect_filled(
+                                Rect::from_min_size(Pos2::new(lo, y), egui::vec2(hi - lo, row_h)),
+                                2.0,
+                                selection_color(ui),
+                            );
+                        }
+                    }
+                }
+                RowPass::Text => {
+                    for (frag, frag_x) in &placements {
+                        let pos = Pos2::new(*frag_x, y);
+                        paint_frag(ui, &painter, pos, frag, highlights);
+                        let len = frag.text.chars().count();
+                        if len > 0 {
+                            chars.push(CharSpan {
+                                start: frag.offset,
+                                len,
+                                rect: Rect::from_min_size(pos, egui::vec2(frag.width, row_h)),
+                            });
+                        }
+                        if matches!(frag.kind, RunKind::Link(_)) {
+                            interactives
+                                .push(Rect::from_min_size(pos, egui::vec2(frag.width, row_h)));
+                        }
+                    }
+                }
             }
         }
     }
@@ -1343,6 +1393,12 @@ fn paint_char_range(
     painter.rect_filled(rect, 2.0, color);
 }
 
+fn paint_code_background(ui: &egui::Ui, painter: &egui::Painter, pos: Pos2, frag: &Frag) {
+    let size = frag.galley.size();
+    let bg = Rect::from_min_size(pos, size).expand2(egui::vec2(1.0, 0.0));
+    painter.rect_filled(bg, 2.0, ui.visuals().code_bg_color);
+}
+
 fn paint_frag(
     ui: &egui::Ui,
     painter: &egui::Painter,
@@ -1351,12 +1407,7 @@ fn paint_frag(
     highlights: MatchHighlight<'_>,
 ) {
     let size = frag.galley.size();
-    if frag.kind == RunKind::Code {
-        let bg = Rect::from_min_size(pos, size).expand2(egui::vec2(1.0, 0.0));
-        painter.rect_filled(bg, 2.0, ui.visuals().code_bg_color);
-    }
-    // Above the code background, below the glyphs. Selection is painted once
-    // per line by the caller so inter-word gaps are continuous.
+    // Above the code background and selection, below the glyphs.
     paint_highlights(ui, painter, pos, frag, highlights);
     painter.galley(pos, frag.galley.clone(), frag.color);
 
@@ -1534,13 +1585,25 @@ mod tests {
     }
 
     mod highlights {
-        use super::super::{local_ranges, merge_selection_spans};
+        use super::super::{local_ranges, merge_selection_spans, row_passes, RowPass};
 
         #[test]
-        fn gaps_on_one_line_merge_into_one_rect() {
+        fn intersecting_or_adjacent_intervals_merge() {
+            assert_eq!(
+                merge_selection_spans(&[(0, 10.0, 20.0), (0, 15.0, 25.0)]),
+                vec![(0, 10.0, 25.0)]
+            );
+            assert_eq!(
+                merge_selection_spans(&[(0, 10.0, 20.0), (0, 20.0, 30.0)]),
+                vec![(0, 10.0, 30.0)]
+            );
+        }
+
+        #[test]
+        fn disjoint_gaps_stay_separate() {
             assert_eq!(
                 merge_selection_spans(&[(0, 10.0, 20.0), (0, 30.0, 40.0)]),
-                vec![(0, 10.0, 40.0)]
+                vec![(0, 10.0, 20.0), (0, 30.0, 40.0)]
             );
         }
 
@@ -1556,6 +1619,23 @@ mod tests {
         fn no_selection_has_no_rects() {
             assert!(merge_selection_spans(&[]).is_empty());
             assert!(merge_selection_spans(&[(0, 5.0, 5.0)]).is_empty());
+        }
+
+        #[test]
+        fn row_passes_paint_code_background_then_selection_then_text() {
+            assert_eq!(
+                row_passes(true, true),
+                vec![RowPass::CodeBackgrounds, RowPass::Selection, RowPass::Text]
+            );
+            assert_eq!(
+                row_passes(true, false),
+                vec![RowPass::CodeBackgrounds, RowPass::Text]
+            );
+            assert_eq!(
+                row_passes(false, true),
+                vec![RowPass::Selection, RowPass::Text]
+            );
+            assert_eq!(row_passes(false, false), vec![RowPass::Text]);
         }
 
         #[test]
