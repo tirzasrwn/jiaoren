@@ -64,8 +64,8 @@ To go back to the defaults, delete (or comment out) the
 | `u` | scroll up half a page |
 | `space` | scroll down a page |
 | `b` | scroll up a page |
-| `gg` | jump to top |
-| `G` (shift+g) | jump to bottom |
+| `gg` | jump to the start (top-left) |
+| `G` (shift+g) | jump to the end |
 | `+` / `=` | zoom in |
 | `-` | zoom out |
 | `a` | reset zoom to 100% and pan back to the left |

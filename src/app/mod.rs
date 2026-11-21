@@ -23,7 +23,7 @@ mod raster;
 mod table;
 
 use diagram::DiagramUi;
-use geometry::{bottom_pad, content_column, home_scroll, overscroll_pad};
+use geometry::{bottom_pad, content_column, home_scroll, home_target, overscroll_pad};
 use keys::{apply_key, quit_suppressed, Action, KeyState};
 use list::ListUi;
 use placeholder::{parse, Placeholder};
@@ -456,7 +456,11 @@ impl eframe::App for App {
                 Action::ScrollLines(f) => self.scroll_y = (self.scroll_y + f * 40.0).max(0.0),
                 Action::ScrollPages(f) => self.scroll_y = (self.scroll_y + f * page_h).max(0.0),
                 Action::ScrollCols(f) => self.scroll_x = (self.scroll_x + f * 40.0).max(0.0),
-                Action::Top => self.scroll_y = self.pad.map_or(0.0, |p| p.y),
+                Action::Top => {
+                    let home = home_target(self.pad);
+                    self.scroll_x = home.x;
+                    self.scroll_y = home.y;
+                }
                 Action::Bottom => self.scroll_bottom = true,
                 Action::ZoomIn => self.zoom = (self.zoom * 1.1).min(3.0),
                 Action::ZoomOut => self.zoom = (self.zoom / 1.1).max(0.5),
@@ -522,19 +526,22 @@ impl eframe::App for App {
             self.pad = Some(pad);
             let scroll_y = self.scroll_y;
             let scroll_x = self.scroll_x;
-            let mut scroll = egui::ScrollArea::both()
+            let scroll = egui::ScrollArea::both()
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .auto_shrink([false, false])
                 .vertical_scroll_offset(scroll_y)
-                .horizontal_scroll_offset(scroll_x);
-            if popup_open {
-                // Freeze the document while the overlay is up.
-                scroll = scroll.scroll_source(egui::scroll_area::ScrollSource {
+                .horizontal_scroll_offset(scroll_x)
+                .on_hover_cursor(egui::CursorIcon::Grab)
+                .scroll_source(egui::scroll_area::ScrollSource {
                     scroll_bar: true,
-                    drag: egui::scroll_area::DragScroll::Never,
-                    mouse_wheel: false,
+                    // Mouse drag pans both axes; the popup freezes the document.
+                    drag: if popup_open {
+                        egui::scroll_area::DragScroll::Never
+                    } else {
+                        egui::scroll_area::DragScroll::Always
+                    },
+                    mouse_wheel: !popup_open,
                 });
-            }
             let output = scroll.show(ui, |ui| {
                 let available = ui.available_width();
                 let col = content_column(available, z);

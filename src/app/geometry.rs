@@ -213,6 +213,12 @@ pub(crate) fn home_scroll(
     }
 }
 
+/// The offset that shows a freshly opened document: the overscroll pad on both
+/// axes. `None` before the first layout has measured the viewport.
+pub(crate) fn home_target(pad: Option<egui::Vec2>) -> egui::Vec2 {
+    pad.unwrap_or(egui::Vec2::ZERO)
+}
+
 /// Displayed size of a diagram: small diagrams keep their intrinsic size
 /// (times app zoom) and are centred in the column; wide ones are capped to the
 /// column. Height always follows the intrinsic aspect ratio. A non-finite or
@@ -451,6 +457,14 @@ mod tests {
         fn bottom_pad_is_half_the_viewport_for_a_long_document() {
             assert_eq!(bottom_pad(598.0, 2000.0), 299.0);
             assert_eq!(bottom_pad(800.0, 0.0), 800.0);
+        }
+
+        #[test]
+        fn home_target_is_the_pad_on_both_axes() {
+            let pad = egui::vec2(471.5, 511.5);
+            assert_eq!(home_target(Some(pad)), pad);
+            // Before the first layout there is no pad yet.
+            assert_eq!(home_target(None), egui::Vec2::ZERO);
         }
 
         #[test]
