@@ -23,7 +23,7 @@ mod raster;
 mod table;
 
 use diagram::DiagramUi;
-use geometry::{bottom_pad, content_column};
+use geometry::{content_column, overscroll_pad};
 use keys::{apply_key, quit_suppressed, Action, KeyState};
 use list::ListUi;
 use placeholder::{parse, Placeholder};
@@ -156,6 +156,13 @@ pub(crate) struct App {
     html_fn: HtmlFn,
     scroll_y: f32,
     scroll_x: f32,
+    /// Edge slack from the last layout, so `gg` and `a` can target the real
+    /// viewport before this frame's layout has run.
+    pad: egui::Vec2,
+    /// While set and in the future, re-home the document each frame. The
+    /// window manager may resize the window just after mapping, so the final
+    /// viewport size is not known on the first frame.
+    home_until: Option<Instant>,
     /// Set by `G`: jump to the bottom once the next layout reveals `max_y`.
     scroll_bottom: bool,
     applied_theme: Option<Theme>,
@@ -269,6 +276,8 @@ impl App {
             html_fn,
             scroll_y: 0.0,
             scroll_x: 0.0,
+            pad: egui::Vec2::ZERO,
+            home_until: None,
             scroll_bottom: false,
             applied_theme: Some(theme),
             keys: KeyState::default(),
@@ -458,13 +467,13 @@ impl eframe::App for App {
                 Action::ScrollLines(f) => self.scroll_y = (self.scroll_y + f * 40.0).max(0.0),
                 Action::ScrollPages(f) => self.scroll_y = (self.scroll_y + f * page_h).max(0.0),
                 Action::ScrollCols(f) => self.scroll_x = (self.scroll_x + f * 40.0).max(0.0),
-                Action::Top => self.scroll_y = 0.0,
+                Action::Top => self.scroll_y = self.pad.y,
                 Action::Bottom => self.scroll_bottom = true,
                 Action::ZoomIn => self.zoom = (self.zoom * 1.1).min(3.0),
                 Action::ZoomOut => self.zoom = (self.zoom / 1.1).max(0.5),
                 Action::Fit => {
                     self.zoom = 1.0;
-                    self.scroll_x = 0.0;
+                    self.scroll_x = self.pad.x;
                 }
                 Action::ResetZoom => self.zoom = 1.0,
                 Action::ToggleTheme => {
@@ -473,7 +482,12 @@ impl eframe::App for App {
                         Theme::Dark => Theme::Light,
                     }
                 }
-                Action::Reload => self.reload(),
+                Action::Reload => {
+                    // A deliberate reload re-opens at the reading origin;
+                    // live watcher reloads keep the current position.
+                    self.home_until = None;
+                    self.reload();
+                }
                 Action::CopyDocument => {
                     ui.ctx().copy_text(self.source.clone());
                     self.set_status("copied markdown");
@@ -513,6 +527,20 @@ impl eframe::App for App {
             }
 
             let viewport_h = ui.available_height();
+            let pad_y = overscroll_pad(viewport_h);
+            let pad_x = overscroll_pad(ui.available_width());
+            let pad = egui::vec2(pad_x, pad_y);
+            self.pad = pad;
+            let home_until = *self
+                .home_until
+                .get_or_insert_with(|| Instant::now() + Duration::from_millis(300));
+            if Instant::now() < home_until {
+                // Hide the top/left slack while the window settles: the
+                // document still opens at the top-left of the window.
+                self.scroll_y = pad_y;
+                self.scroll_x = pad_x;
+                ui.ctx().request_repaint();
+            }
             let scroll_y = self.scroll_y;
             let scroll_x = self.scroll_x;
             let mut scroll = egui::ScrollArea::both()
@@ -533,8 +561,9 @@ impl eframe::App for App {
                 let col = content_column(available, z);
                 column = col;
                 let indent = ((available - col) * 0.5).max(0.0);
+                ui.add_space(pad_y);
                 ui.horizontal(|ui| {
-                    ui.add_space(indent);
+                    ui.add_space(pad_x + indent);
                     ui.vertical(|ui| {
                         ui.set_width(col);
                         let html_fn = &self.html_fn;
@@ -549,8 +578,9 @@ impl eframe::App for App {
                             .render_html_fn(Some(&**html_fn))
                             .show(ui, cache, md);
                     });
+                    ui.add_space(indent + pad_x);
                 });
-                ui.add_space(bottom_pad(viewport_h));
+                ui.add_space(pad_y);
             });
             let max_y = (output.content_size.y - output.inner_rect.height()).max(0.0);
             let max_x = (output.content_size.x - output.inner_rect.width()).max(0.0);

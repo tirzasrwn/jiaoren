@@ -173,10 +173,11 @@ pub(crate) fn reanchor(scroll_y: f32, viewport_top: f32, placeholder_top: f32, d
     }
 }
 
-/// Trailing space after the document so the last line can rise to mid-window
-/// when scrolled to the end. Zero for a zero-height viewport.
-pub(crate) fn bottom_pad(viewport_height: f32) -> f32 {
-    viewport_height * 0.5
+/// Blank slack on every edge of the document: half the viewport, so the first
+/// or last line can rise to mid-window and text can pan to the middle
+/// horizontally. Zero for a zero or negative viewport.
+pub(crate) fn overscroll_pad(viewport: f32) -> f32 {
+    (viewport * 0.5).max(0.0)
 }
 
 /// Displayed size of a diagram: small diagrams keep their intrinsic size
@@ -391,9 +392,10 @@ mod tests {
         }
 
         #[test]
-        fn bottom_pad_is_half_the_viewport() {
-            assert_eq!(bottom_pad(800.0), 400.0);
-            assert_eq!(bottom_pad(0.0), 0.0);
+        fn overscroll_pad_is_half_the_viewport() {
+            assert_eq!(overscroll_pad(0.0), 0.0);
+            assert_eq!(overscroll_pad(800.0), 400.0);
+            assert_eq!(overscroll_pad(-100.0), 0.0);
         }
 
         #[test]
