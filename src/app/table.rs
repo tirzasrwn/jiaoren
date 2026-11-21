@@ -22,6 +22,8 @@ pub(crate) struct TableUi {
     widths: HashMap<String, (i32, i32, i32, Vec<f32>)>,
     /// Set when a table's `copy csv` button was clicked this frame.
     copied: bool,
+    /// Row under the pointer per table id, from the previous frame's rects.
+    hover: HashMap<String, usize>,
 }
 
 impl TableUi {
@@ -32,6 +34,7 @@ impl TableUi {
             occurrences: HashMap::new(),
             widths: HashMap::new(),
             copied: false,
+            hover: HashMap::new(),
         }
     }
 
@@ -46,6 +49,7 @@ impl TableUi {
         self.occurrences.clear();
         self.widths.clear();
         self.copied = false;
+        self.hover.clear();
     }
 
     /// Take the "a table was copied" flag for the frame, if the button fired.
@@ -93,10 +97,17 @@ impl TableUi {
             });
             // The row colour paints the full table width behind the cells, so
             // the header reads as one bar instead of per-cell chips; data rows
-            // alternate from the first one.
+            // alternate from the first one. The row under the pointer uses the
+            // hover fill, applied from the previous frame's row rects.
+            let hovered = self.hover.get(id).copied();
+            let mut row_rects: Vec<egui::Rect> = Vec::new();
             egui::Grid::new(grid_id)
-                .with_row_color(move |row, _style| row_fill(dark, row))
+                .with_row_color(move |row, _style| match hovered {
+                    Some(hover) if hover == row => Some(row_fill_hover(dark, row)),
+                    _ => row_fill(dark, row),
+                })
                 .show(ui, |ui| {
+                    let row_top = ui.cursor().min.y;
                     for i in 0..ncols {
                         let cell = spec.header.get(i).map_or("", String::as_str);
                         // One block per cell, row-major; the row top is enough
@@ -128,8 +139,14 @@ impl TableUi {
                             }
                         }
                     }
+                    let bounds = ui.min_rect();
+                    row_rects.push(egui::Rect::from_min_max(
+                        egui::pos2(bounds.left(), row_top),
+                        egui::pos2(bounds.right(), bounds.bottom()),
+                    ));
                     ui.end_row();
                     for row in &spec.rows {
+                        let row_top = ui.cursor().min.y;
                         for i in 0..ncols {
                             let cell = row.get(i).map_or("", String::as_str);
                             let (ranges, current, block) = if cell_needs_library_fallback(cell) {
@@ -158,9 +175,29 @@ impl TableUi {
                                 }
                             }
                         }
+                        let bounds = ui.min_rect();
+                        row_rects.push(egui::Rect::from_min_max(
+                            egui::pos2(bounds.left(), row_top),
+                            egui::pos2(bounds.right(), bounds.bottom()),
+                        ));
                         ui.end_row();
                     }
                 });
+            let next = ui
+                .ctx()
+                .pointer_hover_pos()
+                .and_then(|pos| hovered_row(&row_rects, pos));
+            if self.hover.get(id).copied() != next {
+                match next {
+                    Some(row) => {
+                        self.hover.insert(id.to_string(), row);
+                    }
+                    None => {
+                        self.hover.remove(id);
+                    }
+                }
+                ui.ctx().request_repaint();
+            }
             ui.add_space(table_pad(body_row_height));
         });
     }
@@ -243,6 +280,27 @@ fn row_fill(dark: bool, row_index: usize) -> Option<egui::Color32> {
     } else {
         Some(body)
     }
+}
+
+/// Hover fill for a table row: `surface2` for the header, `surface1` for data
+/// rows, both Catppuccin roles from the active theme.
+pub(crate) fn row_fill_hover(dark: bool, row_index: usize) -> egui::Color32 {
+    let theme = if dark {
+        crate::mermaid::Theme::Dark
+    } else {
+        crate::mermaid::Theme::Light
+    };
+    let p = crate::theme::palette(theme);
+    if row_index == 0 {
+        p.surface2.into()
+    } else {
+        p.surface1.into()
+    }
+}
+
+/// Index of the first row rect containing `pos`.
+pub(crate) fn hovered_row(rects: &[egui::Rect], pos: egui::Pos2) -> Option<usize> {
+    rects.iter().position(|rect| rect.contains(pos))
 }
 
 /// CSV for one table: the header row, then every data row, `\n`-separated.
@@ -477,7 +535,9 @@ fn render_cell(
 mod tests {
     mod table {
         use super::super::cell_needs_library_fallback;
+        use super::super::hovered_row;
         use super::super::row_fill;
+        use super::super::row_fill_hover;
         use super::super::table_fills;
         use super::super::table_pad;
         use super::super::table_to_csv;
@@ -579,6 +639,26 @@ mod tests {
                 dark,
                 [l("#494d64"), l("#363a4f"), l("#363a4f"), l("#363a4f")]
             );
+        }
+
+        #[test]
+        fn hover_fill_uses_surface2_header_and_surface1_rows() {
+            let hex = |c: egui::Color32| crate::theme::Rgb(c.r(), c.g(), c.b()).to_hex();
+            assert_eq!(hex(row_fill_hover(false, 0)), "#acb0be");
+            assert_eq!(hex(row_fill_hover(false, 1)), "#bcc0cc");
+            assert_eq!(hex(row_fill_hover(true, 0)), "#5b6078");
+            assert_eq!(hex(row_fill_hover(true, 2)), "#494d64");
+        }
+
+        #[test]
+        fn hovered_row_is_the_containing_rect_or_none() {
+            let rect =
+                |y: f32| egui::Rect::from_min_size(egui::pos2(10.0, y), egui::vec2(100.0, 20.0));
+            let rects = vec![rect(0.0), rect(20.0), rect(40.0)];
+            assert_eq!(hovered_row(&rects, egui::pos2(50.0, 10.0)), Some(0));
+            assert_eq!(hovered_row(&rects, egui::pos2(50.0, 45.0)), Some(2));
+            assert_eq!(hovered_row(&rects, egui::pos2(5.0, 10.0)), None);
+            assert_eq!(hovered_row(&[], egui::pos2(5.0, 10.0)), None);
         }
 
         #[test]
