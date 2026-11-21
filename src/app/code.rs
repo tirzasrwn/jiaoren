@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use super::searchui::SearchUi;
 use crate::doc::CodeSpec;
 
 /// Shared, interior-mutable state backing the `<mdcode>` render path. Holds the
@@ -30,7 +31,7 @@ impl CodeUi {
         self.specs = specs;
     }
 
-    pub(crate) fn show(&mut self, ui: &mut egui::Ui, id: &str) {
+    pub(crate) fn show(&mut self, ui: &mut egui::Ui, id: &str, search: &mut SearchUi) {
         // Clone so the spec outlives the immutable borrow of `self`.
         let spec = match self.specs.get(id) {
             Some(s) => s.clone(),
@@ -42,6 +43,7 @@ impl CodeUi {
             .get(&egui::TextStyle::Monospace)
             .cloned()
             .unwrap_or_else(|| egui::FontId::monospace(14.0));
+        search.record(ui, spec.text.clone());
         let row_h = ui.fonts_mut(|f| f.row_height(&mono));
         let lines = code_lines(&spec.text);
         let measure = |s: &str| {

@@ -41,6 +41,14 @@ pub enum Action {
     Reload,
     /// Copy the whole document as Markdown.
     CopyDocument,
+    /// Open the `/` search command line.
+    SearchOpen,
+    /// Jump to the next search match, wrapping.
+    SearchNext,
+    /// Jump to the previous search match, wrapping.
+    SearchPrev,
+    /// Close the window, or clear the active search first (handled by the app).
+    Escape,
     /// Close the window.
     Quit,
 }
@@ -84,7 +92,12 @@ pub fn apply_key(
         Key::T => Some(Action::ToggleTheme),
         Key::R => Some(Action::Reload),
         Key::C if modifiers.command || modifiers.ctrl => Some(Action::Quit),
-        Key::Q | Key::Escape => Some(Action::Quit),
+        Key::Q => Some(Action::Quit),
+        // Escape clears an active search before it quits; the app decides which.
+        Key::Escape => Some(Action::Escape),
+        Key::Slash if !modifiers.any() => Some(Action::SearchOpen),
+        Key::N if modifiers.shift => Some(Action::SearchPrev),
+        Key::N if !modifiers.command && !modifiers.ctrl => Some(Action::SearchNext),
         Key::Y if !modifiers.any() => {
             // Starting a `y` sequence breaks a pending `gg`.
             state.last_g = None;
@@ -403,6 +416,48 @@ mod tests {
             assert_eq!(
                 apply_key(&mut s, Key::A, Modifiers::NONE, now),
                 Some(Action::Fit)
+            );
+        }
+
+        #[test]
+        fn slash_opens_search() {
+            let mut s = KeyState::default();
+            let now = std::time::Instant::now();
+            assert_eq!(
+                apply_key(&mut s, Key::Slash, Modifiers::NONE, now),
+                Some(Action::SearchOpen)
+            );
+            // `?` (Shift+/) is not a search opener.
+            assert_eq!(apply_key(&mut s, Key::Slash, Modifiers::SHIFT, now), None);
+        }
+
+        #[test]
+        fn n_and_upper_n_step_matches() {
+            let mut s = KeyState::default();
+            let now = std::time::Instant::now();
+            assert_eq!(
+                apply_key(&mut s, Key::N, Modifiers::NONE, now),
+                Some(Action::SearchNext)
+            );
+            assert_eq!(
+                apply_key(&mut s, Key::N, Modifiers::SHIFT, now),
+                Some(Action::SearchPrev)
+            );
+            // Ctrl+N is not a match key.
+            assert_eq!(apply_key(&mut s, Key::N, Modifiers::CTRL, now), None);
+        }
+
+        #[test]
+        fn escape_is_not_a_quit_action() {
+            let mut s = KeyState::default();
+            let now = std::time::Instant::now();
+            assert_eq!(
+                apply_key(&mut s, Key::Escape, Modifiers::NONE, now),
+                Some(Action::Escape)
+            );
+            assert_eq!(
+                apply_key(&mut s, Key::Q, Modifiers::NONE, now),
+                Some(Action::Quit)
             );
         }
     }

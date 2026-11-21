@@ -24,6 +24,7 @@ mod keys;
 mod list;
 mod placeholder;
 mod raster;
+mod searchui;
 mod table;
 
 use code::CodeUi;
@@ -34,6 +35,7 @@ use image::ImageUi;
 use keys::{apply_key, quit_suppressed, Action, KeyState};
 use list::ListUi;
 use placeholder::{parse, Placeholder};
+use searchui::SearchUi;
 use table::TableUi;
 
 /// Re-export of [`crate::doc::read_doc`] for the app's reload path.
@@ -119,12 +121,13 @@ impl ParagraphUi {
         self.cache = CommonMarkCache::default();
     }
 
-    fn show(&mut self, ui: &mut egui::Ui, id: &str) {
+    fn show(&mut self, ui: &mut egui::Ui, id: &str, search: &mut SearchUi) {
         // Clone: the source rarely changes and this keeps `cache` free to borrow.
         let source = match self.paragraphs.get(id) {
             Some(s) => s.clone(),
             None => return, // unknown id: draw nothing, never panic
         };
+        search.record(ui, source.clone());
         if source.contains("![") || source.contains('<') {
             CommonMarkViewer::new().show(ui, &mut self.cache, &source);
             return;
@@ -146,6 +149,26 @@ struct Status {
 
 /// How long a clipboard status line stays on screen.
 const STATUS_DURATION: Duration = Duration::from_millis(1500);
+
+/// Colour of the status line and the search prompt.
+fn status_color(theme: Theme) -> egui::Color32 {
+    crate::theme::palette(theme).subtext0.into()
+}
+
+/// Bottom-left status overlay, shared by copy messages and the search status.
+fn status_area(ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Area::new(egui::Id::new("jiaoren-status"))
+        .order(egui::Order::Middle)
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            // Solid chip: the status sits over the document and must stay legible.
+            egui::Frame::new()
+                .fill(ui.visuals().panel_fill)
+                .inner_margin(egui::Margin::symmetric(4, 2))
+                .show(ui, add);
+        });
+}
 
 /// The jiaoren window: document state, theme/zoom, scrolling, and the HTML
 /// render hook.
@@ -171,9 +194,13 @@ pub(crate) struct App {
     images: Rc<RefCell<ImageUi>>,
     headings: Rc<RefCell<HeadingUi>>,
     code: Rc<RefCell<CodeUi>>,
+    search: Rc<RefCell<SearchUi>>,
     html_fn: HtmlFn,
     scroll_y: f32,
     scroll_x: f32,
+    /// Content y the next layout must scroll to (a confirmed or stepped search
+    /// hit). Applied once after `home_scroll`, before the scroll area runs.
+    jump_to: Option<f32>,
     /// Edge slack from the last layout, `None` until the first layout. `gg` and
     /// `a` target it before this frame's layout has run; `Some` also tells the
     /// home/resize helper whether the view is still at the reading origin.
@@ -236,6 +263,7 @@ impl App {
         let images = Rc::new(RefCell::new(ImageUi::new(prepared.images.clone())));
         let headings = Rc::new(RefCell::new(HeadingUi::new(prepared.headings.clone())));
         let code = Rc::new(RefCell::new(CodeUi::new(prepared.code.clone())));
+        let search = Rc::new(RefCell::new(SearchUi::new()));
         let html_fn: HtmlFn = {
             let d = Rc::clone(&diagrams);
             let t = Rc::clone(&tables);
@@ -244,12 +272,15 @@ impl App {
             let i = Rc::clone(&images);
             let h = Rc::clone(&headings);
             let c = Rc::clone(&code);
+            let s = Rc::clone(&search);
             Box::new(move |ui: &mut egui::Ui, html: &str| match parse(html) {
-                Some(Placeholder::Paragraph(id)) => p.borrow_mut().show(ui, id),
-                Some(Placeholder::Table(id)) => t.borrow_mut().show(ui, id),
-                Some(Placeholder::List(id)) => l.borrow_mut().show(ui, id),
-                Some(Placeholder::Heading(id)) => h.borrow_mut().show(ui, id),
-                Some(Placeholder::Code(id)) => c.borrow_mut().show(ui, id),
+                Some(Placeholder::Paragraph(id)) => {
+                    p.borrow_mut().show(ui, id, &mut s.borrow_mut())
+                }
+                Some(Placeholder::Table(id)) => t.borrow_mut().show(ui, id, &mut s.borrow_mut()),
+                Some(Placeholder::List(id)) => l.borrow_mut().show(ui, id, &mut s.borrow_mut()),
+                Some(Placeholder::Heading(id)) => h.borrow_mut().show(ui, id, &mut s.borrow_mut()),
+                Some(Placeholder::Code(id)) => c.borrow_mut().show(ui, id, &mut s.borrow_mut()),
                 Some(Placeholder::Image(id)) => i.borrow_mut().show(ui, id),
                 Some(Placeholder::Mermaid(id)) => d.borrow_mut().show(ui, id),
                 None => {}
@@ -297,9 +328,11 @@ impl App {
             images,
             headings,
             code,
+            search,
             html_fn,
             scroll_y: 0.0,
             scroll_x: 0.0,
+            jump_to: None,
             pad: None,
             scroll_bottom: false,
             applied_theme: Some(theme),
@@ -341,6 +374,8 @@ impl App {
             .borrow_mut()
             .reset(self.prepared.headings.clone());
         self.code.borrow_mut().reset(self.prepared.code.clone());
+        // Old hits point into blocks that no longer exist.
+        self.search.borrow_mut().state.clear();
     }
 
     /// Show a clipboard confirmation for [`STATUS_DURATION`].
@@ -351,31 +386,100 @@ impl App {
         });
     }
 
-    /// Paint the bottom-left status line, if any, and schedule its expiry.
-    /// Anchored in the window margin, so it never takes layout from the
-    /// reading column; the document's bottom padding keeps text clear of it.
+    /// Paint the bottom-left status line: the `/` command line while it is
+    /// open, otherwise a transient copy message, otherwise the active search
+    /// (`/pat [i/n]`). Anchored in the window margin, so it never takes layout
+    /// from the reading column; the document's bottom padding keeps text clear
+    /// of it.
     fn draw_status(&mut self, ctx: &egui::Context) {
-        let Some(status) = &self.status else {
-            return;
-        };
-        let remaining = status.until.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            self.status = None;
+        if self.search.borrow().is_open() {
+            self.draw_search_prompt(ctx);
             return;
         }
-        let message = status.message;
-        let color: egui::Color32 = crate::theme::palette(self.theme).subtext0.into();
-        egui::Area::new(egui::Id::new("jiaoren-status"))
-            .order(egui::Order::Middle)
-            .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
-            .interactable(false)
-            .show(ctx, |ui| {
+        if let Some(status) = &self.status {
+            let remaining = status.until.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                self.status = None;
+            } else {
+                let message = status.message;
+                status_area(ctx, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(message).color(status_color(self.theme)),
+                        )
+                        .wrap_mode(egui::TextWrapMode::Extend),
+                    );
+                });
+                ctx.request_repaint_after(remaining);
+                return;
+            }
+        }
+        if let Some(text) = self.search.borrow().state.status_text() {
+            status_area(ctx, |ui| {
                 ui.add(
-                    egui::Label::new(egui::RichText::new(message).color(color))
+                    egui::Label::new(egui::RichText::new(text).color(status_color(self.theme)))
                         .wrap_mode(egui::TextWrapMode::Extend),
                 );
             });
-        ctx.request_repaint_after(remaining);
+        }
+    }
+
+    /// The `/` command line: a single-line edit at the status position, focused
+    /// when nothing else owns the keyboard.
+    fn draw_search_prompt(&mut self, ctx: &egui::Context) {
+        let input_id = egui::Id::new("jiaoren-search-input");
+        let mut text = self.search.borrow_mut().input.take().unwrap_or_default();
+        egui::Area::new(egui::Id::new("jiaoren-search"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
+            .show(ctx, |ui| {
+                ui.set_max_width(500.0);
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut text)
+                        .id(input_id)
+                        .desired_width(500.0)
+                        .hint_text("search"),
+                );
+                if !response.has_focus() && ui.memory(|m| m.focused()).is_none() {
+                    response.request_focus();
+                }
+            });
+        self.search.borrow_mut().input = Some(text);
+    }
+
+    /// Confirm the `/` buffer: compute hits over the last drawn block texts,
+    /// remember them, jump to the first match and close the command line.
+    fn confirm_search(&mut self, ctx: &egui::Context) {
+        let Some(pattern) = self.search.borrow_mut().take_input() else {
+            return;
+        };
+        let mut s = self.search.borrow_mut();
+        // Recorded block texts in document order from the previous frame.
+        let texts = s.texts().to_vec();
+        s.state.set_pattern(&texts, &pattern);
+        let target = s.state.current_block().and_then(|b| s.block_y(b));
+        self.jump_to = target;
+        if target.is_some() {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Step to the next (`dir > 0`) or previous match and jump to its block.
+    fn step_search(&mut self, dir: i32, ctx: &egui::Context) {
+        let mut s = self.search.borrow_mut();
+        if s.state.pattern.is_none() {
+            return;
+        }
+        if dir > 0 {
+            s.state.next();
+        } else {
+            s.state.prev();
+        }
+        let target = s.state.current_block().and_then(|b| s.block_y(b));
+        self.jump_to = target;
+        if target.is_some() {
+            ctx.request_repaint();
+        }
     }
 
     /// Drive live reload: drain watcher events (or poll mtime when the watcher
@@ -452,8 +556,28 @@ impl eframe::App for App {
             }
         }
         let suppress_quit = quit_suppressed(input_time, popup_closed_at);
+        let command_open = self.search.borrow().is_open();
         let mut acts: Vec<Action> = Vec::new();
-        if !popup_open {
+        let mut confirm_search = false;
+        let mut cancel_search = false;
+        if !popup_open && command_open {
+            // While the command line owns the keyboard, only Enter and Esc are
+            // viewer keys: `q`, `t`, `r`, `0`, `/`, … must reach the TextEdit.
+            ui.input(|i| {
+                for ev in &i.events {
+                    if let egui::Event::Key {
+                        key, pressed: true, ..
+                    } = ev
+                    {
+                        match *key {
+                            egui::Key::Enter => confirm_search = true,
+                            egui::Key::Escape => cancel_search = true,
+                            _ => {}
+                        }
+                    }
+                }
+            });
+        } else if !popup_open {
             ui.input(|i| {
                 for ev in &i.events {
                     if let egui::Event::Key {
@@ -487,6 +611,13 @@ impl eframe::App for App {
                 }
             });
         }
+        if cancel_search {
+            self.search.borrow_mut().cancel();
+            ui.ctx().request_repaint();
+        }
+        if confirm_search {
+            self.confirm_search(ui.ctx());
+        }
         let page_h = ui.available_height();
         for act in acts {
             match act {
@@ -516,6 +647,21 @@ impl eframe::App for App {
                 Action::CopyDocument => {
                     ui.ctx().copy_text(self.source.clone());
                     self.set_status("copied markdown");
+                }
+                Action::SearchOpen => {
+                    self.search.borrow_mut().open();
+                    ui.ctx().request_repaint();
+                }
+                Action::SearchNext => self.step_search(1, ui.ctx()),
+                Action::SearchPrev => self.step_search(-1, ui.ctx()),
+                // Esc clears an active search before it quits.
+                Action::Escape => {
+                    let mut s = self.search.borrow_mut();
+                    let had_search = s.state.pattern.is_some();
+                    s.state.clear();
+                    if !had_search {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                 }
                 Action::Quit => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
             }
@@ -561,6 +707,12 @@ impl eframe::App for App {
             self.scroll_x = home.x;
             self.scroll_y = home.y;
             self.pad = Some(pad);
+            // A confirmed or stepped search hit wins over home/resize anchoring.
+            // The horizontal home pad keeps the block's left edge visible.
+            if let Some(y) = self.jump_to.take() {
+                self.scroll_y = y.max(0.0);
+                self.scroll_x = pad.x;
+            }
             let scroll_y = self.scroll_y;
             let scroll_x = self.scroll_x;
             let scroll = egui::ScrollArea::both()
@@ -599,6 +751,7 @@ impl eframe::App for App {
                         self.code.borrow_mut().begin_frame(col);
                         self.diagrams.borrow_mut().begin_frame(col);
                         self.images.borrow_mut().begin_frame(col, z);
+                        self.search.borrow_mut().begin_frame();
                         CommonMarkViewer::new()
                             .max_image_width(Some(col as usize))
                             .render_html_fn(Some(&**html_fn))
@@ -622,6 +775,11 @@ impl eframe::App for App {
                 (output.state.offset.y + adjust).clamp(0.0, max_y)
             };
             self.scroll_x = output.state.offset.x.clamp(0.0, max_x);
+            // Screen tops recorded during the draw become content positions
+            // that survive scrolling, for the next Enter/n/N jump.
+            self.search
+                .borrow_mut()
+                .finish_frame(output.state.offset.y, output.inner_rect.top());
             if adjust != 0.0 || jump_bottom {
                 // Re-lay out next frame at the corrected offset.
                 ui.ctx().request_repaint();

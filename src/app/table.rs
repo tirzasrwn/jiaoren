@@ -8,6 +8,7 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use crate::doc::TableSpec;
 
 use super::geometry::{cap_column_widths, table_column_widths};
+use super::searchui::SearchUi;
 
 /// Shared, interior-mutable state backing the `<mdtable>` render path in the
 /// html hook. Holds the parsed specs, a per-cell `CommonMarkCache` separate
@@ -52,7 +53,7 @@ impl TableUi {
         std::mem::take(&mut self.copied)
     }
 
-    pub(crate) fn show(&mut self, ui: &mut egui::Ui, id: &str) {
+    pub(crate) fn show(&mut self, ui: &mut egui::Ui, id: &str, search: &mut SearchUi) {
         // Clone so the spec outlives the immutable borrow while `cell_cache` is
         // borrowed mutably below. Tables are small; the clone is the cheap fix.
         let spec = match self.tables.get(id) {
@@ -96,12 +97,16 @@ impl TableUi {
                 .show(ui, |ui| {
                     for i in 0..ncols {
                         let cell = spec.header.get(i).map_or("", String::as_str);
+                        // One block per cell, row-major; the row top is enough
+                        // to jump to it.
+                        search.record(ui, plain_text(cell));
                         render_cell(ui, cell_width(&widths, i), cell, &mut self.cell_cache);
                     }
                     ui.end_row();
                     for row in &spec.rows {
                         for i in 0..ncols {
                             let cell = row.get(i).map_or("", String::as_str);
+                            search.record(ui, plain_text(cell));
                             render_cell(ui, cell_width(&widths, i), cell, &mut self.cell_cache);
                         }
                         ui.end_row();

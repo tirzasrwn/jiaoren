@@ -74,7 +74,10 @@ To go back to the defaults, delete (or comment out) the
 | `t` | toggle light/dark theme |
 | `r` | reload from disk |
 | `yy` | copy the whole document as Markdown |
-| `q` / `esc` / `ctrl+c` | quit |
+| `/` | search: type a pattern, `Enter` confirms and jumps to the first match |
+| `n` / `N` | next / previous match, wrapping |
+| `esc` | cancel the search prompt, else clear the active search, else quit |
+| `q` / `ctrl+c` | quit |
 
 Mouse: drag anywhere to pan the document in both axes (the wheel still
 scrolls, `gg` returns to the start). A plain click on a diagram or local image
@@ -229,7 +232,7 @@ noise here); targeted pedantic advice is applied by hand.
 
 ## Non-goals
 
-Editing, tabs, a TUI mode, `/` search, PDF/HTML export, math, remote images,
+Editing, tabs, a TUI mode, PDF/HTML export, math, remote images,
 and mermaid interactivity are out of scope for v1. See
 `docs/superpowers/specs/2026-11-20-mdview-design.md` for the full intent,
 goals, and constraints.

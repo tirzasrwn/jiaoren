@@ -1,0 +1,115 @@
+//! Shared search state for the render hook and the app: the persistent
+//! [`SearchState`] plus the block texts and content positions recorded while
+//! the document is drawn, and the `/` command line buffer.
+
+use crate::search::SearchState;
+
+/// Search state backing the `/` command line, the status line and `n`/`N`.
+pub(crate) struct SearchUi {
+    /// Confirmed pattern and its hits.
+    pub(crate) state: SearchState,
+    /// `Some(buffer)` while the command line is open.
+    pub(crate) input: Option<String>,
+    /// Block texts in draw order, rebuilt every frame. Keys run before the
+    /// frame is drawn, so they see the previous frame's list.
+    texts: Vec<String>,
+    /// Screen-space top of each block, recorded while drawing.
+    tops: Vec<f32>,
+    /// Content-space top of each block, computed after the layout.
+    ys: Vec<f32>,
+}
+
+impl SearchUi {
+    pub(crate) fn new() -> Self {
+        SearchUi {
+            state: SearchState::default(),
+            input: None,
+            texts: Vec::new(),
+            tops: Vec::new(),
+            ys: Vec::new(),
+        }
+    }
+
+    /// Drop last frame's blocks; called before the viewer draws this one.
+    pub(crate) fn begin_frame(&mut self) {
+        self.texts.clear();
+        self.tops.clear();
+    }
+
+    /// Record one searchable block at the ui's current cursor position.
+    pub(crate) fn record(&mut self, ui: &egui::Ui, text: String) {
+        self.texts.push(text);
+        self.tops.push(ui.cursor().min.y);
+    }
+
+    /// Convert this frame's screen positions into content positions:
+    /// `offset + top - viewport_top`. Called once after the scroll area.
+    pub(crate) fn finish_frame(&mut self, offset_y: f32, viewport_top: f32) {
+        self.ys.clear();
+        self.ys
+            .extend(self.tops.iter().map(|top| offset_y + top - viewport_top));
+    }
+
+    /// Block texts of the last completed frame, in document order.
+    pub(crate) fn texts(&self) -> &[String] {
+        &self.texts
+    }
+
+    /// Content y of block `index` in the last completed frame.
+    pub(crate) fn block_y(&self, index: usize) -> Option<f32> {
+        self.ys.get(index).copied()
+    }
+
+    /// Open the command line with an empty buffer.
+    pub(crate) fn open(&mut self) {
+        self.input = Some(String::new());
+    }
+
+    /// Close the command line, discarding the buffer.
+    pub(crate) fn cancel(&mut self) {
+        self.input = None;
+    }
+
+    /// Whether the command line owns the keyboard.
+    pub(crate) fn is_open(&self) -> bool {
+        self.input.is_some()
+    }
+
+    /// Take the confirmed pattern and close the command line.
+    pub(crate) fn take_input(&mut self) -> Option<String> {
+        self.input.take()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    mod positions {
+        use super::super::SearchUi;
+
+        #[test]
+        fn content_y_is_offset_plus_top_minus_viewport_top() {
+            let mut s = SearchUi::new();
+            s.texts = vec!["first".to_string(), "second".to_string()];
+            s.tops = vec![100.0, 250.0];
+            s.finish_frame(40.0, 20.0);
+            assert_eq!(s.block_y(0), Some(120.0));
+            assert_eq!(s.block_y(1), Some(270.0));
+            assert_eq!(s.block_y(2), None);
+        }
+
+        #[test]
+        fn open_cancel_and_take_input() {
+            let mut s = SearchUi::new();
+            assert!(!s.is_open());
+            s.open();
+            assert!(s.is_open());
+            s.cancel();
+            assert!(!s.is_open());
+
+            s.open();
+            s.input = Some("mermaid".to_string());
+            assert_eq!(s.take_input().as_deref(), Some("mermaid"));
+            assert!(!s.is_open());
+        }
+    }
+}

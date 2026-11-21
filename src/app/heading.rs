@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use super::searchui::SearchUi;
 use crate::doc::HeadingSpec;
 use crate::justify;
 
@@ -30,7 +31,7 @@ impl HeadingUi {
         self.specs = specs;
     }
 
-    pub(crate) fn show(&mut self, ui: &mut egui::Ui, id: &str) {
+    pub(crate) fn show(&mut self, ui: &mut egui::Ui, id: &str, search: &mut SearchUi) {
         // Clone so the spec outlives the immutable borrow of `self`.
         let spec = match self.specs.get(id) {
             Some(s) => s.clone(),
@@ -42,6 +43,7 @@ impl HeadingUi {
         let font = egui::FontId::new(size, body.family.clone());
         let color = ui.visuals().strong_text_color();
         let runs = justify::parse_inline(&spec.text);
+        search.record(ui, spec.text.clone());
         let row_h = ui.text_style_height(&egui::TextStyle::Body);
         // The removed `<mdspace>` block was one empty body row above and below,
         // but a heading's own trailing spacing sat on top of it. These fractions

@@ -6,6 +6,7 @@ mod doc;
 mod fonts;
 mod justify;
 mod mermaid;
+mod search;
 mod theme;
 
 use std::path::PathBuf;

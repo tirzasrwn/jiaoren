@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use crate::doc::{ListKind, ListSpec};
 use crate::justify::{self, Marker};
 
+use super::searchui::SearchUi;
 use super::table::table_pad;
 
 /// Shared, interior-mutable state backing the `<mdlist>` render path. Holds the
@@ -32,7 +33,7 @@ impl ListUi {
         self.specs = specs;
     }
 
-    pub(crate) fn show(&mut self, ui: &mut egui::Ui, id: &str) {
+    pub(crate) fn show(&mut self, ui: &mut egui::Ui, id: &str, search: &mut SearchUi) {
         // Clone so the spec outlives the borrow while the closure borrows `ui`.
         let spec = match self.specs.get(id) {
             Some(s) => s.clone(),
@@ -48,6 +49,8 @@ impl ListUi {
             ui.spacing_mut().item_spacing.y *= 0.5;
             ui.add_space(pad);
             for item in &spec.items {
+                // One searchable block per item, at the row it starts on.
+                search.record(ui, item.text.clone());
                 let marker = match item.kind {
                     ListKind::Bullet if item.depth % 2 == 1 => Marker::Hollow,
                     ListKind::Bullet => Marker::Bullet,
