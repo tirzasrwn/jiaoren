@@ -516,6 +516,7 @@ impl eframe::App for App {
             let scroll_y = self.scroll_y;
             let scroll_x = self.scroll_x;
             let mut scroll = egui::ScrollArea::both()
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .auto_shrink([false, false])
                 .vertical_scroll_offset(scroll_y)
                 .horizontal_scroll_offset(scroll_x);
