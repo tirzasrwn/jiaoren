@@ -180,13 +180,25 @@ pub(crate) fn wrap_line(
     let total = line.chars().count();
     let mut rows = Vec::new();
     let mut start = 0usize; // char index of the current row
-    let mut start_byte = 0usize;
-    for (index, (byte, c)) in line.char_indices().enumerate() {
-        if index > start && measure(&line[start_byte..byte + c.len_utf8()]) > max_width {
+                            // Add per-char advances instead of re-laying out every growing prefix:
+                            // the old loop was O(n^2) layout work per line, and the performance audit
+                            // showed it dominating a large document. Per-char widths are cached by the
+                            // font atlas, so this is O(n) cheap lookups. A tab counts as four cells;
+                            // ligatures make the real row narrower, never wider.
+    let cell = measure("M");
+    let mut row_w = 0.0f32;
+    for (index, (_, c)) in line.char_indices().enumerate() {
+        let w = if c == '\t' {
+            cell * 4.0
+        } else {
+            measure(c.encode_utf8(&mut [0u8; 4]))
+        };
+        if index > start && row_w + w > max_width {
             rows.push((start, index - start));
             start = index;
-            start_byte = byte;
+            row_w = 0.0;
         }
+        row_w += w;
     }
     if start < total || rows.is_empty() {
         rows.push((start, total - start));
@@ -332,6 +344,8 @@ mod tests {
             assert_eq!(wrap_line("ab", 5.0, &m), vec![(0, 1), (1, 1)]);
             // Multi-byte chars keep char offsets, not byte offsets.
             assert_eq!(wrap_line("ééé", 20.0, &m), vec![(0, 2), (2, 1)]);
+            // A tab counts as four cells, like the monospace painter.
+            assert_eq!(wrap_line("a\tb", 20.0, &m), vec![(0, 1), (1, 1), (2, 1)]);
         }
 
         #[test]
