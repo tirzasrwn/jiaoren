@@ -71,7 +71,14 @@ To go back to the defaults, delete (or comment out) the
 | `h` / `l`, `shift+←` / `shift+→` | pan left / right (for zoomed-in content) |
 | `t` | toggle light/dark theme |
 | `r` | reload from disk |
+| `yy` | copy the whole document as Markdown |
 | `q` / `esc` / `ctrl+c` | quit |
+
+Every table also carries a small **copy csv** button at its top-right; clicking
+it copies the table as CSV (header row first, Markdown stripped from cells,
+fields quoted when they contain commas, quotes or line breaks). Both clipboard
+actions show a 1.5-second toast and never steal focus. `Ctrl+C` still quits
+jiaoren when no diagram overlay is open.
 
 ## Mermaid diagrams
 

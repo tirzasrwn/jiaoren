@@ -122,11 +122,22 @@ impl ParagraphUi {
 /// Renders an HTML placeholder through the diagram, table or paragraph UI.
 type HtmlFn = Box<dyn Fn(&mut egui::Ui, &str)>;
 
+/// A transient clipboard confirmation: one line, top-right, non-interactive.
+struct Toast {
+    message: &'static str,
+    until: Instant,
+}
+
+/// How long a clipboard toast stays on screen.
+const TOAST_DURATION: Duration = Duration::from_millis(1500);
+
 /// The jiaoren window: document state, theme/zoom, scrolling, and the HTML
 /// render hook.
 pub(crate) struct App {
     /// Path of the open document.
     pub path: PathBuf,
+    /// Raw Markdown source as read from disk, for `yy`.
+    source: String,
     /// Pre-parsed document text and placeholders.
     pub prepared: Prepared,
     /// Active colour theme.
@@ -157,6 +168,7 @@ pub(crate) struct App {
     pending_reload: Option<Instant>,
     last_mtime: Option<SystemTime>,
     last_poll: Instant,
+    toast: Option<Toast>,
 }
 
 impl App {
@@ -239,6 +251,7 @@ impl App {
 
         App {
             path,
+            source: text,
             prepared,
             theme,
             zoom: 1.0,
@@ -260,6 +273,7 @@ impl App {
             pending_reload: None,
             last_mtime,
             last_poll: Instant::now(),
+            toast: None,
         }
     }
 
@@ -268,6 +282,7 @@ impl App {
         match read_doc(&self.path) {
             Ok(text) => {
                 self.prepared = prepare(&text, parent_dir(&self.path));
+                self.source = text;
                 self.error = None;
             }
             Err(e) => self.error = Some(e.to_string()),
@@ -285,6 +300,37 @@ impl App {
         self.paragraphs
             .borrow_mut()
             .reset(self.prepared.paragraphs.clone());
+    }
+
+    /// Show a clipboard confirmation for [`TOAST_DURATION`].
+    fn set_toast(&mut self, message: &'static str) {
+        self.toast = Some(Toast {
+            message,
+            until: Instant::now() + TOAST_DURATION,
+        });
+    }
+
+    /// Paint the top-right toast, if any, and schedule its own expiry.
+    fn draw_toast(&mut self, ctx: &egui::Context) {
+        let Some(toast) = &self.toast else {
+            return;
+        };
+        let remaining = toast.until.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            self.toast = None;
+            return;
+        }
+        let message = toast.message;
+        egui::Area::new(egui::Id::new("jiaoren-toast"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(message);
+                });
+            });
+        ctx.request_repaint_after(remaining);
     }
 
     /// Drive live reload: drain watcher events (or poll mtime when the watcher
@@ -416,6 +462,10 @@ impl eframe::App for App {
                     }
                 }
                 Action::Reload => self.reload(),
+                Action::CopyDocument => {
+                    ui.ctx().copy_text(self.source.clone());
+                    self.set_toast("copied markdown");
+                }
                 Action::Quit => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
             }
         }
@@ -506,6 +556,10 @@ impl eframe::App for App {
         });
         // Drawn last so the foreground overlay sits above the document.
         self.diagrams.borrow_mut().draw_popup(ui.ctx(), column);
+        if self.tables.borrow_mut().take_copied() {
+            self.set_toast("copied CSV");
+        }
+        self.draw_toast(ui.ctx());
     }
 }
 

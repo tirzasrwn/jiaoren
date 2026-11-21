@@ -10,6 +10,8 @@ use egui::{Key, Modifiers};
 pub struct KeyState {
     /// Instant of a pending first `g`, if any.
     pub last_g: Option<Instant>,
+    /// Instant of a pending first `y`, if any.
+    pub last_y: Option<Instant>,
 }
 
 /// A viewer action produced by a key press.
@@ -37,6 +39,8 @@ pub enum Action {
     ToggleTheme,
     /// Re-read the document from disk.
     Reload,
+    /// Copy the whole document as Markdown.
+    CopyDocument,
     /// Close the window.
     Quit,
 }
@@ -81,6 +85,15 @@ pub fn apply_key(
         Key::R => Some(Action::Reload),
         Key::C if modifiers.command || modifiers.ctrl => Some(Action::Quit),
         Key::Q | Key::Escape => Some(Action::Quit),
+        Key::Y if !modifiers.any() => match state.last_y.take() {
+            Some(t) if now.duration_since(t) < GG_WINDOW => Some(Action::CopyDocument),
+            // A `y` with no recent predecessor (including one after the window
+            // elapsed) arms a fresh `yy`; a single `y` never copies.
+            _ => {
+                state.last_y = Some(now);
+                None
+            }
+        },
         Key::G => {
             // Shift+G (bottom) is immediate; a lone `g` starts the gg window.
             if modifiers.shift {
@@ -115,6 +128,63 @@ mod tests {
             );
             assert!(
                 matches!(apply_key(&mut s, Key::K, Modifiers::NONE, now), Some(Action::ScrollLines(v)) if v < 0.0)
+            );
+        }
+
+        #[test]
+        fn double_y_copies_the_document() {
+            let mut s = KeyState::default();
+            let t0 = std::time::Instant::now();
+            assert_eq!(apply_key(&mut s, Key::Y, Modifiers::NONE, t0), None);
+            assert_eq!(
+                apply_key(
+                    &mut s,
+                    Key::Y,
+                    Modifiers::NONE,
+                    t0 + std::time::Duration::from_millis(200)
+                ),
+                Some(Action::CopyDocument)
+            );
+            assert!(s.last_y.is_none());
+        }
+
+        #[test]
+        fn single_y_does_not_copy() {
+            let mut s = KeyState::default();
+            assert_eq!(
+                apply_key(&mut s, Key::Y, Modifiers::NONE, std::time::Instant::now()),
+                None
+            );
+            // Shift+Y is not a copy chord either.
+            assert_eq!(
+                apply_key(&mut s, Key::Y, Modifiers::SHIFT, std::time::Instant::now()),
+                None
+            );
+        }
+
+        #[test]
+        fn expired_y_rearms_instead_of_copying() {
+            let mut s = KeyState::default();
+            let t0 = std::time::Instant::now();
+            assert_eq!(apply_key(&mut s, Key::Y, Modifiers::NONE, t0), None);
+            assert_eq!(
+                apply_key(
+                    &mut s,
+                    Key::Y,
+                    Modifiers::NONE,
+                    t0 + std::time::Duration::from_millis(700)
+                ),
+                None
+            );
+            assert!(s.last_y.is_some());
+            assert_eq!(
+                apply_key(
+                    &mut s,
+                    Key::Y,
+                    Modifiers::NONE,
+                    t0 + std::time::Duration::from_millis(900)
+                ),
+                Some(Action::CopyDocument)
             );
         }
 

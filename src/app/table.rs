@@ -19,6 +19,8 @@ pub(crate) struct TableUi {
     cell_cache: CommonMarkCache,
     occurrences: HashMap<String, usize>,
     widths: HashMap<String, (i32, i32, i32, Vec<f32>)>,
+    /// Set when a table's `copy csv` button was clicked this frame.
+    copied: bool,
 }
 
 impl TableUi {
@@ -28,6 +30,7 @@ impl TableUi {
             cell_cache: CommonMarkCache::default(),
             occurrences: HashMap::new(),
             widths: HashMap::new(),
+            copied: false,
         }
     }
 
@@ -41,6 +44,12 @@ impl TableUi {
         self.cell_cache = CommonMarkCache::default();
         self.occurrences.clear();
         self.widths.clear();
+        self.copied = false;
+    }
+
+    /// Take the "a table was copied" flag for the frame, if the button fired.
+    pub(crate) fn take_copied(&mut self) -> bool {
+        std::mem::take(&mut self.copied)
     }
 
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, id: &str) {
@@ -72,6 +81,12 @@ impl TableUi {
         // padding into real space above and below the grid.
         ui.vertical(|ui| {
             ui.add_space(table_pad(body_row_height));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("copy csv").clicked() {
+                    ui.ctx().copy_text(table_to_csv(&spec));
+                    self.copied = true;
+                }
+            });
             egui::Grid::new(grid_id).striped(true).show(ui, |ui| {
                 for i in 0..ncols {
                     let cell = spec.header.get(i).map_or("", String::as_str);
@@ -138,6 +153,56 @@ impl TableUi {
 /// row reads as balanced without pushing tables apart from their captions.
 pub(crate) fn table_pad(row_height: f32) -> f32 {
     row_height * 0.75
+}
+
+/// CSV for one table: the header row, then every data row, `\n`-separated.
+/// Cells are rendered Markdown reduced to plain text, then RFC-4180 quoted.
+pub(crate) fn table_to_csv(spec: &TableSpec) -> String {
+    let ncols = spec
+        .header
+        .len()
+        .max(spec.rows.iter().map(Vec::len).max().unwrap_or(0));
+    if ncols == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    push_csv_row(&mut out, &spec.header, ncols);
+    for row in &spec.rows {
+        push_csv_row(&mut out, row, ncols);
+    }
+    out
+}
+
+/// Append one CSV row, padding short rows with empty cells.
+fn push_csv_row(out: &mut String, cells: &[String], ncols: usize) {
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    for i in 0..ncols {
+        if i > 0 {
+            out.push(',');
+        }
+        let cell = cells.get(i).map_or("", String::as_str);
+        out.push_str(&csv_field(&plain_text(cell)));
+    }
+}
+
+/// Visible text of a Markdown cell: inline markup dropped, code and link
+/// labels kept.
+fn plain_text(md: &str) -> String {
+    crate::justify::parse_inline(md)
+        .into_iter()
+        .map(|run| run.text)
+        .collect()
+}
+
+/// Quote a CSV field when it contains a comma, quote or line break.
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
 }
 
 /// Visible text of a cell, with Markdown markup removed before measuring:
@@ -277,7 +342,49 @@ mod tests {
     mod table {
         use super::super::cell_needs_library_fallback;
         use super::super::table_pad;
+        use super::super::table_to_csv;
         use super::super::visible_text;
+        use crate::doc::TableSpec;
+
+        fn spec(header: &[&str], rows: &[&[&str]]) -> TableSpec {
+            TableSpec {
+                header: header.iter().map(|s| s.to_string()).collect(),
+                rows: rows
+                    .iter()
+                    .map(|row| row.iter().map(|s| s.to_string()).collect())
+                    .collect(),
+            }
+        }
+
+        #[test]
+        fn csv_quotes_commas_quotes_and_newlines() {
+            let s = spec(&["a,b", "q\"x", "n\nl"], &[]);
+            assert_eq!(table_to_csv(&s), "\"a,b\",\"q\"\"x\",\"n\nl\"");
+        }
+
+        #[test]
+        fn csv_includes_header_then_rows() {
+            let s = spec(&["h1", "h2"], &[&["1", "2"], &["3", "4"]]);
+            assert_eq!(table_to_csv(&s), "h1,h2\n1,2\n3,4");
+        }
+
+        #[test]
+        fn csv_strips_markdown_and_keeps_code_and_link_text() {
+            let s = spec(&["**b**", "`c`"], &[&["[t](https://x/y)", "plain"]]);
+            assert_eq!(table_to_csv(&s), "b,c\nt,plain");
+        }
+
+        #[test]
+        fn csv_pads_empty_cells_and_short_rows() {
+            let s = spec(&["a", ""], &[&[""], &["x"]]);
+            assert_eq!(table_to_csv(&s), "a,\n,\nx,");
+        }
+
+        #[test]
+        fn csv_single_column_has_no_commas() {
+            let s = spec(&["h"], &[&["1"], &["2"]]);
+            assert_eq!(table_to_csv(&s), "h\n1\n2");
+        }
 
         #[test]
         fn visible_text_drops_markup_for_measurement() {
