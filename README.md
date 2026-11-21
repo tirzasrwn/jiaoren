@@ -145,7 +145,8 @@ A paragraph that contains only one local image is drawn as an image block:
 
 Relative paths resolve against the document directory; the title is ignored
 and the alt text is kept. A destination with spaces can be bracketed:
-`![alt](<a b.png>)`. Paths are used literally, so `%20` is **not** decoded.
+`![alt](<a b.png>)`. Document image paths are passed literally to the file
+loader: `%20` is part of the filename, not an escape for a space.
 **PNG, JPEG, GIF (first frame) and WebP** are decoded locally by the `image`
 crate.
 

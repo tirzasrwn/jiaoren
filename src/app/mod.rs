@@ -40,6 +40,14 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Run a worker body, turning a panic into an error result so the caller's
+/// `active_workers` and `pending` bookkeeping always settles. `label` names the
+/// failed job in the message ("decode panicked", "raster panicked", ...).
+pub(crate) fn catch_worker<T>(label: &'static str, f: impl FnOnce() -> T) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .map_err(|_| format!("{label} panicked"))
+}
+
 /// Apply the app theme to egui so the window chrome and the mermaid renders
 /// agree. `set_theme` selects the style; `set_visuals` guarantees the exact
 /// light/dark palette even when the OS preference is the other one.
@@ -646,9 +654,19 @@ mod tests {
         }
     }
 
+    mod workers {
+        use super::super::catch_worker;
+
+        #[test]
+        fn panic_becomes_an_error_result() {
+            let res = catch_worker("decode", || panic!("boom"));
+            assert_eq!(res.unwrap_err(), "decode panicked");
+            assert_eq!(catch_worker("raster", || 7), Ok(7));
+        }
+    }
+
     mod theme {
         use super::super::{apply_theme, Theme};
-
         #[test]
         fn applying_theme_updates_active_visuals() {
             let ctx = egui::Context::default();

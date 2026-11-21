@@ -18,8 +18,8 @@ use crate::doc::ImageSpec;
 use super::geometry::{
     clamp_pan, diagram_display_size, popup_fit_size, popup_zoom_step, zoom_anchored,
 };
-use super::lock;
 use super::table::table_pad;
+use super::{catch_worker, lock};
 
 /// Texture cache key: the extracted image id plus its file modification time
 /// (nanoseconds since the epoch, `None` when the file is missing). A changed
@@ -31,6 +31,11 @@ type ImageKey = (String, Option<u128>);
 /// box instead of OOMing the app.
 const MAX_IMAGE_SIDE: u32 = 12_000;
 const MAX_IMAGE_ALLOC: u64 = 256 * 1024 * 1024;
+/// Reject the file before reading it. Compressed bombs are bounded here.
+const MAX_IMAGE_FILE_BYTES: u64 = 64 * 1024 * 1024;
+/// Bound the RGBA buffer handed to the texture uploader; `image::Limits` can
+/// still let a decoded grayscale/RGB image expand past this on `to_rgba8`.
+const MAX_IMAGE_RGBA_BYTES: u64 = 256 * 1024 * 1024;
 
 /// How much larger than the cached texture the required texture may get before
 /// it is resized again from the decoded source. The first popup zoom step is
@@ -166,10 +171,10 @@ impl ImageUi {
         while let Ok((key, result)) = self.result_rx.try_recv() {
             got = true;
             self.active_workers = self.active_workers.saturating_sub(1);
+            self.pending.remove(&key);
             if !self.key_is_current(&key) {
                 continue;
             }
-            self.pending.remove(&key);
             match result {
                 Ok(decoded) => {
                     let (iw, ih) = decoded.source.dimensions();
@@ -224,7 +229,11 @@ impl ImageUi {
             thread::spawn(move || {
                 let started = std::time::Instant::now();
                 trace(format_args!("decode start {}", path.display()));
-                let res = decode_and_resize(&path, column, zoom, ppp);
+                let res = catch_worker("decode", || decode_and_resize(&path, column, zoom, ppp))
+                    .and_then(std::convert::identity);
+                if let Err(msg) = &res {
+                    trace(format_args!("decode failed {}: {msg}", path.display()));
+                }
                 trace(format_args!(
                     "decode done {} in {:?}",
                     path.display(),
@@ -715,18 +724,38 @@ fn decode_and_resize(path: &Path, column: f32, zoom: f32, ppp: f32) -> Result<De
     })
 }
 
+/// Bytes an RGBA buffer of `w × h` needs. Pure so the post-decode cap is
+/// unit-testable without allocating the buffer.
+fn rgba_bytes(w: u32, h: u32) -> u64 {
+    u64::from(w) * u64::from(h) * 4
+}
+
 /// Read and decode an image file under strict size limits. Errors name the
 /// reason only; the caller prints the path once.
 fn decode_source(path: &Path) -> Result<RgbaImage, String> {
+    let len = std::fs::metadata(path)
+        .map_err(|e| format!("stat: {e}"))?
+        .len();
+    if len > MAX_IMAGE_FILE_BYTES {
+        return Err(format!(
+            "file is {len} bytes (limit {MAX_IMAGE_FILE_BYTES} bytes)"
+        ));
+    }
     let bytes = std::fs::read(path).map_err(|e| format!("read: {e}"))?;
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| format!("format: {e}"))?;
     reader.limits(image_limits());
-    reader
-        .decode()
-        .map_err(|e| format!("decode: {e}"))
-        .map(|img| img.to_rgba8())
+    let decoded = reader.decode().map_err(|e| format!("decode: {e}"))?;
+    let bytes = rgba_bytes(decoded.width(), decoded.height());
+    if bytes > MAX_IMAGE_RGBA_BYTES {
+        return Err(format!(
+            "image {}x{} needs {bytes} RGBA bytes (limit {MAX_IMAGE_RGBA_BYTES} bytes)",
+            decoded.width(),
+            decoded.height()
+        ));
+    }
+    Ok(decoded.to_rgba8())
 }
 
 /// Decoder limits for untrusted files.
@@ -792,9 +821,16 @@ mod tests {
         }
 
         #[test]
+        fn rgba_cap_rejects_a_12000_square_image() {
+            assert_eq!(rgba_bytes(8192, 8192), MAX_IMAGE_RGBA_BYTES);
+            assert!(rgba_bytes(12_000, 12_000) > MAX_IMAGE_RGBA_BYTES);
+            assert!(rgba_bytes(12_000, 5_000) < MAX_IMAGE_RGBA_BYTES);
+        }
+
+        #[test]
         fn missing_file_is_an_error_not_a_panic() {
             let err = decode_source(Path::new("/nope/definitely-missing.png")).unwrap_err();
-            assert!(err.contains("read:"));
+            assert!(err.contains("stat:"));
         }
 
         #[test]

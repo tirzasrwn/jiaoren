@@ -5,8 +5,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::mermaid::file_url;
-
 /// Failure to load a Markdown document from disk.
 #[derive(Debug, thiserror::Error)]
 pub enum DocError {
@@ -836,6 +834,18 @@ fn is_local_image(src: &str) -> bool {
         && !src.contains("://")
 }
 
+/// A `file://` URI for the Markdown library's file loader. The path is used
+/// literally (the loader does not percent-decode), so a destination with
+/// whitespace is angle-bracketed to survive Markdown parsing.
+fn file_uri(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    if raw.chars().any(char::is_whitespace) {
+        format!("<file://{raw}>")
+    } else {
+        format!("file://{raw}")
+    }
+}
+
 fn rewrite_images(mut rest: &str, doc_dir: &Path) -> String {
     let mut out = String::with_capacity(rest.len());
     while let Some(start) = rest.find("![") {
@@ -865,10 +875,7 @@ fn rewrite_images(mut rest: &str, doc_dir: &Path) -> String {
             rest = &rest[2..];
             continue;
         }
-        out.push_str(&format!(
-            "![{alt}](file://{})",
-            file_url(&doc_dir.join(target))
-        ));
+        out.push_str(&format!("![{alt}]({})", file_uri(&doc_dir.join(target))));
         rest = &rest[mid + 2 + end..];
     }
     out.push_str(rest);
@@ -1564,7 +1571,7 @@ mod tests {
             let p = prepare(md, Path::new("/docs"));
             let out = p.paragraphs.values().next().unwrap();
             assert!(out.contains("![a](file:///docs/x(1).png)"));
-            assert!(out.contains("![b](file:///docs/a%23b.png)"));
+            assert!(out.contains("![b](file:///docs/a#b.png)"));
         }
     }
 
@@ -1681,7 +1688,7 @@ mod tests {
             let p = prepare(md, Path::new("/docs"));
             assert!(p.images.is_empty());
             let source = p.paragraphs.values().next().unwrap();
-            assert!(source.contains("![x](file:///docs/a%20b.png)"));
+            assert!(source.contains("![x](<file:///docs/a b.png>)"));
         }
     }
 

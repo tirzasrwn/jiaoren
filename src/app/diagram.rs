@@ -12,9 +12,9 @@ use super::geometry::{
     bucket_for_scale, bucket_scale, clamp_pan, diagram_display_size, keep_bucket, popup_fit_size,
     popup_zoom_step, raster_key, reanchor, zoom_anchored, RasterKey,
 };
-use super::lock;
 use super::raster::{rasterize, Raster, RasterJob};
 use super::table::table_pad;
+use super::{catch_worker, lock};
 
 /// A render job handed to a worker thread: (diagram id, mermaid source, theme).
 type Job = (String, String, Theme);
@@ -299,9 +299,12 @@ impl DiagramUi {
                 let renderer = Arc::clone(&self.renderer);
                 let tx = self.result_tx.clone();
                 thread::spawn(move || {
-                    let res = renderer
-                        .render(&id, &source, theme)
-                        .map_err(|e| e.to_string());
+                    let res = catch_worker("diagram", || {
+                        renderer
+                            .render(&id, &source, theme)
+                            .map_err(|e| e.to_string())
+                    })
+                    .and_then(std::convert::identity);
                     let _ = tx.send(WorkerMsg::Diagram((id, theme, res)));
                 });
                 continue;
@@ -318,7 +321,8 @@ impl DiagramUi {
                 self.active_workers += 1;
                 let tx = self.result_tx.clone();
                 thread::spawn(move || {
-                    let res = rasterize(&path, w, h, scale);
+                    let res = catch_worker("raster", || rasterize(&path, w, h, scale))
+                        .and_then(std::convert::identity);
                     let _ = tx.send(WorkerMsg::Raster(key, res));
                 });
                 continue;
