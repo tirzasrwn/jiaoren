@@ -6,7 +6,7 @@ fences drawn as real diagrams.
 
 Keyboard-first, almost no chrome, live-reloads when the file changes on disk.
 
-![Opening examples/demo.md: justified prose with inline code and links, dragging a phrase and `y` copying the selection, a vim-style `/` live search that highlights matches as you type with Ctrl+W erasing a word, Enter and `n` jumping between matches, clicking the table icon to copy CSV, searching for the diagram and opening it in the zoomable popup, and the Catppuccin dark theme](docs/assets/demo.gif)
+![Opening examples/demo.md: justified prose with inline code and links, dragging a phrase and `y` copying the selection, a vim-style `/` live search that highlights matches as you type with Ctrl+W erasing a word, Enter and `n` jumping between matches, hovering a table row, clicking the table icon to copy CSV, searching for the diagram and opening it in the zoomable popup, the wrapped code block with line numbers, and the Catppuccin dark theme](docs/assets/demo.gif)
 
 ## Why "jiaoren"?
 
@@ -99,12 +99,20 @@ scrolls, `gg` returns to the start). Dragging across text selects it; a plain
 click clears the selection. A plain click on a diagram or local image opens the
 zoom popup; dragging from it pans the document instead.
 
+Hovering a table row tints the whole row (all columns) with the theme's
+`surface1`, and the header row with `surface2`, so long rows are easy to trace.
+
 Every table also carries a small copy icon at its top-right (tooltip: “Copy
 table as CSV”); clicking it copies the table as CSV (header row first, Markdown
 stripped from cells, fields quoted when they contain commas, quotes or line
 breaks). Code blocks have the same icon over their top-right corner (tooltip
 “Copy code”) and copy the block verbatim, with the trailing newline stripped.
 Copy buttons show a 1.5-second bottom-left status line and never steal focus.
+
+Code blocks soft-wrap to the reading column and show a right-aligned line
+number per source line. A wrapped line continues on the next row with an empty
+gutter. Numbers are decoration: search, selection and both copy paths use the
+raw source text, so the clipboard never contains them.
 
 `Ctrl+C` follows the same cancel-then-quit ladder as `esc`; one press per Ctrl
 hold is acted on, so holding it cannot skip from clearing the search to quitting.
@@ -214,9 +222,9 @@ document cannot exfiltrate data or load remote resources during rendering.
 
 ## Known limitations
 
-- Wide tables wrap instead of getting a horizontal scrollbar. Long code lines
-  do not wrap: they overflow the reading column and pan with `h`/`l` (or the
-  mouse); use `+` to zoom in when the text is hard to read.
+- Wide tables wrap instead of getting a horizontal scrollbar, and code lines
+  wrap at the reading column (a long token breaks at any character). Use `+` to
+  zoom in when the text is hard to read.
 - Body paragraphs are justified by a built-in layout: bold/italic/code/strike/
   links are supported, but a paragraph containing an inline image (one that is
   not alone in its paragraph) or raw HTML falls
