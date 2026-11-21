@@ -23,6 +23,20 @@ pub(crate) struct RasterJob {
     pub(crate) scale: f32,
 }
 
+/// Longest side the GPU texture accepts; egui rejects (and panics on) larger
+/// images. Huge diagrams are scaled down instead of uploaded at full size.
+pub(crate) const MAX_TEXTURE_SIDE: u32 = 16384;
+
+/// `scale` reduced so neither side exceeds [`MAX_TEXTURE_SIDE`].
+pub(crate) fn capped_scale(w: f32, h: f32, scale: f32) -> f32 {
+    let longest = w.max(h) * scale;
+    if longest <= MAX_TEXTURE_SIDE as f32 {
+        scale
+    } else {
+        scale * (MAX_TEXTURE_SIDE as f32 / longest)
+    }
+}
+
 /// `usvg` options built once with system fonts loaded; without them `<text>`
 /// labels vanish from every diagram.
 fn svg_options() -> &'static resvg::usvg::Options<'static> {
@@ -45,8 +59,9 @@ pub(crate) fn rasterize(
     let bytes = std::fs::read(path).map_err(|e| format!("read svg: {e}"))?;
     let tree = resvg::usvg::Tree::from_data(&bytes, svg_options())
         .map_err(|e| format!("parse svg: {e}"))?;
-    let pw = (w * scale).ceil().max(1.0) as u32;
-    let ph = (h * scale).ceil().max(1.0) as u32;
+    let scale = capped_scale(w, h, scale);
+    let pw = ((w * scale).ceil().max(1.0) as u32).min(MAX_TEXTURE_SIDE);
+    let ph = ((h * scale).ceil().max(1.0) as u32).min(MAX_TEXTURE_SIDE);
     let mut pixmap = resvg::tiny_skia::Pixmap::new(pw, ph)
         .ok_or_else(|| format!("bad raster size {pw}x{ph}"))?;
     resvg::render(
@@ -64,6 +79,22 @@ pub(crate) fn rasterize(
 mod tests {
     mod raster {
         use super::super::rasterize;
+
+        #[test]
+        fn huge_svg_is_capped_below_the_texture_limit() {
+            // 1 x 100000 at scale 2 would be 200000 px tall, far past the GPU
+            // texture limit. The raster must be scaled down to fit.
+            let p = std::env::temp_dir().join(format!("jiaoren-huge-{}.svg", std::process::id()));
+            std::fs::write(
+                &p,
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 100000"><rect width="1" height="100000" fill="#ff0000"/></svg>"##,
+            )
+            .unwrap();
+            let img = rasterize(&p, 1.0, 100000.0, 2.0).unwrap();
+            assert_eq!(img.size[1], super::super::MAX_TEXTURE_SIDE as usize);
+            assert!(img.size[0] >= 1);
+            let _ = std::fs::remove_file(&p);
+        }
 
         #[test]
         fn rasterize_produces_scaled_premultiplied_rgba() {
