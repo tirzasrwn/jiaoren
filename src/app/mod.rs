@@ -202,9 +202,9 @@ fn status_area(ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui)) {
         });
 }
 
-/// Plain bottom-left `/query` line: no frame or background, so the document
-/// stays visible behind it like vim's command line. Monospace keeps the ASCII
-/// bar cursor available and lets a long query show its tail.
+/// Plain bottom-left `/query` line: monospace, on the same solid chip as the
+/// status so it stays legible over the document, with the ASCII bar cursor and
+/// the query tail shown when the line is longer than the window.
 fn prompt_area(ctx: &egui::Context, text: String) {
     let screen = ctx.content_rect();
     egui::Area::new(egui::Id::new("jiaoren-search-line"))
@@ -212,50 +212,56 @@ fn prompt_area(ctx: &egui::Context, text: String) {
         .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
         .interactable(false)
         .show(ctx, |ui| {
-            let color = ui.visuals().text_color();
-            let font = egui::TextStyle::Monospace.resolve(ui.style());
-            let measure = |s: &str| {
-                ui.fonts_mut(|f| {
-                    f.layout_no_wrap(s.to_string(), font.clone(), color)
-                        .size()
-                        .x
-                })
-            };
-            let max_width = (screen.width() * 0.8).max(40.0);
-            // Keep the leading `/` (vim always shows it) and trim only the query
-            // tail, so the caret at the end stays visible.
-            let (prefix, body) = match text.strip_prefix('/') {
-                Some(body) => ("/", body),
-                None => ("", text.as_str()),
-            };
-            let shown = format!(
-                "{prefix}{}",
-                tail_within(body, max_width - measure(prefix), &measure)
-            );
-            let width = measure(&shown);
-            let bottom = screen.bottom() - 8.0;
-            let ime_rect = egui::Rect::from_min_size(
-                egui::Pos2::new(screen.left() + 8.0, bottom - 20.0),
-                egui::vec2(max_width, 20.0),
-            );
-            let cursor_rect = egui::Rect::from_min_size(
-                egui::Pos2::new(screen.left() + 8.0 + width, bottom - 20.0),
-                egui::vec2(1.0, 20.0),
-            );
-            // Ask the integration to route IME commits here while the command
-            // line is open; preedit is deliberately ignored.
-            ctx.output_mut(|o| {
-                o.ime = Some(egui::output::IMEOutput {
-                    purpose: egui::IMEPurpose::Normal,
-                    rect: ime_rect,
-                    cursor_rect,
-                    should_interrupt_composition: false,
+            // Same chip as the committed search status, for the same reason.
+            egui::Frame::new()
+                .fill(ui.visuals().panel_fill)
+                .inner_margin(egui::Margin::symmetric(4, 2))
+                .show(ui, |ui| {
+                    let color = ui.visuals().text_color();
+                    let font = egui::TextStyle::Monospace.resolve(ui.style());
+                    let measure = |s: &str| {
+                        ui.fonts_mut(|f| {
+                            f.layout_no_wrap(s.to_string(), font.clone(), color)
+                                .size()
+                                .x
+                        })
+                    };
+                    let max_width = (screen.width() * 0.8).max(40.0);
+                    // Keep the leading `/` (vim always shows it) and trim only
+                    // the query tail, so the caret at the end stays visible.
+                    let (prefix, body) = match text.strip_prefix('/') {
+                        Some(body) => ("/", body),
+                        None => ("", text.as_str()),
+                    };
+                    let shown = format!(
+                        "{prefix}{}",
+                        tail_within(body, max_width - measure(prefix), &measure)
+                    );
+                    let width = measure(&shown);
+                    let bottom = screen.bottom() - 8.0;
+                    let ime_rect = egui::Rect::from_min_size(
+                        egui::Pos2::new(screen.left() + 8.0, bottom - 24.0),
+                        egui::vec2(max_width, 24.0),
+                    );
+                    let cursor_rect = egui::Rect::from_min_size(
+                        egui::Pos2::new(screen.left() + 12.0 + width, bottom - 20.0),
+                        egui::vec2(1.0, 20.0),
+                    );
+                    // Ask the integration to route IME commits here while the
+                    // command line is open; preedit is deliberately ignored.
+                    ctx.output_mut(|o| {
+                        o.ime = Some(egui::output::IMEOutput {
+                            purpose: egui::IMEPurpose::Normal,
+                            rect: ime_rect,
+                            cursor_rect,
+                            should_interrupt_composition: false,
+                        });
+                    });
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(shown).monospace().color(color))
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                    );
                 });
-            });
-            ui.add(
-                egui::Label::new(egui::RichText::new(shown).monospace().color(color))
-                    .wrap_mode(egui::TextWrapMode::Extend),
-            );
         });
 }
 
@@ -279,6 +285,21 @@ fn tail_within(text: &str, max_width: f32, measure: &dyn Fn(&str) -> f32) -> Str
 enum SearchEdit {
     Text(String),
     Backspace,
+    /// `Ctrl+W`: delete the trailing word (vim's insert-mode word erase).
+    DeleteWord,
+}
+
+/// Erase one trailing word plus the whitespace before it: `"foo bar "` and
+/// `"foo bar"` both become `"foo "`, matching vim's `Ctrl+W`.
+fn truncate_word_tail(query: &mut String) {
+    let trimmed = query.trim_end_matches(char::is_whitespace);
+    let cut = trimmed
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    query.truncate(cut);
 }
 
 /// One frame of raw search input, stopping at Enter so later text cannot be
@@ -331,6 +352,14 @@ fn read_search_batch(events: &[egui::Event]) -> SearchBatch {
                 }
             }
             egui::Event::Ime(_) => {} // preedit: ignored
+            egui::Event::Key {
+                key: egui::Key::W,
+                modifiers,
+                pressed: true,
+                ..
+            } if modifiers.ctrl || modifiers.command => {
+                batch.edits.push(SearchEdit::DeleteWord);
+            }
             egui::Event::Key {
                 key: egui::Key::Backspace,
                 pressed: true,
@@ -861,6 +890,7 @@ impl eframe::App for App {
                                 SearchEdit::Backspace => {
                                     query.pop();
                                 }
+                                SearchEdit::DeleteWord => truncate_word_tail(query),
                             }
                         }
                     }
@@ -1177,7 +1207,9 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     mod search_batch {
-        use super::super::{read_search_batch, sanitize_paste, tail_within, SearchEdit};
+        use super::super::{
+            read_search_batch, sanitize_paste, tail_within, truncate_word_tail, SearchEdit,
+        };
         use egui::{Event, Key, Modifiers};
 
         fn pressed(key: Key) -> Event {
@@ -1218,6 +1250,36 @@ mod tests {
             // Multi-byte scalars: trimming by bytes would split a char.
             assert_eq!(tail_within("ééé３", 1.0, &chars), "３");
             assert_eq!(tail_within("", 0.0, &chars), "");
+        }
+
+        #[test]
+        fn ctrl_w_erases_the_trailing_word_like_vim() {
+            let erase = |q: &str| {
+                let mut s = q.to_string();
+                truncate_word_tail(&mut s);
+                s
+            };
+            assert_eq!(erase("foo bar"), "foo ");
+            assert_eq!(erase("foo bar  "), "foo ");
+            assert_eq!(erase("bar"), "");
+            assert_eq!(erase("   "), "");
+            assert_eq!(erase(""), "");
+            assert_eq!(erase("héllo wörld"), "héllo ");
+            // Typing `a b` then Ctrl+W twice empties the query.
+            assert_eq!(erase(&erase("a b")), "");
+        }
+
+        #[test]
+        fn ctrl_w_is_a_delete_word_edit_not_a_typed_w() {
+            let batch = read_search_batch(&[Event::Key {
+                key: Key::W,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::CTRL,
+            }]);
+            assert_eq!(batch.edits, vec![SearchEdit::DeleteWord]);
+            assert!(!batch.cancel);
         }
     }
 
