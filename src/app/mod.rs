@@ -202,6 +202,27 @@ fn status_area(ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui)) {
         });
 }
 
+/// Plain bottom-left `/query` line: no frame or background, so the document
+/// stays visible behind it like vim's command line.
+fn prompt_area(ctx: &egui::Context, text: String) {
+    egui::Area::new(egui::Id::new("jiaoren-search-line"))
+        .order(egui::Order::Middle)
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            ui.add(
+                egui::Label::new(egui::RichText::new(text).color(ui.visuals().text_color()))
+                    .wrap_mode(egui::TextWrapMode::Extend),
+            );
+        });
+}
+
+/// One raw command-line edit in event order.
+enum SearchEdit {
+    Text(String),
+    Backspace,
+}
+
 /// The jiaoren window: document state, theme/zoom, scrolling, and the HTML
 /// render hook.
 pub(crate) struct App {
@@ -435,6 +456,11 @@ impl App {
     /// never takes layout from the reading column; the document's bottom
     /// padding keeps text clear of it.
     fn draw_status(&mut self, ctx: &egui::Context) {
+        if self.search.borrow().is_open() {
+            let line = format!("/{}▏", self.search.borrow().query());
+            prompt_area(ctx, line);
+            return;
+        }
         if let Some(status) = &self.status {
             let remaining = status.until.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -461,48 +487,6 @@ impl App {
                 );
             });
         }
-    }
-
-    /// The `/` command line: a single-line edit at the status position, focused
-    /// when nothing else owns the keyboard.
-    fn draw_search_prompt(&mut self, ctx: &egui::Context) {
-        let input_id = egui::Id::new("jiaoren-search-input");
-        // Focus before the widget runs: the TextEdit then sees this frame's
-        // text/paste/IME events, and a `/` that opened the prompt in this same
-        // frame can accept a paste. The widget is drawn below, so egui's
-        // dead-man focus switch keeps the id.
-        ctx.memory_mut(|m| m.request_focus(input_id));
-        let mut text = self.search.borrow_mut().input.take().unwrap_or_default();
-        egui::Area::new(egui::Id::new("jiaoren-search"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
-            .show(ctx, |ui| {
-                ui.set_max_width(500.0);
-                ui.add(
-                    egui::TextEdit::singleline(&mut text)
-                        .id(input_id)
-                        .desired_width(500.0)
-                        .hint_text("search"),
-                );
-            });
-        self.search.borrow_mut().input = Some(text);
-    }
-
-    /// Confirm the `/` buffer: compute hits over the last drawn block texts,
-    /// remember them, jump to the first match and close the command line.
-    fn confirm_search(&mut self, ctx: &egui::Context) {
-        let Some(pattern) = self.search.borrow_mut().take_input() else {
-            return;
-        };
-        let mut s = self.search.borrow_mut();
-        // Recorded block texts in document order from the previous frame.
-        let texts = s.texts().to_vec();
-        s.state.set_pattern(&texts, &pattern);
-        let target = s.state.current_block();
-        self.jump_to = target;
-        // The prompt was drawn before the keys this frame; repaint so the
-        // status line replaces it even when there is nothing to jump to.
-        ctx.request_repaint();
     }
 
     /// Update the text selection from this frame's pointer events, using the
@@ -692,10 +676,6 @@ impl eframe::App for App {
         // already consumed this frame's text, paste and IME events. Enter then
         // confirms the current buffer instead of the previous frame's.
         let prompt_open = self.search.borrow().is_open();
-        let mut prompt_drawn = prompt_open;
-        if !popup_open && prompt_open {
-            self.draw_search_prompt(ui.ctx());
-        }
         // Pointer selection runs before the scroll area so a press on text can
         // suppress drag-panning in the same frame.
         if !popup_open && !prompt_open {
@@ -712,66 +692,78 @@ impl eframe::App for App {
         }
         let mut acts: Vec<Action> = Vec::new();
         if !popup_open && prompt_open {
-            // While the command line owns the keyboard, document keys are
-            // suppressed: `q`, `t`, `r`, `0`, `/`, … reach the TextEdit.
-            let mut keys: Vec<(egui::Key, egui::Modifiers)> = Vec::new();
+            // Raw vim-style input: no widget, no focus. Text appends, Backspace
+            // deletes a unicode char, Enter commits, Esc/Ctrl+C restores the
+            // pre-`/` search. Every other document key is ignored.
+            let mut edits: Vec<SearchEdit> = Vec::new();
+            let mut enter = false;
+            let mut escape = false;
+            let mut ctrl_c = false;
             let mut copy = false;
             ui.input(|i| {
                 for ev in &i.events {
-                    if let egui::Event::Key {
-                        key,
-                        modifiers,
-                        pressed: true,
-                        ..
-                    } = ev
-                    {
-                        keys.push((*key, *modifiers));
-                    } else if matches!(ev, egui::Event::Copy) {
-                        copy = true;
+                    match ev {
+                        egui::Event::Text(text) if !text.is_empty() => {
+                            edits.push(SearchEdit::Text(text.clone()));
+                        }
+                        egui::Event::Paste(text) if !text.is_empty() => {
+                            edits.push(SearchEdit::Text(text.clone()));
+                        }
+                        egui::Event::Key {
+                            key: egui::Key::Backspace,
+                            pressed: true,
+                            ..
+                        } => edits.push(SearchEdit::Backspace),
+                        egui::Event::Key {
+                            key: egui::Key::Enter,
+                            pressed: true,
+                            ..
+                        } => enter = true,
+                        egui::Event::Key {
+                            key: egui::Key::Escape,
+                            pressed: true,
+                            ..
+                        } => escape = true,
+                        egui::Event::Key {
+                            key: egui::Key::C,
+                            modifiers,
+                            pressed: true,
+                            ..
+                        } if modifiers.ctrl || modifiers.command => ctrl_c = true,
+                        egui::Event::Copy => copy = true,
+                        _ => {}
                     }
                 }
             });
             let ctx = ui.ctx().clone();
-            // Process Copy before keys: a same-frame Enter+Copy cancels the
-            // prompt instead of confirming and then clearing. One Copy per Ctrl
-            // hold is accepted, so autorepeats cannot advance the ladder.
             let mut cancelled = false;
             if copy && self.copy_guard.accept() {
                 self.cancel_search(&ctx);
                 cancelled = true;
             }
-            // A single Ctrl+C may arrive as Copy and as Key::C; only the first
-            // cancel in this frame may act, so a prompt cancel never also
-            // clears the committed pattern behind it.
-            for (key, modifiers) in keys {
-                match key {
-                    // Enter first, so a following `n` in the same batch steps.
-                    egui::Key::Enter if self.search.borrow().is_open() => {
-                        self.confirm_search(&ctx);
+            if !cancelled && (escape || ctrl_c) {
+                self.cancel_search(&ctx);
+                cancelled = true;
+            }
+            if !cancelled {
+                let mut changed = false;
+                for edit in edits {
+                    match edit {
+                        SearchEdit::Text(text) => {
+                            self.search.borrow_mut().type_text(&text);
+                        }
+                        SearchEdit::Backspace => self.search.borrow_mut().backspace(),
                     }
-                    egui::Key::Escape if !cancelled => {
-                        self.cancel_search(&ctx);
-                        cancelled = true;
-                    }
-                    egui::Key::C if !cancelled && (modifiers.ctrl || modifiers.command) => {
-                        self.cancel_search(&ctx);
-                        cancelled = true;
-                    }
-                    // A character key typed before Enter stays text; only a
-                    // key after the prompt closed can step.
-                    egui::Key::N
-                        if !self.search.borrow().is_open()
-                            && modifiers.matches_exact(egui::Modifiers::SHIFT) =>
-                    {
-                        self.step_search(-1, &ctx);
-                    }
-                    egui::Key::N
-                        if !self.search.borrow().is_open()
-                            && modifiers.matches_exact(egui::Modifiers::NONE) =>
-                    {
-                        self.step_search(1, &ctx);
-                    }
-                    _ => {}
+                    changed = true;
+                }
+                if changed {
+                    let target = self.search.borrow().state.current_block();
+                    self.jump_to = target;
+                    ctx.request_repaint();
+                }
+                if enter {
+                    self.search.borrow_mut().commit();
+                    ctx.request_repaint();
                 }
             }
         } else if !popup_open {
@@ -868,24 +860,6 @@ impl eframe::App for App {
                     self.set_status("copied markdown");
                 }
                 Action::SearchOpen => {
-                    // The printable event for the `/` that opened the prompt
-                    // must not become part of the pattern when the prompt is
-                    // drawn (and focused) in this same frame. Drop just the
-                    // first `/` text event.
-                    let mut dropped = false;
-                    ui.input_mut(|i| {
-                        i.events.retain(|ev| {
-                            if !dropped {
-                                if let egui::Event::Text(text) = ev {
-                                    if text == "/" {
-                                        dropped = true;
-                                        return false;
-                                    }
-                                }
-                            }
-                            true
-                        });
-                    });
                     self.search.borrow_mut().open();
                     ui.ctx().request_repaint();
                 }
@@ -911,15 +885,6 @@ impl eframe::App for App {
                 Action::Quit => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
             }
         }
-        // If `/` opened the prompt this frame, draw it now: the TextEdit gets
-        // focus before it handles events, so a paste/type in this frame lands in
-        // the buffer.
-        if !prompt_drawn && !popup_open && self.search.borrow().is_open() {
-            self.draw_search_prompt(ui.ctx());
-            prompt_drawn = true;
-            ui.ctx().request_repaint();
-        }
-
         {
             let mut d = self.diagrams.borrow_mut();
             d.theme = self.theme;
@@ -1063,15 +1028,15 @@ impl eframe::App for App {
         if self.code.borrow_mut().take_copied() {
             self.set_status("copied code");
         }
-        // The prompt already occupied the bottom-left this frame; the next
-        // frame shows the confirmed status instead of drawing both at once.
-        if !prompt_drawn {
-            self.draw_status(ui.ctx());
-        }
+        self.draw_status(ui.ctx());
         // Final cursor wins over the scroll area's Grab: controls first, text
-        // second, pan feedback third.
-        if !popup_open && !prompt_open {
-            if let Some(pos) = ui.ctx().pointer_hover_pos() {
+        // second, pan feedback third. The plain search command line is a text
+        // surface; popups keep their own cursors.
+        if !popup_open {
+            if prompt_open {
+                ui.ctx()
+                    .output_mut(|o| o.cursor_icon = egui::CursorIcon::Text);
+            } else if let Some(pos) = ui.ctx().pointer_hover_pos() {
                 let (control, over_text, selecting) = {
                     let s = self.search.borrow();
                     (

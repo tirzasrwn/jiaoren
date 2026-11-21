@@ -13,8 +13,10 @@ pub(crate) struct SearchUi {
     pub(crate) state: SearchState,
     /// Live text selection over the same block registry.
     pub(crate) selection: SelectionState,
-    /// `Some(buffer)` while the command line is open.
+    /// `Some(query)` while the command line is open.
     pub(crate) input: Option<String>,
+    /// State to restore when `/` input is cancelled with Esc/Ctrl+C.
+    backup: Option<SearchState>,
     /// Block texts in draw order, rebuilt every frame. Keys run before the
     /// frame is drawn, so they see the previous frame's list.
     texts: Vec<String>,
@@ -41,6 +43,7 @@ impl SearchUi {
             state: SearchState::default(),
             selection: SelectionState::default(),
             input: None,
+            backup: None,
             texts: Vec::new(),
             tops: Vec::new(),
             ys: Vec::new(),
@@ -184,24 +187,60 @@ impl SearchUi {
         self.state.block_highlights(block)
     }
 
-    /// Open the command line with an empty buffer.
+    /// Open the command line with an empty query, remembering the committed
+    /// search so Esc/Ctrl+C can restore it.
     pub(crate) fn open(&mut self) {
+        self.backup = Some(self.state.clone());
         self.input = Some(String::new());
+        self.state.clear();
     }
 
-    /// Close the command line, discarding the buffer.
+    /// Close the command line and restore the pre-`/` search state.
     pub(crate) fn cancel(&mut self) {
+        if let Some(state) = self.backup.take() {
+            self.state = state;
+        }
         self.input = None;
+    }
+
+    /// Keep the live search and leave input mode.
+    pub(crate) fn commit(&mut self) {
+        self.input = None;
+        self.backup = None;
+    }
+
+    /// Current query text while input mode is open.
+    pub(crate) fn query(&self) -> &str {
+        self.input.as_deref().unwrap_or_default()
+    }
+
+    /// Append raw typed/pasted text and recompute hits live.
+    pub(crate) fn type_text(&mut self, text: &str) {
+        if let Some(query) = self.input.as_mut() {
+            query.push_str(text);
+        }
+        self.live_update();
+    }
+
+    /// Delete the last char (unicode-aware) and recompute live.
+    pub(crate) fn backspace(&mut self) {
+        if let Some(query) = self.input.as_mut() {
+            query.pop();
+        }
+        self.live_update();
+    }
+
+    /// Recompute the live match set from the current query. An empty query
+    /// clears hits but stays in input mode.
+    fn live_update(&mut self) {
+        let pattern = self.query().to_string();
+        let texts = self.texts.clone();
+        self.state.set_pattern(&texts, &pattern);
     }
 
     /// Whether the command line owns the keyboard.
     pub(crate) fn is_open(&self) -> bool {
         self.input.is_some()
-    }
-
-    /// Take the confirmed pattern and close the command line.
-    pub(crate) fn take_input(&mut self) -> Option<String> {
-        self.input.take()
     }
 }
 
@@ -226,18 +265,65 @@ mod tests {
         }
 
         #[test]
-        fn open_cancel_and_take_input() {
+        fn live_input_updates_backspace_and_cancel_restore() {
             let mut s = SearchUi::new();
-            assert!(!s.is_open());
+            s.texts = vec!["abc one".to_string(), "abc two".to_string()];
+            // Previous committed search to restore on cancel.
+            s.state.set_pattern(&s.texts.clone(), "two");
+            assert_eq!(s.state.pattern.as_deref(), Some("two"));
             s.open();
             assert!(s.is_open());
+            assert_eq!(s.query(), "");
+            assert!(s.state.pattern.is_none(), "opening clears live state");
+
+            s.type_text("abc");
+            assert_eq!(s.query(), "abc");
+            assert_eq!(s.state.hits.len(), 2);
+            assert_eq!(s.state.status_text().as_deref(), Some("/abc [1/2]"));
+            s.backspace();
+            assert_eq!(s.query(), "ab");
+            assert_eq!(s.state.hits.len(), 2);
+
             s.cancel();
             assert!(!s.is_open());
+            assert_eq!(s.state.pattern.as_deref(), Some("two"));
+            assert_eq!(s.state.hits.len(), 1);
+        }
+
+        #[test]
+        fn enter_commit_keeps_live_search_and_empty_query_clears_hits() {
+            let mut s = SearchUi::new();
+            s.texts = vec!["hello world".to_string()];
+            s.open();
+            s.type_text("world");
+            assert_eq!(s.state.status_text().as_deref(), Some("/world [1/1]"));
+            s.commit();
+            assert!(!s.is_open());
+            assert_eq!(s.state.pattern.as_deref(), Some("world"));
 
             s.open();
-            s.input = Some("mermaid".to_string());
-            assert_eq!(s.take_input().as_deref(), Some("mermaid"));
-            assert!(!s.is_open());
+            s.type_text("x");
+            s.backspace();
+            assert_eq!(s.query(), "");
+            assert!(s.state.hits.is_empty());
+            assert!(s.is_open(), "empty query stays in input mode");
+            s.commit();
+            assert_eq!(s.state.pattern, None);
+        }
+
+        #[test]
+        fn backspace_is_one_unicode_char() {
+            let mut s = SearchUi::new();
+            s.texts = vec!["é東".to_string()];
+            s.open();
+            s.type_text("é東");
+            assert_eq!(s.query(), "é東");
+            s.backspace();
+            assert_eq!(s.query(), "é");
+            s.backspace();
+            assert_eq!(s.query(), "");
+            s.backspace();
+            assert_eq!(s.query(), "");
         }
     }
 }

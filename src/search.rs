@@ -75,7 +75,7 @@ pub fn step(current: usize, len: usize, dir: i32) -> usize {
 }
 
 /// The active search: pattern, every hit, and the current match index.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct SearchState {
     /// Confirmed pattern, `None` when no search is active.
     pub pattern: Option<String>,

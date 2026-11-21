@@ -81,9 +81,11 @@ To go back to the defaults, delete (or comment out) the
 | `esc` / `ctrl+c` | cancel prompt, else clear search, else clear selection, else quit |
 | `q` | quit |
 
-Search indexes the text `justify` paints: soft-wrapped source lines join with one
-space, emphasis markup is dropped, link labels and code text are kept, and code
-blocks are literal. Library-routed blocks are not searchable — blockquotes, and
+`/` opens a plain vim-style command line at the bottom-left: matches update live
+as you type, Backspace edits, Esc/Ctrl+C restores the previous search, and
+Enter commits. Search indexes the text `justify` paints: soft-wrapped source
+lines join with one space, emphasis markup is dropped, link labels and code text
+are kept, and code blocks are literal. Library-routed blocks are not searchable — blockquotes, and
 paragraphs or table cells containing inline images or raw HTML. Inline-image
 syntax in list items and headings matches its literal `!alt`. A hit made only of
 a space gap between words is not painted, so it has no highlight. Patterns are
