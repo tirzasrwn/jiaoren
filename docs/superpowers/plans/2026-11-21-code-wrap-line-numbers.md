@@ -239,7 +239,77 @@ git commit -m "feat: wrapped code blocks with line numbers"
 
 ---
 
-### Task 4: Docs and demo
+### Task 4: Table row hover highlight
+
+**Files:**
+- Modify: `src/app/table.rs` (`TableUi`, `show`, row fills; tests in `mod table`)
+
+**Interfaces:**
+- Produces: `pub(crate) fn row_fill_hover(dark: bool, row_index: usize) -> egui::Color32` — `surface2` for row 0 (header), `surface1` otherwise, from `crate::theme::palette`.
+- Produces: `pub(crate) fn hovered_row(rects: &[egui::Rect], pos: egui::Pos2) -> Option<usize>` — first rect containing `pos`.
+- Consumes: existing `row_fill`, `table_fills`, `theme::palette`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```rust
+#[test]
+fn hover_fill_uses_surface2_header_and_surface1_rows() {
+    let hex = |c: egui::Color32| crate::theme::Rgb(c.r(), c.g(), c.b()).to_hex();
+    assert_eq!(hex(row_fill_hover(false, 0)), "#acb0be");
+    assert_eq!(hex(row_fill_hover(false, 1)), "#bcc0cc");
+    assert_eq!(hex(row_fill_hover(true, 0)), "#5b6078");
+    assert_eq!(hex(row_fill_hover(true, 2)), "#494d64");
+}
+
+#[test]
+fn hovered_row_is_the_containing_rect_or_none() {
+    let rect = |y: f32| egui::Rect::from_min_size(egui::pos2(10.0, y), egui::vec2(100.0, 20.0));
+    let rects = vec![rect(0.0), rect(20.0), rect(40.0)];
+    assert_eq!(hovered_row(&rects, egui::pos2(50.0, 10.0)), Some(0));
+    assert_eq!(hovered_row(&rects, egui::pos2(50.0, 45.0)), Some(2));
+    assert_eq!(hovered_row(&rects, egui::pos2(5.0, 10.0)), None);
+    assert_eq!(hovered_row(&[], egui::pos2(5.0, 10.0)), None);
+}
+```
+
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `cargo test hover_fill_uses_surface2_header_and_surface1_rows hovered_row_is_the_containing_rect_or_none`
+Expected: FAIL — helpers not found.
+
+- [ ] **Step 3: Implement the helpers**
+
+`row_fill_hover` takes `crate::theme::palette(if dark { Dark } else { Light })` and returns `.surface2`/`.surface1`. `hovered_row` returns the first `rect.contains(pos)` index.
+
+- [ ] **Step 4: Wire the hover into `TableUi::show`**
+
+- Add `hover: HashMap<String, usize>` to `TableUi`; clear it in `reset`, leave it across frames in `begin_frame`.
+- Before building the grid, read `let hovered = self.hover.get(id).copied();`.
+- `Grid::with_row_color` returns `row_fill_hover(dark, row)` when `Some(row) == hovered`, else `row_fill(dark, row)`.
+- Record each row's rect during the draw: before the row's first cell take `let top = ui.cursor().min.y`; before `end_row()` take the grid's left/right (`ui.min_rect()`) and build `Rect::from_min_max(pos2(left, top), pos2(right, ui.cursor().min.y))`; push header first, then each data row.
+- After the grid closes, `let next = ui.ctx().pointer_hover_pos().and_then(|p| hovered_row(&row_rects, p));` then update `self.hover` (insert or remove) and `ui.ctx().request_repaint()` when it changed.
+
+- [ ] **Step 5: Run tests and gates**
+
+Run: `cargo test`
+Expected: pass.
+Run: `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo fmt --check`, `cargo build --locked`
+Expected: clean.
+
+- [ ] **Step 6: Visual check on `DISPLAY=:0`**
+
+Hover each row of the demo table: the whole row (all three columns) changes to surface1 (light `#bcc0cc` / dark `#494d64`); the header row uses surface2. Moving off returns to the normal fill. Text stays readable; clicking the copy icon still copies CSV.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/app/table.rs
+git commit -m "feat: highlight the hovered table row"
+```
+
+---
+
+### Task 5: Docs and demo
 
 **Files:**
 - Modify: `README.md` (code-block paragraph and the keys/limitations notes that say code does not wrap/pans)
