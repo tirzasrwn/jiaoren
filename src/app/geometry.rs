@@ -180,6 +180,39 @@ pub(crate) fn overscroll_pad(viewport: f32) -> f32 {
     (viewport * 0.5).max(0.0)
 }
 
+/// Trailing space after a document of `doc_height`. At least half the viewport
+/// so the last line can rise to mid-window, and also enough for a short
+/// document that the top pad is still reachable: the scroll maximum becomes
+/// `max(pad, doc_height)` instead of `doc_height`, so `scroll_y = pad` never
+/// clamps on a document shorter than the viewport.
+pub(crate) fn bottom_pad(viewport_height: f32, doc_height: f32) -> f32 {
+    let viewport_height = viewport_height.max(0.0);
+    let doc_height = doc_height.max(0.0);
+    overscroll_pad(viewport_height).max(viewport_height - doc_height)
+}
+
+/// Scroll offset for this frame's layout.
+///
+/// `last_pad` is `None` on the first layout after open: home to `new_pad`.
+/// While the view is still at home (within one point of `last_pad`), follow a
+/// viewport resize by the pad delta so the heading stays at the top. Once the
+/// user has scrolled away, leave their position unchanged.
+pub(crate) fn home_scroll(
+    current: egui::Vec2,
+    last_pad: Option<egui::Vec2>,
+    new_pad: egui::Vec2,
+) -> egui::Vec2 {
+    let Some(last) = last_pad else {
+        return new_pad;
+    };
+    let at_home = (current.x - last.x).abs() <= 1.0 && (current.y - last.y).abs() <= 1.0;
+    if at_home {
+        current + (new_pad - last)
+    } else {
+        current
+    }
+}
+
 /// Displayed size of a diagram: small diagrams keep their intrinsic size
 /// (times app zoom) and are centred in the column; wide ones are capped to the
 /// column. Height always follows the intrinsic aspect ratio. A non-finite or
@@ -396,6 +429,67 @@ mod tests {
             assert_eq!(overscroll_pad(0.0), 0.0);
             assert_eq!(overscroll_pad(800.0), 400.0);
             assert_eq!(overscroll_pad(-100.0), 0.0);
+        }
+
+        #[test]
+        fn bottom_pad_makes_the_top_pad_reachable_on_a_short_document() {
+            let viewport = 598.0;
+            let doc = 100.0;
+            let pad = overscroll_pad(viewport);
+            let bottom = bottom_pad(viewport, doc);
+            let max_y = (pad + doc + bottom - viewport).max(0.0);
+            assert_eq!(bottom, viewport - doc);
+            assert_eq!(max_y, pad);
+            // Home scrolls to the pad, so the heading offset (scroll - top pad)
+            // is still zero, as it was before the top padding existed.
+            let home = home_scroll(egui::Vec2::ZERO, None, egui::vec2(pad, pad)).y;
+            assert_eq!(home.min(max_y), pad);
+            assert_eq!(home.min(max_y) - pad, 0.0);
+        }
+
+        #[test]
+        fn bottom_pad_is_half_the_viewport_for_a_long_document() {
+            assert_eq!(bottom_pad(598.0, 2000.0), 299.0);
+            assert_eq!(bottom_pad(800.0, 0.0), 800.0);
+        }
+
+        #[test]
+        fn home_scroll_homes_on_the_first_layout() {
+            assert_eq!(
+                home_scroll(egui::Vec2::ZERO, None, egui::vec2(10.0, 20.0)),
+                egui::vec2(10.0, 20.0)
+            );
+        }
+
+        #[test]
+        fn home_scroll_follows_a_resize_while_at_home() {
+            let last = egui::vec2(100.0, 200.0);
+            assert_eq!(
+                home_scroll(last, Some(last), egui::vec2(150.0, 250.0)),
+                egui::vec2(150.0, 250.0)
+            );
+            // Within the one-point tolerance still counts as home.
+            assert_eq!(
+                home_scroll(
+                    egui::vec2(100.9, 199.1),
+                    Some(last),
+                    egui::vec2(150.0, 250.0)
+                ),
+                egui::vec2(150.9, 249.1)
+            );
+        }
+
+        #[test]
+        fn home_scroll_leaves_a_scrolled_away_view_alone() {
+            let last = egui::vec2(100.0, 200.0);
+            assert_eq!(
+                home_scroll(
+                    egui::vec2(300.0, 500.0),
+                    Some(last),
+                    egui::vec2(150.0, 250.0)
+                ),
+                egui::vec2(300.0, 500.0)
+            );
         }
 
         #[test]

@@ -69,7 +69,7 @@ To go back to the defaults, delete (or comment out) the
 | `+` / `=` | zoom in |
 | `-` | zoom out |
 | `a` | reset zoom to 100% and pan back to the left |
-| `0` | reset zoom to 100% (pan resets when content fits) |
+| `0` | reset zoom to 100%; horizontal position is kept, the scroll clamp settles it |
 | `h` / `l`, `shift+←` / `shift+→` | pan left / right (for zoomed-in content) |
 | `t` | toggle light/dark theme |
 | `r` | reload from disk |

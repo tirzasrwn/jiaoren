@@ -23,7 +23,7 @@ mod raster;
 mod table;
 
 use diagram::DiagramUi;
-use geometry::{content_column, overscroll_pad};
+use geometry::{bottom_pad, content_column, home_scroll, overscroll_pad};
 use keys::{apply_key, quit_suppressed, Action, KeyState};
 use list::ListUi;
 use placeholder::{parse, Placeholder};
@@ -156,13 +156,10 @@ pub(crate) struct App {
     html_fn: HtmlFn,
     scroll_y: f32,
     scroll_x: f32,
-    /// Edge slack from the last layout, so `gg` and `a` can target the real
-    /// viewport before this frame's layout has run.
-    pad: egui::Vec2,
-    /// While set and in the future, re-home the document each frame. The
-    /// window manager may resize the window just after mapping, so the final
-    /// viewport size is not known on the first frame.
-    home_until: Option<Instant>,
+    /// Edge slack from the last layout, `None` until the first layout. `gg` and
+    /// `a` target it before this frame's layout has run; `Some` also tells the
+    /// home/resize helper whether the view is still at the reading origin.
+    pad: Option<egui::Vec2>,
     /// Set by `G`: jump to the bottom once the next layout reveals `max_y`.
     scroll_bottom: bool,
     applied_theme: Option<Theme>,
@@ -177,9 +174,6 @@ pub(crate) struct App {
     last_mtime: Option<SystemTime>,
     last_poll: Instant,
     status: Option<Status>,
-    /// Height reserved by the horizontal scroll bar this frame (0 when hidden),
-    /// so the status line can sit above it.
-    h_bar: f32,
 }
 
 impl App {
@@ -276,8 +270,7 @@ impl App {
             html_fn,
             scroll_y: 0.0,
             scroll_x: 0.0,
-            pad: egui::Vec2::ZERO,
-            home_until: None,
+            pad: None,
             scroll_bottom: false,
             applied_theme: Some(theme),
             keys: KeyState::default(),
@@ -287,7 +280,6 @@ impl App {
             last_mtime,
             last_poll: Instant::now(),
             status: None,
-            h_bar: 0.0,
         }
     }
 
@@ -340,10 +332,7 @@ impl App {
         let color: egui::Color32 = crate::theme::palette(self.theme).subtext0.into();
         egui::Area::new(egui::Id::new("jiaoren-status"))
             .order(egui::Order::Middle)
-            .anchor(
-                egui::Align2::LEFT_BOTTOM,
-                egui::vec2(8.0, -8.0 - self.h_bar),
-            )
+            .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
             .interactable(false)
             .show(ctx, |ui| {
                 ui.add(
@@ -467,13 +456,13 @@ impl eframe::App for App {
                 Action::ScrollLines(f) => self.scroll_y = (self.scroll_y + f * 40.0).max(0.0),
                 Action::ScrollPages(f) => self.scroll_y = (self.scroll_y + f * page_h).max(0.0),
                 Action::ScrollCols(f) => self.scroll_x = (self.scroll_x + f * 40.0).max(0.0),
-                Action::Top => self.scroll_y = self.pad.y,
+                Action::Top => self.scroll_y = self.pad.map_or(0.0, |p| p.y),
                 Action::Bottom => self.scroll_bottom = true,
                 Action::ZoomIn => self.zoom = (self.zoom * 1.1).min(3.0),
                 Action::ZoomOut => self.zoom = (self.zoom / 1.1).max(0.5),
                 Action::Fit => {
                     self.zoom = 1.0;
-                    self.scroll_x = self.pad.x;
+                    self.scroll_x = self.pad.map_or(0.0, |p| p.x);
                 }
                 Action::ResetZoom => self.zoom = 1.0,
                 Action::ToggleTheme => {
@@ -482,12 +471,7 @@ impl eframe::App for App {
                         Theme::Dark => Theme::Light,
                     }
                 }
-                Action::Reload => {
-                    // A deliberate reload re-opens at the reading origin;
-                    // live watcher reloads keep the current position.
-                    self.home_until = None;
-                    self.reload();
-                }
+                Action::Reload => self.reload(),
                 Action::CopyDocument => {
                     ui.ctx().copy_text(self.source.clone());
                     self.set_status("copied markdown");
@@ -527,20 +511,15 @@ impl eframe::App for App {
             }
 
             let viewport_h = ui.available_height();
+            let viewport_w = ui.available_width();
             let pad_y = overscroll_pad(viewport_h);
-            let pad_x = overscroll_pad(ui.available_width());
+            let pad_x = overscroll_pad(viewport_w);
             let pad = egui::vec2(pad_x, pad_y);
-            self.pad = pad;
-            let home_until = *self
-                .home_until
-                .get_or_insert_with(|| Instant::now() + Duration::from_millis(300));
-            if Instant::now() < home_until {
-                // Hide the top/left slack while the window settles: the
-                // document still opens at the top-left of the window.
-                self.scroll_y = pad_y;
-                self.scroll_x = pad_x;
-                ui.ctx().request_repaint();
-            }
+            let current = egui::vec2(self.scroll_x, self.scroll_y);
+            let home = home_scroll(current, self.pad, pad);
+            self.scroll_x = home.x;
+            self.scroll_y = home.y;
+            self.pad = Some(pad);
             let scroll_y = self.scroll_y;
             let scroll_x = self.scroll_x;
             let mut scroll = egui::ScrollArea::both()
@@ -562,7 +541,7 @@ impl eframe::App for App {
                 column = col;
                 let indent = ((available - col) * 0.5).max(0.0);
                 ui.add_space(pad_y);
-                ui.horizontal(|ui| {
+                let row = ui.horizontal(|ui| {
                     ui.add_space(pad_x + indent);
                     ui.vertical(|ui| {
                         ui.set_width(col);
@@ -578,20 +557,16 @@ impl eframe::App for App {
                             .render_html_fn(Some(&**html_fn))
                             .show(ui, cache, md);
                     });
-                    ui.add_space(indent + pad_x);
+                    // Normally the symmetric column margin; widen it when a
+                    // narrow document would otherwise clamp the left pad.
+                    let right_pad = (indent + pad_x).max(viewport_w - indent - col);
+                    ui.add_space(right_pad);
                 });
-                ui.add_space(pad_y);
+                let doc_h = row.response.rect.height();
+                ui.add_space(bottom_pad(viewport_h, doc_h));
             });
             let max_y = (output.content_size.y - output.inner_rect.height()).max(0.0);
             let max_x = (output.content_size.x - output.inner_rect.width()).max(0.0);
-            // The default ScrollStyle floats its bars, so a visible horizontal
-            // bar covers `bar_width` at the bottom of the viewport; lift the
-            // status line by that much when the content overflows sideways.
-            self.h_bar = if max_x > 0.0 {
-                ui.spacing().scroll.bar_width
-            } else {
-                0.0
-            };
             let adjust = std::mem::take(&mut self.diagrams.borrow_mut().scroll_adjust);
             let jump_bottom = std::mem::take(&mut self.scroll_bottom);
             self.scroll_y = if jump_bottom {
