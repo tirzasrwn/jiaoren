@@ -77,8 +77,8 @@ To go back to the defaults, delete (or comment out) the
 | `q` / `esc` / `ctrl+c` | quit |
 
 Mouse: drag anywhere to pan the document in both axes (the wheel still
-scrolls, `gg` returns to the start). A plain click on a diagram opens the popup;
-dragging from the diagram pans the document instead.
+scrolls, `gg` returns to the start). A plain click on a diagram or local image
+opens the zoom popup; dragging from it pans the document instead.
 
 Every table also carries a small copy icon at its top-right (tooltip: “Copy
 table as CSV”); clicking it copies the table as CSV (header row first, Markdown
@@ -135,6 +135,31 @@ jiaoren. On Linux the window backend reports `Ctrl+C` as egui's `Event::Copy`
 rather than `Key::C`; `Cmd+C` on macOS and `Ctrl+Insert` also map to `Copy`, so
 they quit too when no overlay is open.
 
+## Local images
+
+A paragraph that contains only one local image is drawn as an image block:
+
+```markdown
+![alt text](pics/cat.png "optional title")
+```
+
+Relative paths resolve against the document directory; the title is ignored
+and the alt text is kept. **PNG, JPEG, GIF (first frame) and WebP** are decoded
+locally by the `image` crate.
+
+Remote images are never fetched: `http(s)://`, `data:` and absolute paths keep
+the Markdown library's placeholder. Inline images (an image among text), and
+images inside tables, lists or blockquotes, also stay on the library path and
+are not clickable.
+
+An image is drawn at its intrinsic pixel size (centred when narrower than the
+text column) and capped to the column width when wider, with the same vertical
+spacing above and below as a table. Click it to open the same dimmed overlay as
+a diagram: `+`/`-` or the wheel zoom (1×–3×), `h`/`l`/`j`/`k` and mouse drag
+pan, and `Esc`, `q`, `Ctrl+C` or a click outside closes it. A changed file
+reloads automatically (the texture is keyed by the file's mtime); a missing or
+undecodable file draws a red error line naming the path.
+
 ## Cache
 
 Rendered diagrams are cached as SVG under `~/.cache/jiaoren/` (keyed by diagram
@@ -160,7 +185,8 @@ document cannot exfiltrate data or load remote resources during rendering.
 - Wide tables and long code lines wrap instead of getting a horizontal
   scrollbar. Use `+` to zoom in when a wrapped line is hard to read.
 - Body paragraphs are justified by a built-in layout: bold/italic/code/strike/
-  links are supported, but a paragraph containing an image or raw HTML falls
+  links are supported, but a paragraph containing an inline image (one that is
+  not alone in its paragraph) or raw HTML falls
   back to plain (left-aligned) rendering.
 - List items render justified with a hanging indent for `-`/`*`/`+`, `1.`/`1)`
   and `[ ]`/`[x]` markers; a list block containing an image or raw HTML falls

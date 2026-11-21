@@ -16,6 +16,7 @@ use crate::mermaid::{ensure_chromium, Renderer, Theme};
 
 mod diagram;
 mod geometry;
+mod image;
 mod keys;
 mod list;
 mod placeholder;
@@ -24,6 +25,7 @@ mod table;
 
 use diagram::DiagramUi;
 use geometry::{bottom_pad, content_column, home_scroll, home_target, overscroll_pad};
+use image::ImageUi;
 use keys::{apply_key, quit_suppressed, Action, KeyState};
 use list::ListUi;
 use placeholder::{parse, Placeholder};
@@ -153,6 +155,7 @@ pub(crate) struct App {
     tables: Rc<RefCell<TableUi>>,
     lists: Rc<RefCell<ListUi>>,
     paragraphs: Rc<RefCell<ParagraphUi>>,
+    images: Rc<RefCell<ImageUi>>,
     html_fn: HtmlFn,
     scroll_y: f32,
     scroll_x: f32,
@@ -215,15 +218,18 @@ impl App {
         let tables = Rc::new(RefCell::new(TableUi::new(prepared.tables.clone())));
         let lists = Rc::new(RefCell::new(ListUi::new(prepared.lists.clone())));
         let paragraphs = Rc::new(RefCell::new(ParagraphUi::new(prepared.paragraphs.clone())));
+        let images = Rc::new(RefCell::new(ImageUi::new(prepared.images.clone())));
         let html_fn: HtmlFn = {
             let d = Rc::clone(&diagrams);
             let t = Rc::clone(&tables);
             let l = Rc::clone(&lists);
             let p = Rc::clone(&paragraphs);
+            let i = Rc::clone(&images);
             Box::new(move |ui: &mut egui::Ui, html: &str| match parse(html) {
                 Some(Placeholder::Paragraph(id)) => p.borrow_mut().show(ui, id),
                 Some(Placeholder::Table(id)) => t.borrow_mut().show(ui, id),
                 Some(Placeholder::List(id)) => l.borrow_mut().show(ui, id),
+                Some(Placeholder::Image(id)) => i.borrow_mut().show(ui, id),
                 Some(Placeholder::Mermaid(id)) => d.borrow_mut().show(ui, id),
                 None => {}
             })
@@ -267,6 +273,7 @@ impl App {
             tables,
             lists,
             paragraphs,
+            images,
             html_fn,
             scroll_y: 0.0,
             scroll_x: 0.0,
@@ -306,6 +313,7 @@ impl App {
         self.paragraphs
             .borrow_mut()
             .reset(self.prepared.paragraphs.clone());
+        self.images.borrow_mut().reset(self.prepared.images.clone());
     }
 
     /// Show a clipboard confirmation for [`STATUS_DURATION`].
@@ -398,7 +406,8 @@ impl eframe::App for App {
         }
         // The popup owns the keyboard and the wheel while it is open; the
         // document behind it must not scroll or react to `t`, `r`, `q`, `0`.
-        let popup_open = self.diagrams.borrow().popup.is_some();
+        let popup_open =
+            self.diagrams.borrow().popup.is_some() || self.images.borrow().popup.is_some();
         let mut popup_closed_at = self.diagrams.borrow().popup_closed_at;
         // Turn this frame's key presses into viewer actions.
         let now = Instant::now();
@@ -559,6 +568,7 @@ impl eframe::App for App {
                         self.lists.borrow_mut().begin_frame(col);
                         self.paragraphs.borrow_mut().begin_frame(col);
                         self.diagrams.borrow_mut().begin_frame(col);
+                        self.images.borrow_mut().begin_frame(col, z);
                         CommonMarkViewer::new()
                             .max_image_width(Some(col as usize))
                             .render_html_fn(Some(&**html_fn))
@@ -587,8 +597,25 @@ impl eframe::App for App {
                 ui.ctx().request_repaint();
             }
         });
-        // Drawn last so the foreground overlay sits above the document.
+        // Drawn last so the foreground overlay sits above the document. Images
+        // and diagrams never share the overlay: whichever opened clears the
+        // other. A click on an image closes a stale diagram popup, and vice
+        // versa, before either is drawn.
+        let image_open = self.images.borrow().popup.is_some();
+        if image_open {
+            self.diagrams.borrow_mut().close_popup();
+        } else if self.diagrams.borrow().popup.is_some() {
+            self.images.borrow_mut().close_popup();
+        }
         self.diagrams.borrow_mut().draw_popup(ui.ctx(), column);
+        let image_closed = self.images.borrow_mut().draw_popup(ui.ctx(), column);
+        if let Some(ctrl) = image_closed {
+            // Share the diagram's close guard: a held `q`/`Ctrl+C` that closed
+            // the image overlay must not also quit the app on its next repeat.
+            let mut d = self.diagrams.borrow_mut();
+            d.popup_closed_at = Some(input_time);
+            d.popup_closed_with_ctrl = ctrl;
+        }
         if self.tables.borrow_mut().take_copied() {
             self.set_status("copied CSV");
         }

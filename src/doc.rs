@@ -1,5 +1,6 @@
 //! Pre-parse a Markdown document, extracting mermaid diagrams, GFM tables,
-//! list blocks and paragraph placeholders before rendering.
+//! list blocks, standalone local images and paragraph placeholders before
+//! rendering.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -49,6 +50,17 @@ pub struct Prepared {
     pub lists: HashMap<String, ListSpec>,
     /// Paragraph Markdown keyed by [`paragraph_id`].
     pub paragraphs: HashMap<String, String>,
+    /// Standalone local images keyed by [`image_id`].
+    pub images: HashMap<String, ImageSpec>,
+}
+
+/// A local image extracted from a paragraph that held nothing else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageSpec {
+    /// Absolute path resolved against the document directory.
+    pub src: String,
+    /// Alt text exactly as written between the brackets.
+    pub alt: String,
 }
 
 /// A top-level list block, parsed out of the Markdown before rendering.
@@ -132,6 +144,16 @@ pub fn list_id(spec: &ListSpec) -> String {
         canon.push('\u{1f}');
         canon.push_str(item.text.trim_end());
     }
+    let hex = blake3::hash(canon.as_bytes()).to_hex();
+    hex.as_str()[..16].to_string()
+}
+
+/// Stable 16-hex-character id for an image's resolved path and alt text.
+pub fn image_id(src: &str, alt: &str) -> String {
+    let mut canon = String::with_capacity(src.len() + alt.len() + 1);
+    canon.push_str(src.trim());
+    canon.push('\u{1f}');
+    canon.push_str(alt.trim());
     let hex = blake3::hash(canon.as_bytes()).to_hex();
     hex.as_str()[..16].to_string()
 }
@@ -267,6 +289,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
     let mut tables = HashMap::new();
     let mut lists = HashMap::new();
     let mut paragraphs = HashMap::new();
+    let mut images = HashMap::new();
     // (fence char, run length, info string, verbatim open line)
     let mut open: Option<(char, usize, String, String)> = None;
     let mut body = String::new();
@@ -365,7 +388,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                     // Not a table (or malformed delimiter): emit as before.
                     // A paragraph is claimed only after table detection, so the
                     // two never cover the same lines.
-                    if is_paragraph_start(line) {
+                    if is_paragraph_start(line) || is_standalone_image_start(line) {
                         let mut j = i + 1;
                         while j < lines.len() && is_paragraph_continuation(lines[j]) {
                             j += 1;
@@ -398,6 +421,23 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                             .map(|l| strip_hanging_indent(l.trim_end()))
                             .collect::<Vec<_>>()
                             .join("\n");
+                        // A paragraph that is only one local image becomes a
+                        // placeholder, like a mermaid fence. Inline images,
+                        // remote/data URIs and images inside tables, lists or
+                        // quotes stay on the library path.
+                        if let Some((alt, target)) = parse_standalone_image(&joined) {
+                            if is_local_image(&target) {
+                                let src = doc_dir.join(target).to_string_lossy().into_owned();
+                                let id = image_id(&src, &alt);
+                                images.insert(id.clone(), ImageSpec { src, alt });
+                                if !out.is_empty() && !out.ends_with("\n\n") {
+                                    out.push('\n');
+                                }
+                                out.push_str(&format!("<mdimg id=\"{id}\">\n\n"));
+                                i = j;
+                                continue;
+                            }
+                        }
                         let source = rewrite_images(&joined, doc_dir);
                         let id = paragraph_id(&source);
                         paragraphs.insert(id.clone(), source);
@@ -457,6 +497,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
         tables,
         lists,
         paragraphs,
+        images,
     }
 }
 
@@ -741,6 +782,42 @@ fn link_inner(s: &str) -> Option<(&str, usize)> {
         }
     }
     None
+}
+
+/// True when `line` is one standalone image paragraph, allowing CommonMark's
+/// up-to-three-space paragraph indent. Four or more spaces stay indented code.
+fn is_standalone_image_start(line: &str) -> bool {
+    let t = line.trim_end_matches(['\r', '\n']);
+    let indent = t.len() - t.trim_start_matches(' ').len();
+    indent <= 3 && parse_standalone_image(&t[indent..]).is_some()
+}
+
+/// Parse `source` as exactly one Markdown image, optionally wrapped in
+/// whitespace/newlines. Returns its alt text and link target with any
+/// `"title"` stripped; text outside the image makes this return `None`.
+fn parse_standalone_image(source: &str) -> Option<(String, String)> {
+    let s = source.trim();
+    let rest = s.strip_prefix("![")?;
+    let mid = rest.find("](")?;
+    let alt = &rest[..mid];
+    let tail = &rest[mid + 2..];
+    let (inner, consumed) = link_inner(tail)?;
+    if !tail[consumed..].trim().is_empty() {
+        return None;
+    }
+    let target = inner.split_whitespace().next().unwrap_or("");
+    Some((alt.to_string(), target.to_string()))
+}
+
+/// Whether an image target is a relative local path. Remote (`http(s)://`,
+/// other schemes), `data:` and absolute paths stay on the library path, which
+/// shows its placeholder and never fetches anything.
+fn is_local_image(src: &str) -> bool {
+    !src.is_empty()
+        && !src.starts_with('/')
+        && !src.starts_with('#')
+        && !src.starts_with("data:")
+        && !src.contains("://")
 }
 
 fn rewrite_images(mut rest: &str, doc_dir: &Path) -> String {
@@ -1469,6 +1546,97 @@ mod tests {
             let out = p.paragraphs.values().next().unwrap();
             assert!(out.contains("![a](file:///docs/x(1).png)"));
             assert!(out.contains("![b](file:///docs/a%23b.png)"));
+        }
+    }
+
+    mod local_images {
+        use super::super::*;
+
+        #[test]
+        fn standalone_local_image_becomes_a_placeholder() {
+            let md = "intro\n\n![the cat](pics/cat.png \"A cat\")\n\nafter\n";
+            let p = prepare(md, Path::new("/docs"));
+            assert_eq!(p.images.len(), 1);
+            let spec = p.images.values().next().unwrap();
+            assert_eq!(spec.src, "/docs/pics/cat.png");
+            assert_eq!(spec.alt, "the cat");
+            let id = image_id("/docs/pics/cat.png", "the cat");
+            assert!(p.markdown.contains(&format!("<mdimg id=\"{id}\">\n\n")));
+            assert!(!p.markdown.contains("![the cat]"));
+            assert!(p.paragraphs.values().any(|s| s == "intro"));
+            assert!(p.paragraphs.values().any(|s| s == "after"));
+        }
+
+        #[test]
+        fn inline_images_stay_on_the_library_path() {
+            let md = "before ![x](a.png) after\n";
+            let p = prepare(md, Path::new("/docs"));
+            assert!(p.images.is_empty());
+            let source = p.paragraphs.values().next().unwrap();
+            assert!(source.contains("![x](file:///docs/a.png)"));
+            assert!(source.contains("before"));
+        }
+
+        #[test]
+        fn remote_and_data_images_are_not_extracted() {
+            for target in [
+                "https://example.com/x.png",
+                "http://example.com/x.png",
+                "data:image/png;base64,AAAA",
+                "/abs/x.png",
+            ] {
+                let md = format!("![x]({target})\n");
+                let p = prepare(&md, Path::new("/docs"));
+                assert!(
+                    p.images.is_empty(),
+                    "{target} must stay on the library path"
+                );
+                assert!(
+                    p.paragraphs.values().any(|s| s.contains(target)),
+                    "{target} must be untouched"
+                );
+            }
+        }
+
+        #[test]
+        fn title_is_stripped_and_alt_is_captured() {
+            let p = prepare("![a *b*](x.png \"title here\")\n", Path::new("/d"));
+            let spec = p.images.values().next().unwrap();
+            assert_eq!(spec.src, "/d/x.png");
+            assert_eq!(spec.alt, "a *b*");
+        }
+
+        #[test]
+        fn image_id_is_stable_and_content_sensitive() {
+            assert_eq!(image_id("/d/a.png", "x"), image_id("/d/a.png", "x"));
+            assert_ne!(image_id("/d/a.png", "x"), image_id("/d/a.png", "y"));
+            assert_ne!(image_id("/d/a.png", "x"), image_id("/d/b.png", "x"));
+            assert_eq!(image_id("/d/a.png", "x").len(), 16);
+        }
+
+        #[test]
+        fn crlf_and_surrounding_whitespace_extract() {
+            let md = "text\r\n\r\n  ![alt](pic.png)  \r\n\r\nmore\r\n";
+            let p = prepare(md, Path::new("/docs"));
+            assert_eq!(p.images.len(), 1);
+            let spec = p.images.values().next().unwrap();
+            assert_eq!(spec.src, "/docs/pic.png");
+            assert_eq!(spec.alt, "alt");
+            assert!(p.markdown.contains("<mdimg id="));
+        }
+
+        #[test]
+        fn image_inside_list_table_or_quote_is_untouched() {
+            let md = "- ![x](a.png)\n\n> ![q](b.png)\n\n| i |\n|---|\n| ![t](c.png) |\n";
+            let p = prepare(md, Path::new("/docs"));
+            assert!(p.images.is_empty());
+        }
+
+        #[test]
+        fn four_space_indented_image_is_code_not_an_image() {
+            let p = prepare("    ![x](a.png)\n", Path::new("/docs"));
+            assert!(p.images.is_empty());
+            assert!(p.markdown.contains("    ![x](file:///docs/a.png)"));
         }
     }
 

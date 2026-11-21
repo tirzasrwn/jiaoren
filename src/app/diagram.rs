@@ -190,6 +190,13 @@ impl DiagramUi {
         self.popup_fresh = false;
     }
 
+    /// Close the overlay without recording a close time. Used when an image
+    /// overlay opens, so the two never share the foreground.
+    pub(crate) fn close_popup(&mut self) {
+        self.popup = None;
+        self.popup_fresh = false;
+    }
+
     /// Record the document's reading column once per frame, before the viewer
     /// runs. `ui.available_width()` inside the html hook is not that column.
     pub(crate) fn begin_frame(&mut self, column: f32) {
