@@ -180,14 +180,14 @@ fn table_fills(dark: bool) -> (egui::Color32, egui::Color32) {
     (p.surface0.into(), header.into())
 }
 
-/// Background fill for `row_index`: the header row, the alternating data rows
-/// (`surface0` on odd rows), or none.
+/// Background fill for `row_index`: the header row, then `surface0` for every
+/// data row, so the table reads as one block distinct from `base`.
 fn row_fill(dark: bool, row_index: usize) -> Option<egui::Color32> {
     let (body, header) = table_fills(dark);
-    match row_index {
-        0 => Some(header),
-        r if r % 2 == 1 => Some(body),
-        _ => None,
+    if row_index == 0 {
+        Some(header)
+    } else {
+        Some(body)
     }
 }
 
@@ -554,13 +554,19 @@ mod tests {
         }
 
         #[test]
-        fn row_fill_maps_header_and_alternating_rows() {
+        fn row_fill_maps_header_then_surface0_for_every_data_row() {
             let hex = |c: egui::Color32| crate::theme::Rgb(c.r(), c.g(), c.b()).to_hex();
             let l = |s: &str| Some(s.to_string());
             let light: Vec<_> = (0..=3).map(|r| row_fill(false, r).map(hex)).collect();
-            assert_eq!(light, [l("#dce0e8"), l("#ccd0da"), None, l("#ccd0da")]);
+            assert_eq!(
+                light,
+                [l("#dce0e8"), l("#ccd0da"), l("#ccd0da"), l("#ccd0da")]
+            );
             let dark: Vec<_> = (0..=3).map(|r| row_fill(true, r).map(hex)).collect();
-            assert_eq!(dark, [l("#494d64"), l("#363a4f"), None, l("#363a4f")]);
+            assert_eq!(
+                dark,
+                [l("#494d64"), l("#363a4f"), l("#363a4f"), l("#363a4f")]
+            );
         }
 
         #[test]
