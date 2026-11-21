@@ -181,6 +181,47 @@ pub(crate) fn wrap_line(
     rows
 }
 
+/// One painted visual row: which source line it belongs to and the char range
+/// within that line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Row {
+    pub line: usize,
+    pub start: usize,
+    pub len: usize,
+}
+
+/// Visual rows for a whole code block, in paint order.
+pub(crate) fn layout_rows(text: &str, max_width: f32, measure: &dyn Fn(&str) -> f32) -> Vec<Row> {
+    let mut rows = Vec::new();
+    for (line, body) in text.split('\n').enumerate() {
+        for (start, len) in wrap_line(body, max_width, measure) {
+            rows.push(Row { line, start, len });
+        }
+    }
+    rows
+}
+
+/// Width of the line-number gutter: as many cells as digits in the largest
+/// line number, plus one cell of gap.
+pub(crate) fn gutter_width(line_count: usize, cell: f32) -> f32 {
+    let digits = line_count.max(1).ilog10() + 1;
+    digits as f32 * cell + cell
+}
+
+/// Clip line-local highlight marks to one visual row and shift them to the
+/// row's own char origin. Empty intersections are dropped.
+pub(crate) fn clip_marks(marks: &[(usize, usize, bool)], row: &Row) -> Vec<(usize, usize, bool)> {
+    let end = row.start + row.len;
+    marks
+        .iter()
+        .filter_map(|&(start, stop, current)| {
+            let start = start.max(row.start);
+            let stop = stop.min(end);
+            (start < stop).then(|| (start - row.start, stop - row.start, current))
+        })
+        .collect()
+}
+
 /// `(start, len)` for every code line, in chars. Empty lines keep their slot so
 /// later offsets cannot drift.
 fn code_line_spans(text: &str) -> Vec<(usize, usize)> {
@@ -249,7 +290,8 @@ pub(crate) fn widest_line(lines: &[&str], measure: &dyn Fn(&str) -> f32) -> f32 
 mod tests {
     mod layout {
         use super::super::{
-            block_height, code_line_spans, code_lines, line_highlights, widest_line, wrap_line,
+            block_height, clip_marks, code_line_spans, code_lines, gutter_width, layout_rows,
+            line_highlights, widest_line, wrap_line, Row,
         };
 
         #[test]
@@ -265,6 +307,72 @@ mod tests {
             assert_eq!(wrap_line("ab", 5.0, &m), vec![(0, 1), (1, 1)]);
             // Multi-byte chars keep char offsets, not byte offsets.
             assert_eq!(wrap_line("ééé", 20.0, &m), vec![(0, 2), (2, 1)]);
+        }
+
+        #[test]
+        fn rows_split_long_lines_and_keep_line_numbers() {
+            let m = |s: &str| s.chars().count() as f32 * 10.0;
+            let rows = layout_rows("abcdef\nx", 30.0, &m);
+            assert_eq!(
+                rows,
+                vec![
+                    Row {
+                        line: 0,
+                        start: 0,
+                        len: 3
+                    },
+                    Row {
+                        line: 0,
+                        start: 3,
+                        len: 3
+                    },
+                    Row {
+                        line: 1,
+                        start: 0,
+                        len: 1
+                    },
+                ]
+            );
+            // An empty source line still owns one row.
+            let rows = layout_rows("a\n", 100.0, &m);
+            assert_eq!(
+                rows,
+                vec![
+                    Row {
+                        line: 0,
+                        start: 0,
+                        len: 1
+                    },
+                    Row {
+                        line: 1,
+                        start: 0,
+                        len: 0
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn gutter_is_digits_plus_one_cell() {
+            assert_eq!(gutter_width(1, 8.0), 16.0);
+            assert_eq!(gutter_width(9, 8.0), 16.0);
+            assert_eq!(gutter_width(10, 8.0), 24.0);
+            assert_eq!(gutter_width(999, 8.0), 32.0);
+            assert_eq!(gutter_width(0, 8.0), 16.0);
+        }
+
+        #[test]
+        fn marks_are_clipped_and_shifted_to_the_row() {
+            let row = Row {
+                line: 0,
+                start: 3,
+                len: 3,
+            };
+            assert_eq!(
+                clip_marks(&[(1, 5, false), (4, 6, true), (8, 9, true)], &row),
+                vec![(0, 2, false), (1, 3, true)]
+            );
+            assert_eq!(clip_marks(&[], &row), Vec::new());
         }
 
         #[test]
