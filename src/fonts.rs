@@ -15,6 +15,20 @@ const BOLD: &str = "FiraCodeNerdFont-Bold";
 /// is only used for missing glyphs, so bold text needs its own family.
 pub const BOLD_FAMILY: &str = "FiraCode Bold";
 
+/// System fallbacks for scripts FiraCode lacks (CJK, Arabic). Loaded when
+/// present so proxied documents do not render tofu; missing files simply keep
+/// the egui defaults.
+const FALLBACK_FILES: &[&str] = &[
+    "NotoSansCJK-Regular.ttc",
+    "NotoSansArabic-Regular.ttf",
+    "NotoNaskhArabic-Regular.ttf",
+];
+const FALLBACK_DIRS: &[&str] = &[
+    "/usr/share/fonts/opentype/noto",
+    "/usr/share/fonts/truetype/noto",
+    "/usr/share/fonts/truetype",
+];
+
 /// The font id for bold text at `size`.
 pub fn bold_font(size: f32) -> egui::FontId {
     egui::FontId::new(size, egui::FontFamily::Name(BOLD_FAMILY.into()))
@@ -77,7 +91,27 @@ pub fn load_from_dir(dir: &Path) -> Option<egui::FontDefinitions> {
             .insert(BOLD.to_owned(), Arc::new(egui::FontData::from_owned(b)));
         bold_family.push(BOLD.to_owned());
     }
+    // Script fallbacks (CJK, Arabic) sit after FiraCode so missing glyphs
+    // resolve instead of rendering tofu; absent files keep egui's defaults.
+    let mut fallbacks: Vec<String> = Vec::new();
+    for file in FALLBACK_FILES {
+        let Some(path) = FALLBACK_DIRS
+            .iter()
+            .map(|dir| Path::new(dir).join(file))
+            .find(|path| path.is_file())
+        else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let name = file.trim_end_matches(".ttc").trim_end_matches(".ttf");
+        defs.font_data
+            .insert(name.to_owned(), Arc::new(egui::FontData::from_owned(bytes)));
+        fallbacks.push(name.to_owned());
+    }
     bold_family.push(REGULAR.to_owned());
+    bold_family.extend(fallbacks.iter().cloned());
     bold_family.extend(
         defs.families[&egui::FontFamily::Proportional]
             .iter()
@@ -90,6 +124,7 @@ pub fn load_from_dir(dir: &Path) -> Option<egui::FontDefinitions> {
         let list = defs.families.entry(family).or_default();
         let defaults = std::mem::take(list);
         list.extend(faces.iter().cloned());
+        list.extend(fallbacks.iter().cloned());
         list.extend(defaults);
     }
     Some(defs)
@@ -121,6 +156,20 @@ mod tests {
             assert_eq!(
                 defs.families[&egui::FontFamily::Monospace].first().unwrap(),
                 "FiraCodeNerdFont-Regular"
+            );
+        }
+
+        #[test]
+        fn fallbacks_cover_cjk_and_arabic() {
+            let defs = load().expect("font installed");
+            let proportional = &defs.families[&egui::FontFamily::Proportional];
+            assert!(
+                proportional.iter().any(|name| name.contains("CJK")),
+                "CJK fallback missing: {proportional:?}"
+            );
+            assert!(
+                proportional.iter().any(|name| name.contains("Arabic")),
+                "Arabic fallback missing: {proportional:?}"
             );
         }
 
