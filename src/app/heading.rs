@@ -74,6 +74,9 @@ impl HeadingUi {
                 let painted = justify::draw_with(ui, &runs, column, font, color, false, highlights);
                 search.set_height(block, painted.height);
                 search.set_char_map(block, painted.chars);
+                for rect in painted.interactives {
+                    search.add_control(rect);
+                }
             }
             if spec.space_after {
                 ui.add_space(after);

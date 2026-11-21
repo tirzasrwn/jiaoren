@@ -100,8 +100,8 @@ Every table also carries a small copy icon at its top-right (tooltip: “Copy
 table as CSV”); clicking it copies the table as CSV (header row first, Markdown
 stripped from cells, fields quoted when they contain commas, quotes or line
 breaks). Code blocks have the same icon over their top-right corner (tooltip
-“Copy code”) and copy the block verbatim. Copy buttons show a 1.5-second
-bottom-left status line and never steal focus.
+“Copy code”) and copy the block verbatim, with the trailing newline stripped.
+Copy buttons show a 1.5-second bottom-left status line and never steal focus.
 
 `Ctrl+C` follows the same cancel-then-quit ladder as `esc`; one press per Ctrl
 hold is acted on, so holding it cannot skip from clearing the search to quitting.

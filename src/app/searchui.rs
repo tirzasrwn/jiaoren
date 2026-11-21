@@ -28,6 +28,9 @@ pub(crate) struct SearchUi {
     hs: Vec<f32>,
     /// Char maps (fragment rects in screen space) from the last completed frame.
     maps: Vec<Vec<CharSpan>>,
+    /// Link/copy-control rects from the last completed frame. Presses here must
+    /// not start a text selection.
+    controls: Vec<egui::Rect>,
 }
 
 impl SearchUi {
@@ -42,6 +45,7 @@ impl SearchUi {
             heights: Vec::new(),
             hs: Vec::new(),
             maps: Vec::new(),
+            controls: Vec::new(),
         }
     }
 
@@ -51,6 +55,7 @@ impl SearchUi {
         self.tops.clear();
         self.heights.clear();
         self.maps.clear();
+        self.controls.clear();
     }
 
     /// Record one searchable block at the ui's current cursor position. Returns
@@ -69,6 +74,18 @@ impl SearchUi {
         if let Some(slot) = self.maps.get_mut(index) {
             *slot = chars;
         }
+    }
+
+    /// Register a link/control rect that owns the press instead of selection.
+    pub(crate) fn add_control(&mut self, rect: egui::Rect) {
+        self.controls.push(rect);
+    }
+
+    /// True when `pos` is on a link or copy button painted last frame.
+    pub(crate) fn pointer_on_control(&self, pos: egui::Pos2) -> bool {
+        self.controls
+            .iter()
+            .any(|rect| rect.expand(1.0).contains(pos))
     }
 
     /// Selected char range in `block`, if any.

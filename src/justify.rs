@@ -863,6 +863,8 @@ pub struct CharSpan {
 pub struct PaintedBlock {
     pub height: f32,
     pub chars: Vec<CharSpan>,
+    /// Link rects: pressing these must not start a text selection.
+    pub interactives: Vec<Rect>,
 }
 
 /// Highlight ranges for one block, as char ranges into its recorded search
@@ -1079,6 +1081,7 @@ fn paint_at(
             return PaintedBlock {
                 height: row_h,
                 chars: Vec::new(),
+                interactives: Vec::new(),
             };
         }
         return PaintedBlock::default();
@@ -1126,6 +1129,7 @@ fn paint_at(
     }
     let split_words: Vec<bool> = words.iter().map(|w| w.split).collect();
     let mut chars = Vec::new();
+    let mut interactives = Vec::new();
 
     for (row, line) in lines.iter().enumerate() {
         let natural = natural_of(line);
@@ -1154,6 +1158,9 @@ fn paint_at(
                         rect: Rect::from_min_size(pos, egui::vec2(frag.width, row_h)),
                     });
                 }
+                if matches!(frag.kind, RunKind::Link(_)) {
+                    interactives.push(Rect::from_min_size(pos, egui::vec2(frag.width, row_h)));
+                }
                 x += frag.width;
             }
         }
@@ -1161,6 +1168,7 @@ fn paint_at(
     PaintedBlock {
         height: used_height,
         chars,
+        interactives,
     }
 }
 

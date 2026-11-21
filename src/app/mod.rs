@@ -162,6 +162,9 @@ impl ParagraphUi {
         );
         search.set_height(block, painted.height);
         search.set_char_map(block, painted.chars);
+        for rect in painted.interactives {
+            search.add_control(rect);
+        }
     }
 }
 
@@ -515,14 +518,15 @@ impl App {
         });
         let mut s = self.search.borrow_mut();
         if pressed {
-            let hit = pos.and_then(|p| s.hit_near(p));
-            match (pos, hit) {
-                (Some(p), Some(point)) => {
+            if let Some(p) = pos {
+                if s.pointer_on_control(p) {
+                    // Link/copy-button presses own the click; keep any existing
+                    // selection untouched.
+                } else if let Some(point) = s.hit_near(p) {
                     s.selection.begin(point);
                     self.select_press = Some(p);
                     self.select_moved = false;
-                }
-                _ => {
+                } else {
                     s.selection.clear();
                     self.select_press = None;
                 }
@@ -695,6 +699,15 @@ impl eframe::App for App {
         // suppress drag-panning in the same frame.
         if !popup_open && !prompt_open {
             self.process_selection(ui);
+        }
+        // If a release/focus-loss happened while the prompt/popup blocked the
+        // pointer path, do not keep SelectArea drag-panning disabled.
+        if !ui.input(|i| i.pointer.primary_down()) {
+            let mut s = self.search.borrow_mut();
+            if s.selection.dragging {
+                s.selection.dragging = false;
+                self.select_press = None;
+            }
         }
         let mut acts: Vec<Action> = Vec::new();
         if !popup_open && prompt_open {
@@ -886,6 +899,9 @@ impl eframe::App for App {
                         if !text.is_empty() {
                             ui.ctx().copy_text(text);
                             self.set_status("copied selection");
+                            // A selection copy is not a `yy` press: do not let a
+                            // stale arm fire a whole-document copy on the next y.
+                            self.keys.last_y = None;
                         }
                     }
                 }

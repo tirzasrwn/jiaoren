@@ -84,7 +84,9 @@ impl TableUi {
         ui.vertical(|ui| {
             ui.add_space(table_pad(body_row_height));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if super::widgets::copy_button(ui, "Copy table as CSV") {
+                let (clicked, rect) = super::widgets::copy_button(ui, "Copy table as CSV");
+                search.add_control(rect);
+                if clicked {
                     ui.ctx().copy_text(table_to_csv(&spec));
                     self.copied = true;
                 }
@@ -120,6 +122,9 @@ impl TableUi {
                         if let Some(block) = block {
                             search.set_height(block, painted.height);
                             search.set_char_map(block, painted.chars);
+                            for rect in painted.interactives {
+                                search.add_control(rect);
+                            }
                         }
                     }
                     ui.end_row();
@@ -146,6 +151,9 @@ impl TableUi {
                             if let Some(block) = block {
                                 search.set_height(block, painted.height);
                                 search.set_char_map(block, painted.chars);
+                                for rect in painted.interactives {
+                                    search.add_control(rect);
+                                }
                             }
                         }
                         ui.end_row();
@@ -434,6 +442,7 @@ fn render_cell(
             return crate::justify::PaintedBlock {
                 height: ui.min_rect().height(),
                 chars: Vec::new(),
+                interactives: Vec::new(),
             };
         }
         let runs = crate::justify::parse_inline(cell_md);
@@ -443,6 +452,7 @@ fn render_cell(
             return crate::justify::PaintedBlock {
                 height: ui.min_rect().height(),
                 chars: Vec::new(),
+                interactives: Vec::new(),
             };
         }
         crate::justify::draw_left(

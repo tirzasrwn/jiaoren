@@ -6,10 +6,13 @@ use egui::{Color32, CornerRadius, Id, Rect, Sense, Stroke, StrokeKind};
 /// sheets drawn with the painter, so it never depends on a font glyph. Returns
 /// true on click. `backdrop` fills the front sheet so the rear outline does not
 /// cut through it.
-pub(crate) fn copy_button(ui: &mut egui::Ui, tooltip: &str) -> bool {
+pub(crate) fn copy_button(ui: &mut egui::Ui, tooltip: &str) -> (bool, Rect) {
     let backdrop = ui.visuals().panel_fill;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::CLICK);
-    paint_copy_button(ui, rect, response, tooltip, backdrop)
+    (
+        paint_copy_button(ui, rect, response, tooltip, backdrop),
+        rect,
+    )
 }
 
 /// The same icon at a caller-chosen rect, for overlaying a block corner without
@@ -20,9 +23,12 @@ pub(crate) fn copy_button_at(
     id: Id,
     tooltip: &str,
     backdrop: Color32,
-) -> bool {
+) -> (bool, Rect) {
     let response = ui.interact(rect, id, Sense::CLICK);
-    paint_copy_button(ui, rect, response, tooltip, backdrop)
+    (
+        paint_copy_button(ui, rect, response, tooltip, backdrop),
+        rect,
+    )
 }
 
 fn paint_copy_button(

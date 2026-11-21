@@ -68,6 +68,9 @@ impl ListUi {
                 let painted = justify::draw_indented(ui, &runs, column, indent, marker, highlights);
                 search.set_height(block, painted.height);
                 search.set_char_map(block, painted.chars);
+                for rect in painted.interactives {
+                    search.add_control(rect);
+                }
             }
             ui.add_space(pad);
         });

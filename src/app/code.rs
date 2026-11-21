@@ -91,10 +91,9 @@ impl CodeUi {
         painter.rect_filled(rect, 2.0, ui.visuals().code_bg_color);
         let color = ui.visuals().text_color();
         let mut chars = Vec::new();
-        let mut line_start = 0usize;
-        for (row, line) in lines.iter().enumerate() {
+        let spans = code_line_spans(&spec.text);
+        for (row, (line, &(line_start, line_len))) in lines.iter().zip(&spans).enumerate() {
             let pos = egui::Pos2::new(rect.left() + pad, rect.top() + pad + row as f32 * row_h);
-            let line_len = line.chars().count();
             // Selection first, then search hits, both behind the glyphs.
             for &(start, end, _) in &sel_marks[row] {
                 let prefix: String = line.chars().take(start).collect();
@@ -120,7 +119,6 @@ impl CodeUi {
                 );
             }
             if line.is_empty() {
-                line_start += 1; // the newline itself
                 continue; // the row is still reserved by `height`
             }
             let galley = ui.fonts_mut(|f| f.layout_no_wrap(line.to_string(), mono.clone(), color));
@@ -131,7 +129,6 @@ impl CodeUi {
                 rect: egui::Rect::from_min_size(pos, egui::vec2(line_w, row_h)),
             });
             painter.galley(pos, galley, color);
-            line_start += line_len + 1; // the newline itself
         }
         search.set_char_map(block, chars);
         // Overlay the copy icon inside the block's top-right corner, at the
@@ -143,17 +140,32 @@ impl CodeUi {
             egui::vec2(14.0, 14.0),
         );
         let backdrop = ui.visuals().code_bg_color;
-        if widgets::copy_button_at(
+        let (clicked, control) = widgets::copy_button_at(
             ui,
             icon,
             ui.id().with(("code-copy", id, occurrence)),
             "Copy code",
             backdrop,
-        ) {
+        );
+        search.add_control(control);
+        if clicked {
             ui.ctx().copy_text(spec.text.clone());
             self.copied = true;
         }
     }
+}
+
+/// `(start, len)` for every code line, in chars. Empty lines keep their slot so
+/// later offsets cannot drift.
+fn code_line_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for line in text.split('\n') {
+        let len = line.chars().count();
+        out.push((start, len));
+        start += len + 1; // the newline itself
+    }
+    out
 }
 
 /// Highlight ranges for each code line: `(start, end, is_current)` in local
@@ -165,9 +177,8 @@ pub(crate) fn line_highlights(
     current: Option<usize>,
 ) -> Vec<Vec<(usize, usize, bool)>> {
     let mut out = Vec::new();
-    let mut line_start = 0usize;
-    for line in text.split('\n') {
-        let line_end = line_start + line.chars().count();
+    for (line_start, line_len) in code_line_spans(text) {
+        let line_end = line_start + line_len;
         let mut local = Vec::new();
         for (index, &(start, end)) in ranges.iter().enumerate() {
             let start = start.max(line_start);
@@ -177,7 +188,6 @@ pub(crate) fn line_highlights(
             }
         }
         out.push(local);
-        line_start = line_end + 1; // the newline itself
     }
     out
 }
@@ -212,7 +222,9 @@ pub(crate) fn widest_line(lines: &[&str], measure: &dyn Fn(&str) -> f32) -> f32 
 #[cfg(test)]
 mod tests {
     mod layout {
-        use super::super::{block_height, code_lines, line_highlights, widest_line};
+        use super::super::{
+            block_height, code_line_spans, code_lines, line_highlights, widest_line,
+        };
 
         #[test]
         fn lines_preserve_leading_spaces_and_breaks() {
@@ -257,6 +269,16 @@ mod tests {
             assert_eq!(
                 line_highlights("a\nb", &[(9, 12)], None),
                 vec![vec![], vec![]]
+            );
+        }
+
+        #[test]
+        fn empty_line_does_not_drift_char_offsets() {
+            assert_eq!(code_line_spans("a\n\nb"), vec![(0, 1), (2, 0), (3, 1)]);
+            // A range on `b` stays on the third line even after the empty row.
+            assert_eq!(
+                line_highlights("a\n\nb", &[(3, 4)], Some(0)),
+                vec![vec![], vec![], vec![(0, 1, true)]]
             );
         }
     }
