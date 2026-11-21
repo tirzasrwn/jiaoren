@@ -156,6 +156,31 @@ impl CodeUi {
     }
 }
 
+/// Split `line` into visual rows no wider than `max_width`, as `(start, len)`
+/// char ranges in order. An empty line is one empty row; a single char wider
+/// than `max_width` still gets a row of its own.
+pub(crate) fn wrap_line(
+    line: &str,
+    max_width: f32,
+    measure: &dyn Fn(&str) -> f32,
+) -> Vec<(usize, usize)> {
+    let total = line.chars().count();
+    let mut rows = Vec::new();
+    let mut start = 0usize; // char index of the current row
+    let mut start_byte = 0usize;
+    for (index, (byte, c)) in line.char_indices().enumerate() {
+        if index > start && measure(&line[start_byte..byte + c.len_utf8()]) > max_width {
+            rows.push((start, index - start));
+            start = index;
+            start_byte = byte;
+        }
+    }
+    if start < total || rows.is_empty() {
+        rows.push((start, total - start));
+    }
+    rows
+}
+
 /// `(start, len)` for every code line, in chars. Empty lines keep their slot so
 /// later offsets cannot drift.
 fn code_line_spans(text: &str) -> Vec<(usize, usize)> {
@@ -224,8 +249,23 @@ pub(crate) fn widest_line(lines: &[&str], measure: &dyn Fn(&str) -> f32) -> f32 
 mod tests {
     mod layout {
         use super::super::{
-            block_height, code_line_spans, code_lines, line_highlights, widest_line,
+            block_height, code_line_spans, code_lines, line_highlights, widest_line, wrap_line,
         };
+
+        #[test]
+        fn wrap_line_splits_on_width_in_chars() {
+            // Every char is 10 px wide.
+            let m = |s: &str| s.chars().count() as f32 * 10.0;
+            assert_eq!(wrap_line("abcdef", 1000.0, &m), vec![(0, 6)]);
+            assert_eq!(wrap_line("abcdef", 30.0, &m), vec![(0, 3), (3, 3)]);
+            assert_eq!(wrap_line("", 30.0, &m), vec![(0, 0)]);
+            // Leading spaces are kept and count toward the width.
+            assert_eq!(wrap_line("  abc", 20.0, &m), vec![(0, 2), (2, 2), (4, 1)]);
+            // One char wider than the row still gets its own row.
+            assert_eq!(wrap_line("ab", 5.0, &m), vec![(0, 1), (1, 1)]);
+            // Multi-byte chars keep char offsets, not byte offsets.
+            assert_eq!(wrap_line("ééé", 20.0, &m), vec![(0, 2), (2, 1)]);
+        }
 
         #[test]
         fn lines_preserve_leading_spaces_and_breaks() {
