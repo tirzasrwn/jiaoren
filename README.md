@@ -6,6 +6,18 @@ fences drawn as real diagrams.
 
 Keyboard-first, almost no chrome, live-reloads when the file changes on disk.
 
+## Why "jiaoren"?
+
+**鲛人** (jiāorén) is the merfolk of Chinese mythology — the Chinese mermaid.
+Classical sources describe them living in the sea like fish, weaving without
+rest, and weeping tears that harden into pearls; the silk they weave,
+*jiaoxiao* (鲛绡), stays dry under water. The *Bowuzhi* (博物志, c. 290 CE) and
+the *Shuyi ji* (述异记, 6th century) carry the story.
+
+The name fits a viewer whose reason to exist is rendering **mermaid** diagrams,
+and it keeps the command short: `jr`. (Some scholars read the earliest 鲛 as
+"shark"; the pearl-weeping mermaid image is the later, poetic one.)
+
 ## Install
 
 ```bash
