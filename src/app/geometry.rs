@@ -193,62 +193,50 @@ pub(crate) fn popup_zoom_step(zoom: f32, delta: i32) -> f32 {
     (zoom + delta as f32 * 0.25).clamp(1.0, 3.0)
 }
 
-/// Centring spacer before the image on one axis: half the slack when the image
-/// fits in the view, else 0. The scroll content is `[spacer, spacer + image]`.
-fn centre_spacer(image: f32, view: f32) -> f32 {
-    ((view - image) * 0.5).max(0.0)
-}
-
-/// New scroll offset that keeps the content point under `pointer_in_view`
-/// fixed while the image scales from `old_size` to `new_size`.
+/// New pan that keeps the image point under `anchor` fixed while the image
+/// scales from `old_size` to `new_size`.
 ///
-/// `pointer_in_view` is relative to the visible viewport's top-left. The
-/// scroll content is `[spacer, spacer + image]`, with `spacer = max((view -
-/// image) / 2, 0)` on each axis centring an image that fits. The image-local
-/// point under the pointer is therefore `pan + pointer - spacer_old`; scaling it
-/// by `new_size / old_size` and adding the new spacer back, minus the pointer,
-/// gives `pan' = content * k + spacer_new - pointer`, which keeps that point in
-/// place as the image grows past the view or shrinks back inside it.
-/// A non-finite pan/pointer/size/view returns `pan` unchanged so the overlay
-/// never draws a NaN-sized image.
+/// `pan` is the image's top-left relative to the view's top-left and `anchor`
+/// is relative to the same origin. The image point under the anchor is
+/// `content = anchor - pan`; after scaling by `new_size / old_size` it must sit
+/// under the anchor again, so `pan' = anchor - content * k`. A non-finite
+/// pan/anchor/size returns `pan` unchanged so the overlay never draws a
+/// NaN-sized image.
 pub(crate) fn zoom_anchored(
     pan: egui::Vec2,
-    pointer_in_view: egui::Vec2,
+    anchor: egui::Vec2,
     old_size: egui::Vec2,
     new_size: egui::Vec2,
-    view: egui::Vec2,
 ) -> egui::Vec2 {
     if !pan.is_finite()
-        || !pointer_in_view.is_finite()
+        || !anchor.is_finite()
         || !old_size.is_finite()
         || !new_size.is_finite()
-        || !view.is_finite()
         || old_size.min_elem() <= 0.0
         || new_size.min_elem() <= 0.0
     {
         return pan;
     }
-    let spacer_old = egui::vec2(
-        centre_spacer(old_size.x, view.x),
-        centre_spacer(old_size.y, view.y),
-    );
-    let spacer_new = egui::vec2(
-        centre_spacer(new_size.x, view.x),
-        centre_spacer(new_size.y, view.y),
-    );
     let k = new_size / old_size;
-    (pan + pointer_in_view - spacer_old) * k + spacer_new - pointer_in_view
+    anchor - (anchor - pan) * k
 }
 
-/// Clamp a scroll offset so content cannot be dragged past its edges.
-/// When the content is smaller than the view on an axis, the offset is 0 (the
-/// drawing code already centres it). Non-finite input clamps to 0.
-pub(crate) fn clamp_pan(pan: egui::Vec2, content: egui::Vec2, view: egui::Vec2) -> egui::Vec2 {
-    if !pan.is_finite() || !content.is_finite() || !view.is_finite() {
-        return egui::Vec2::ZERO;
+/// Clamp the image's top-left so its edges can reach the middle of the view
+/// but no further: `pan` in `[view * 0.5 - image, view * 0.5]` per axis. The
+/// range is symmetric around the centred position `(view - image) * 0.5`, so
+/// it holds for images smaller than the view too. Non-finite input falls back
+/// to the centred position (or zero when even that is not finite).
+pub(crate) fn clamp_pan(pan: egui::Vec2, image: egui::Vec2, view: egui::Vec2) -> egui::Vec2 {
+    let centre = (view - image) * 0.5;
+    if !pan.is_finite() || !image.is_finite() || !view.is_finite() {
+        return if centre.is_finite() {
+            centre
+        } else {
+            egui::Vec2::ZERO
+        };
     }
-    let max = (content - view).max(egui::Vec2::ZERO);
-    pan.clamp(egui::Vec2::ZERO, max)
+    let half = view * 0.5;
+    pan.clamp(half - image, half)
 }
 
 /// Pixel scale for `bucket` at a given display density. Textures are rendered
@@ -463,81 +451,40 @@ mod tests {
         }
 
         #[test]
-        fn zoom_anchor_centred_image_stays_centred_when_it_fits() {
-            // 400x300 view, image 200x100 -> 300x150: spacers on both sides
-            // both before and after, so the centre anchor leaves the pan at 0.
+        fn zoom_anchor_centred_image_stays_centred() {
+            // Centred 800x800 in a 1000x1000 view: pan 100. At 2x the same
+            // centre anchor lands on the centred position for 1600x1600.
             let pan = zoom_anchored(
-                egui::Vec2::ZERO,
-                egui::vec2(200.0, 150.0),
-                egui::vec2(200.0, 100.0),
-                egui::vec2(300.0, 150.0),
-                egui::vec2(400.0, 300.0),
-            );
-            assert_eq!(pan, egui::Vec2::ZERO);
-        }
-
-        #[test]
-        fn zoom_anchor_accounts_for_the_spacer_when_crossing_into_overflow() {
-            // Review case: s_old = (1000 - 800)/2 = 100, s_new = 0. The point
-            // under p=500 is image-local 400, so the new pan is 400*1.5 - 500
-            // = 100, not the 250 the spacer-less formula gives.
-            let pan = zoom_anchored(
-                egui::Vec2::ZERO,
+                egui::vec2(100.0, 100.0),
                 egui::vec2(500.0, 500.0),
                 egui::vec2(800.0, 800.0),
-                egui::vec2(1200.0, 1200.0),
-                egui::vec2(1000.0, 1000.0),
+                egui::vec2(1600.0, 1600.0),
+            );
+            assert_eq!(pan, egui::vec2(-300.0, -300.0));
+        }
+
+        #[test]
+        fn zoom_anchor_at_view_min_keeps_the_top_left_content_point() {
+            // anchor 0 sits on image-local point -pan; after scaling it must
+            // still be at 0, i.e. pan' = pan * k.
+            let pan = zoom_anchored(
+                egui::vec2(100.0, 100.0),
+                egui::Vec2::ZERO,
+                egui::vec2(800.0, 800.0),
+                egui::vec2(1600.0, 1600.0),
+            );
+            assert_eq!(pan, egui::vec2(200.0, 200.0));
+        }
+
+        #[test]
+        fn zoom_out_from_2x_recentres_when_the_image_fits() {
+            let pan = zoom_anchored(
+                egui::vec2(-300.0, -300.0),
+                egui::vec2(500.0, 500.0),
+                egui::vec2(1600.0, 1600.0),
+                egui::vec2(800.0, 800.0),
             );
             assert_eq!(pan, egui::vec2(100.0, 100.0));
-        }
-
-        #[test]
-        fn zoom_anchor_without_spacers_scales_the_offset() {
-            // Already overflowing: both spacers are 0, so the old formula holds.
-            let view = egui::vec2(400.0, 300.0);
-            let old = egui::vec2(900.0, 700.0);
-            let p = egui::vec2(120.0, 80.0);
-            assert_eq!(
-                zoom_anchored(egui::vec2(100.0, 60.0), p, old, old * 2.0, view),
-                egui::vec2(320.0, 200.0)
-            );
-            assert_eq!(
-                zoom_anchored(
-                    egui::vec2(100.0, 60.0),
-                    egui::Vec2::ZERO,
-                    old,
-                    old * 2.0,
-                    view
-                ),
-                egui::vec2(200.0, 120.0)
-            );
-            assert_eq!(
-                zoom_anchored(
-                    egui::vec2(200.0, 120.0),
-                    egui::Vec2::ZERO,
-                    old * 2.0,
-                    old,
-                    view
-                ),
-                egui::vec2(100.0, 60.0)
-            );
-        }
-
-        #[test]
-        fn zoom_anchor_is_clamped_after_the_step() {
-            // Far-right anchor on an image that crosses into overflow: the raw
-            // anchor offset (300) is clamped to the content limit (1200-1000).
-            let raw = zoom_anchored(
-                egui::Vec2::ZERO,
-                egui::vec2(900.0, 900.0),
-                egui::vec2(800.0, 800.0),
-                egui::vec2(1200.0, 1200.0),
-                egui::vec2(1000.0, 1000.0),
-            );
-            assert_eq!(
-                clamp_pan(raw, egui::vec2(1200.0, 1200.0), egui::vec2(1000.0, 1000.0)),
-                egui::vec2(200.0, 200.0)
-            );
         }
 
         #[test]
@@ -545,86 +492,87 @@ mod tests {
             let pan = egui::vec2(100.0, 50.0);
             let p = egui::vec2(10.0, 20.0);
             let size = egui::vec2(300.0, 200.0);
-            let view = egui::vec2(400.0, 300.0);
-            assert_eq!(zoom_anchored(pan, p, size, egui::Vec2::ZERO, view), pan);
-            assert_eq!(zoom_anchored(pan, p, egui::Vec2::ZERO, size, view), pan);
+            assert_eq!(zoom_anchored(pan, p, size, egui::Vec2::ZERO), pan);
+            assert_eq!(zoom_anchored(pan, p, egui::Vec2::ZERO, size), pan);
+            assert_eq!(zoom_anchored(pan, p, egui::vec2(-1.0, 200.0), size), pan);
             assert_eq!(
-                zoom_anchored(pan, p, egui::vec2(-1.0, 200.0), size, view),
+                zoom_anchored(pan, p, size, egui::vec2(f32::NAN, 200.0)),
                 pan
             );
-            assert_eq!(
-                zoom_anchored(pan, p, size, egui::vec2(f32::NAN, 200.0), view),
-                pan
-            );
-            assert_eq!(
-                zoom_anchored(pan, p, size, size, egui::vec2(f32::INFINITY, 300.0)),
-                pan
-            );
-            let nan_pan = zoom_anchored(egui::vec2(f32::NAN, 0.0), p, size, size, view);
+            let nan_pan = zoom_anchored(egui::vec2(f32::NAN, 0.0), p, size, size);
             assert!(nan_pan.x.is_nan() && nan_pan.y == 0.0);
             assert_eq!(
-                zoom_anchored(pan, egui::vec2(f32::INFINITY, 0.0), size, size, view),
+                zoom_anchored(pan, egui::vec2(f32::INFINITY, 0.0), size, size),
                 pan
             );
         }
 
         #[test]
-        fn clamp_pan_limits_larger_content_to_its_edges() {
-            let view = egui::vec2(400.0, 300.0);
-            let content = egui::vec2(1000.0, 900.0);
+        fn clamp_pan_allows_half_a_view_of_overscroll_for_a_small_image() {
+            // view 1000, image 200: left edge may reach the middle (500) or
+            // the right edge may (300 = 500 - 200); centred 400 stays put.
+            let view = egui::vec2(1000.0, 1000.0);
+            let image = egui::vec2(200.0, 200.0);
             assert_eq!(
-                clamp_pan(egui::vec2(120.0, 80.0), content, view),
-                egui::vec2(120.0, 80.0)
+                clamp_pan(egui::vec2(400.0, 400.0), image, view),
+                egui::vec2(400.0, 400.0)
             );
             assert_eq!(
-                clamp_pan(egui::vec2(5000.0, 5000.0), content, view),
-                egui::vec2(600.0, 600.0)
-            );
-            assert_eq!(
-                clamp_pan(egui::vec2(-50.0, -50.0), content, view),
-                egui::Vec2::ZERO
+                clamp_pan(egui::vec2(5000.0, -5000.0), image, view),
+                egui::vec2(500.0, 300.0)
             );
         }
 
         #[test]
-        fn clamp_pan_zeroes_axes_where_content_fits() {
-            let view = egui::vec2(400.0, 300.0);
-            let pan = egui::vec2(120.0, 80.0);
-            // Wider than the view, shorter than it: only x may scroll.
+        fn clamp_pan_allows_an_overflowing_image_to_reach_the_middle() {
+            // image 1400 in a 1000 view: right edge at the middle is
+            // 500 - 1400 = -900; left edge at the middle is 500.
+            let view = egui::vec2(1000.0, 1000.0);
+            let image = egui::vec2(1400.0, 1400.0);
+            assert_eq!(clamp_pan(egui::Vec2::ZERO, image, view), egui::Vec2::ZERO);
             assert_eq!(
-                clamp_pan(pan, egui::vec2(1000.0, 200.0), view),
-                egui::vec2(120.0, 0.0)
-            );
-            // Taller than the view, narrower than it: only y may scroll.
-            assert_eq!(
-                clamp_pan(pan, egui::vec2(200.0, 1000.0), view),
-                egui::vec2(0.0, 80.0)
-            );
-            // Fits on both axes: always centred (offset 0).
-            assert_eq!(
-                clamp_pan(pan, egui::vec2(100.0, 100.0), view),
-                egui::Vec2::ZERO
+                clamp_pan(egui::vec2(-5000.0, 5000.0), image, view),
+                egui::vec2(-900.0, 500.0)
             );
         }
 
         #[test]
-        fn clamp_pan_guards_non_finite_values() {
-            let content = egui::vec2(1000.0, 900.0);
-            let view = egui::vec2(400.0, 300.0);
+        fn clamp_pan_is_per_axis() {
+            let view = egui::vec2(1000.0, 1000.0);
+            // Wide and short: x overflows, y is small.
             assert_eq!(
-                clamp_pan(egui::vec2(f32::NAN, 10.0), content, view),
-                egui::Vec2::ZERO
+                clamp_pan(egui::vec2(5000.0, 5000.0), egui::vec2(1400.0, 200.0), view),
+                egui::vec2(500.0, 500.0)
+            );
+            // Narrow and tall: x is small, y overflows.
+            assert_eq!(
+                clamp_pan(
+                    egui::vec2(-5000.0, -5000.0),
+                    egui::vec2(200.0, 1400.0),
+                    view
+                ),
+                egui::vec2(300.0, -900.0)
+            );
+        }
+
+        #[test]
+        fn clamp_pan_guards_non_finite_values_with_the_centred_position() {
+            let image = egui::vec2(200.0, 200.0);
+            let view = egui::vec2(1000.0, 1000.0);
+            assert_eq!(
+                clamp_pan(egui::vec2(f32::NAN, 10.0), image, view),
+                egui::vec2(400.0, 400.0)
             );
             assert_eq!(
                 clamp_pan(
                     egui::vec2(10.0, 10.0),
-                    egui::vec2(f32::INFINITY, 900.0),
+                    egui::vec2(f32::INFINITY, 200.0),
                     view
                 ),
                 egui::Vec2::ZERO
             );
             assert_eq!(
-                clamp_pan(egui::vec2(10.0, 10.0), content, egui::vec2(f32::NAN, 300.0)),
+                clamp_pan(egui::vec2(10.0, 10.0), image, egui::vec2(f32::NAN, 1000.0)),
                 egui::Vec2::ZERO
             );
         }

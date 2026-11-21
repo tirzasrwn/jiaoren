@@ -63,14 +63,11 @@ enum RasterDraw {
 }
 
 /// An open click-to-zoom overlay: which diagram, how far zoomed in, and how far
-/// panned (the scroll area's offset, restored each frame).
+/// panned (image top-left relative to the view, redrawn every frame).
 pub(crate) struct PopupState {
     pub(crate) id: String,
     pub(crate) zoom: f32,
     pan: egui::Vec2,
-    /// Visible scroll viewport size from the previous frame, for the pan clamp.
-    /// Zero until the first frame has laid the scroll area out.
-    view: egui::Vec2,
 }
 
 /// Paint the grey "rendering diagram…" box used by the inline placeholder and
@@ -436,7 +433,6 @@ impl DiagramUi {
                         id: id.to_string(),
                         zoom: 1.0,
                         pan: egui::Vec2::ZERO,
-                        view: egui::Vec2::ZERO,
                     });
                     self.popup_fresh = true;
                     ui.ctx().request_repaint();
@@ -462,8 +458,9 @@ impl DiagramUi {
     /// document behind it does not scroll.
     pub(crate) fn draw_popup(&mut self, ctx: &egui::Context, column: f32) {
         let input_time = ctx.input(|i| i.time);
-        let (id, mut zoom, mut pan, mut viewport_size) = match self.popup.as_ref() {
-            Some(p) => (p.id.clone(), p.zoom, p.pan, p.view),
+        let fresh = std::mem::take(&mut self.popup_fresh);
+        let (id, mut zoom, mut pan) = match self.popup.as_ref() {
+            Some(p) => (p.id.clone(), p.zoom, p.pan),
             None => return,
         };
         let theme = self.theme;
@@ -572,128 +569,110 @@ impl DiagramUi {
         let avail =
             (screen.size() - egui::vec2(2.0 * margin, 2.0 * margin)).max(egui::vec2(64.0, 64.0));
         let pad = 10.0;
-        // Fixed boomer-like viewport: the panel is always the window minus the
-        // margin, not the image size, so a small image sits centred in a large
-        // frame and a zoomed one has real overflow to drag.
+        // Fixed frame: the panel is always the window minus the margin, not the
+        // image size, so the image can be dragged half a frame past every edge.
         let view = (avail - egui::vec2(2.0 * pad, 2.0 * pad)).max(egui::vec2(1.0, 1.0));
-        let (view_w, view_h) = (view.x, view.y);
         let panel = egui::Rect::from_center_size(screen.center(), avail);
-        // Anchor a zoom step at the pointer: the content point under it must
-        // stay put. The viewport is the scroll area's visible rect; its
-        // top-left is the panel inset by the frame margin. Outside the
-        // viewport, zoom around the centre instead.
-        let view_size = if viewport_size.x > 0.0 && viewport_size.y > 0.0 {
-            viewport_size
-        } else {
-            view
-        };
+        let view_rect = egui::Rect::from_min_size(panel.min + egui::vec2(pad, pad), view);
+        let image = egui::vec2(dw, dh);
+        // A new popup opens centred. Without this the clamp would push a small
+        // image to its edge-at-the-middle bound instead.
+        if fresh {
+            pan = (view - image) * 0.5;
+        }
+        // Anchor a zoom step at the pointer: the image point under it must stay
+        // put. Outside the viewport, zoom around the centre instead.
         if zoom != zoom_before {
-            let viewport = egui::Rect::from_center_size(screen.center(), view_size);
             let anchor = ctx
                 .input(|i| i.pointer.hover_pos())
-                .filter(|pos| viewport.contains(*pos))
-                .map_or(view_size * 0.5, |pos| pos - viewport.min);
+                .filter(|pos| view_rect.contains(*pos))
+                .map_or(view * 0.5, |pos| pos - view_rect.min);
             let old_size = egui::vec2(base_w * zoom_before, base_h * zoom_before);
-            pan = zoom_anchored(pan, anchor, old_size, egui::vec2(dw, dh), view_size);
-            pan = clamp_pan(pan, egui::vec2(dw, dh), view_size);
+            pan = zoom_anchored(pan, anchor, old_size, image);
         }
-        let (dimmed, offset) = egui::Area::new(egui::Id::new("mdview-diagram-popup"))
+        pan = clamp_pan(pan, image, view);
+        let dimmed = egui::Area::new(egui::Id::new("mdview-diagram-popup"))
             .order(egui::Order::Foreground)
             .fixed_pos(screen.min)
             .constrain(false)
             .fade_in(false)
             .show(ctx, |ui| {
                 let response = ui.allocate_rect(screen, egui::Sense::click());
-                ui.painter()
-                    .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(160));
+                let painter = ui.painter().clone();
+                painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(160));
                 // An explicit rect each frame: an auto-sized `Area` would keep
-                // the first frame's panel size and clip the zoomed image.
-                let offset = ui
-                    .scope_builder(egui::UiBuilder::new().max_rect(panel), |ui| {
-                        let frame = egui::Frame::new()
-                            .fill(ui.visuals().window_fill)
-                            .stroke(ui.visuals().window_stroke)
-                            .inner_margin(pad);
-                        frame
-                            .show(ui, |ui| {
-                                egui::ScrollArea::both()
-                                    .id_salt("mdview-diagram-popup-scroll")
-                                    .max_width(view_w)
-                                    .max_height(view_h)
-                                    .auto_shrink([false, false])
-                                    // The wheel zooms; panning is keys and
-                                    // pointer drag (both axes).
-                                    .scroll_source(egui::scroll_area::ScrollSource {
-                                        scroll_bar: true,
-                                        drag: egui::scroll_area::DragScroll::Always,
-                                        mouse_wheel: false,
-                                    })
-                                    // No bars: the wheel zooms, drag pans.
-                                    .scroll_bar_visibility(
-                                        egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                                    )
-                                    .scroll_offset(pan)
-                                    // Grab cursor over the image reads as "drag to pan".
-                                    .on_hover_cursor(egui::CursorIcon::Grab)
-                                    .show_viewport(ui, |ui, viewport| {
-                                        viewport_size = viewport.size();
-                                        ui.add_space(((view_h - dh) * 0.5).max(0.0));
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(((view_w - dw) * 0.5).max(0.0));
-                                            match &draw {
-                                                RasterDraw::Ready(tex) => {
-                                                    ui.add(
-                                                        egui::Image::from_texture(tex)
-                                                            .fit_to_exact_size(egui::vec2(dw, dh))
-                                                            // Hover only: a click sense would
-                                                            // steal the pointer from the
-                                                            // scroll area's drag-to-pan.
-                                                            .sense(egui::Sense::hover()),
-                                                    );
-                                                }
-                                                RasterDraw::Failed(msg) => {
-                                                    ui.vertical(|ui| {
-                                                        ui.set_max_width(dw);
-                                                        ui.colored_label(
-                                                            egui::Color32::RED,
-                                                            format!("diagram error: {msg}"),
-                                                        );
-                                                        if let Some(src) = self.sources.get(&id) {
-                                                            ui.code(src);
-                                                        }
-                                                    });
-                                                }
-                                                RasterDraw::Pending => {
-                                                    let (rect, _) = ui.allocate_exact_size(
-                                                        egui::vec2(dw, dh),
-                                                        egui::Sense::hover(),
-                                                    );
-                                                    draw_placeholder_box(ui, rect);
-                                                }
-                                            }
-                                        });
-                                    })
-                                    .state
-                                    .offset
-                            })
-                            .inner
-                    })
-                    .inner;
-                (response.clicked(), offset)
+                // the first frame's panel size and clip a zoomed image.
+                painter.rect(
+                    panel,
+                    0.0,
+                    ui.visuals().window_fill,
+                    ui.visuals().window_stroke,
+                    egui::StrokeKind::Inside,
+                );
+                let drag = ui.interact(
+                    view_rect,
+                    egui::Id::new("mdview-diagram-popup-drag"),
+                    egui::Sense::drag(),
+                );
+                let dragging = drag.dragged();
+                if dragging {
+                    pan = clamp_pan(pan + drag.drag_delta(), image, view);
+                }
+                drag.on_hover_cursor(if dragging {
+                    egui::CursorIcon::Grabbing
+                } else {
+                    egui::CursorIcon::Grab
+                });
+                let clipped = painter.with_clip_rect(view_rect);
+                let image_rect = egui::Rect::from_min_size(view_rect.min + pan, image);
+                match &draw {
+                    RasterDraw::Ready(tex) => {
+                        clipped.image(
+                            tex.id(),
+                            image_rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    }
+                    RasterDraw::Failed(msg) => {
+                        let galley = clipped.layout(
+                            format!("diagram error: {msg}"),
+                            egui::FontId::proportional(14.0),
+                            egui::Color32::RED,
+                            dw.max(1.0),
+                        );
+                        clipped.galley(image_rect.min, galley, egui::Color32::RED);
+                        if let Some(src) = self.sources.get(&id) {
+                            let galley = clipped.layout(
+                                src.clone(),
+                                egui::FontId::monospace(12.0),
+                                egui::Color32::from_gray(180),
+                                dw.max(1.0),
+                            );
+                            clipped.galley(
+                                image_rect.min + egui::vec2(0.0, 20.0),
+                                galley,
+                                egui::Color32::from_gray(180),
+                            );
+                        }
+                    }
+                    RasterDraw::Pending => {
+                        clipped.rect_filled(image_rect, 0.0, egui::Color32::from_gray(40));
+                        clipped.text(
+                            image_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "rendering diagram…",
+                            egui::FontId::proportional(16.0),
+                            egui::Color32::from_gray(180),
+                        );
+                    }
+                }
+                response.clicked()
             })
             .inner;
 
-        // Drag and the scroll bars move the real offset; read it back so key
-        // deltas next frame start from where the pointer left the image. Clamp
-        // against the real viewport so no drag can leave a gap at either edge.
-        pan = clamp_pan(offset, egui::vec2(dw, dh), viewport_size);
-        self.popup = Some(PopupState {
-            id,
-            zoom,
-            pan,
-            view: viewport_size,
-        });
-        let fresh = std::mem::take(&mut self.popup_fresh);
+        pan = clamp_pan(pan, image, view);
+        self.popup = Some(PopupState { id, zoom, pan });
         // Only a click on the dim background outside the frame closes: clicks
         // on the frame's padding keep it open.
         let inside_panel = ctx
