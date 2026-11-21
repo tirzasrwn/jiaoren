@@ -122,14 +122,15 @@ impl ParagraphUi {
 /// Renders an HTML placeholder through the diagram, table or paragraph UI.
 type HtmlFn = Box<dyn Fn(&mut egui::Ui, &str)>;
 
-/// A transient clipboard confirmation: one line, top-right, non-interactive.
-struct Toast {
+/// A transient clipboard confirmation: one plain line, bottom-left, drawn over
+/// the window margin like zathura's status bar.
+struct Status {
     message: &'static str,
     until: Instant,
 }
 
-/// How long a clipboard toast stays on screen.
-const TOAST_DURATION: Duration = Duration::from_millis(1500);
+/// How long a clipboard status line stays on screen.
+const STATUS_DURATION: Duration = Duration::from_millis(1500);
 
 /// The jiaoren window: document state, theme/zoom, scrolling, and the HTML
 /// render hook.
@@ -168,7 +169,7 @@ pub(crate) struct App {
     pending_reload: Option<Instant>,
     last_mtime: Option<SystemTime>,
     last_poll: Instant,
-    toast: Option<Toast>,
+    status: Option<Status>,
 }
 
 impl App {
@@ -273,7 +274,7 @@ impl App {
             pending_reload: None,
             last_mtime,
             last_poll: Instant::now(),
-            toast: None,
+            status: None,
         }
     }
 
@@ -302,33 +303,33 @@ impl App {
             .reset(self.prepared.paragraphs.clone());
     }
 
-    /// Show a clipboard confirmation for [`TOAST_DURATION`].
-    fn set_toast(&mut self, message: &'static str) {
-        self.toast = Some(Toast {
+    /// Show a clipboard confirmation for [`STATUS_DURATION`].
+    fn set_status(&mut self, message: &'static str) {
+        self.status = Some(Status {
             message,
-            until: Instant::now() + TOAST_DURATION,
+            until: Instant::now() + STATUS_DURATION,
         });
     }
 
-    /// Paint the top-right toast, if any, and schedule its own expiry.
-    fn draw_toast(&mut self, ctx: &egui::Context) {
-        let Some(toast) = &self.toast else {
+    /// Paint the bottom-left status line, if any, and schedule its expiry.
+    /// Anchored in the window margin, so it never takes layout from the
+    /// reading column; the document's bottom padding keeps text clear of it.
+    fn draw_status(&mut self, ctx: &egui::Context) {
+        let Some(status) = &self.status else {
             return;
         };
-        let remaining = toast.until.saturating_duration_since(Instant::now());
+        let remaining = status.until.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            self.toast = None;
+            self.status = None;
             return;
         }
-        let message = toast.message;
-        egui::Area::new(egui::Id::new("jiaoren-toast"))
+        let message = status.message;
+        egui::Area::new(egui::Id::new("jiaoren-status"))
             .order(egui::Order::Foreground)
-            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
+            .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
             .interactable(false)
             .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.label(message);
-                });
+                ui.label(egui::RichText::new(message).color(ui.visuals().weak_text_color()));
             });
         ctx.request_repaint_after(remaining);
     }
@@ -464,7 +465,7 @@ impl eframe::App for App {
                 Action::Reload => self.reload(),
                 Action::CopyDocument => {
                     ui.ctx().copy_text(self.source.clone());
-                    self.set_toast("copied markdown");
+                    self.set_status("copied markdown");
                 }
                 Action::Quit => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
             }
@@ -557,9 +558,9 @@ impl eframe::App for App {
         // Drawn last so the foreground overlay sits above the document.
         self.diagrams.borrow_mut().draw_popup(ui.ctx(), column);
         if self.tables.borrow_mut().take_copied() {
-            self.set_toast("copied CSV");
+            self.set_status("copied CSV");
         }
-        self.draw_toast(ui.ctx());
+        self.draw_status(ui.ctx());
     }
 }
 

@@ -77,7 +77,7 @@ To go back to the defaults, delete (or comment out) the
 Every table also carries a small copy icon at its top-right (tooltip: “Copy
 table as CSV”); clicking it copies the table as CSV (header row first, Markdown
 stripped from cells, fields quoted when they contain commas, quotes or line
-breaks). Both clipboard actions show a 1.5-second toast and never steal focus.
+breaks). Both clipboard actions show a 1.5-second bottom-left status line and never steal focus.
 `Ctrl+C` still quits jiaoren when no diagram overlay is open.
 
 ## Mermaid diagrams
