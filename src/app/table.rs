@@ -279,7 +279,7 @@ fn plain_text(md: &str) -> String {
             matches!(run.kind, crate::justify::RunKind::Text) && run.text.ends_with('!');
         let mut text = run.text;
         if !matches!(run.kind, crate::justify::RunKind::Code) {
-            text = strip_html(&text);
+            text = crate::justify::strip_html(&text);
         }
         // `parse_inline` has no image rule: `![alt](u)` arrives as a literal
         // `!` text run followed by a link run. Dropping that `!` leaves the alt
@@ -292,37 +292,6 @@ fn plain_text(md: &str) -> String {
         prev_was_text_with_bang = next_prev_bang;
     }
     out
-}
-
-/// Drop raw HTML tags (`<b>`, `</b>`, `<br>`, comments) from visible text.
-/// `<` not followed by a tag-like character is kept literally.
-fn strip_html(s: &str) -> String {
-    if !s.contains('<') {
-        return s.to_string();
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut i = 0;
-    while i < s.len() {
-        let rest = &s[i..];
-        if let Some(len) = html_tag_len(rest) {
-            i += len;
-            continue;
-        }
-        let c = rest.chars().next().unwrap();
-        out.push(c);
-        i += c.len_utf8();
-    }
-    out
-}
-
-/// Byte length of a tag-like `<...>` at the start of `s`, if any.
-fn html_tag_len(s: &str) -> Option<usize> {
-    let rest = s.strip_prefix('<')?;
-    let first = rest.chars().next()?;
-    if !(first.is_ascii_alphabetic() || matches!(first, '/' | '!' | '?')) {
-        return None;
-    }
-    rest.find('>').map(|end| end + 2)
 }
 
 /// Quote a CSV field when it contains a comma, quote or line break.

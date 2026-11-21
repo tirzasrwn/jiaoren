@@ -482,6 +482,81 @@ struct Word {
 /// on whitespace; a code span stays one atomic word. `face` overrides the body
 /// font (headings scale it); the strong colour follows the body colour so a
 /// heading's bold runs stay one ink.
+/// Visible plain text of inline Markdown on one line, for search: emphasis and
+/// HTML markup dropped, inline code and link labels kept, image alt kept (the
+/// leading `!` dropped), and every whitespace run collapsed to one space. This
+/// is the text a reader sees, so a soft-wrapped source matches its rendered
+/// form and stage-3 highlighting can slice it by chars.
+pub fn search_text(md: &str) -> String {
+    let mut out = String::new();
+    let mut prev_was_text_with_bang = false;
+    for run in parse_inline(md) {
+        let is_link = matches!(run.kind, RunKind::Link(_));
+        let next_prev_bang = matches!(run.kind, RunKind::Text) && run.text.ends_with('!');
+        let mut text = run.text;
+        if !matches!(run.kind, RunKind::Code) {
+            text = strip_html(&text);
+        }
+        // `parse_inline` has no image rule: `![alt](u)` arrives as a literal `!`
+        // text run followed by a link run. Dropping that `!` leaves the alt
+        // text; a bang at the end of a link label is not touched.
+        if is_link && prev_was_text_with_bang && out.ends_with('!') {
+            out.pop();
+        }
+        push_collapsed(&mut out, &text);
+        prev_was_text_with_bang = next_prev_bang;
+    }
+    while out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
+/// Append `text` to `out`, collapsing whitespace runs to one space and skipping
+/// leading whitespace.
+fn push_collapsed(out: &mut String, text: &str) {
+    for c in text.chars() {
+        if c.is_whitespace() {
+            if !out.is_empty() && !out.ends_with(' ') {
+                out.push(' ');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+}
+
+/// Drop raw HTML tags (`<b>`, `</b>`, `<br>`, comments) from visible text.
+/// `<` not followed by a tag-like character is kept literally.
+pub(crate) fn strip_html(s: &str) -> String {
+    if !s.contains('<') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let rest = &s[i..];
+        if let Some(len) = html_tag_len(rest) {
+            i += len;
+            continue;
+        }
+        let c = rest.chars().next().unwrap();
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// Byte length of a tag-like `<...>` at the start of `s`, if any.
+fn html_tag_len(s: &str) -> Option<usize> {
+    let rest = s.strip_prefix('<')?;
+    let first = rest.chars().next()?;
+    if !(first.is_ascii_alphabetic() || matches!(first, '/' | '!' | '?')) {
+        return None;
+    }
+    rest.find('>').map(|end| end + 2)
+}
+
 fn build_words(ui: &egui::Ui, runs: &[Run], face: Option<&(FontId, Color32)>) -> Vec<Word> {
     let body = face.map_or_else(
         || {
@@ -1046,6 +1121,38 @@ mod tests {
                     kind: RunKind::BoldItalic,
                 }]
             );
+        }
+    }
+
+    mod search_text {
+        use super::super::search_text;
+
+        #[test]
+        fn soft_wrap_becomes_one_space() {
+            assert_eq!(
+                search_text("tables and mermaid\ndiagrams render"),
+                "tables and mermaid diagrams render"
+            );
+        }
+
+        #[test]
+        fn inline_markup_is_reduced_to_visible_text() {
+            assert_eq!(
+                search_text("a **bold** and *it* word"),
+                "a bold and it word"
+            );
+            assert_eq!(search_text("see [label](https://x/y)"), "see label");
+            assert_eq!(search_text("run `code()` now"), "run code() now");
+            assert_eq!(search_text("![alt text](i.png)"), "alt text");
+            assert_eq!(search_text("![](i.png)"), "");
+            assert_eq!(search_text("<b>x</b> and <br> y"), "x and y");
+            assert_eq!(search_text("1 < 2"), "1 < 2");
+        }
+
+        #[test]
+        fn whitespace_runs_collapse_and_edges_trim() {
+            assert_eq!(search_text("  padded \n\t text  "), "padded text");
+            assert_eq!(search_text(""), "");
         }
     }
 

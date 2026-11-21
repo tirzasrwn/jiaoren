@@ -79,6 +79,12 @@ To go back to the defaults, delete (or comment out) the
 | `esc` | cancel the search prompt, else clear the active search, else quit |
 | `q` / `ctrl+c` | quit |
 
+Search matches the rendered text: soft-wrapped source lines are joined, inline
+emphasis and HTML markup are dropped, link labels and image alt text are kept,
+and code blocks are literal. Patterns are smartcase — any uppercase character
+makes the search case-sensitive. `n`/`N` wrap around; a hit jumps the document
+so its block is at the top of the viewport (clamped at the document edges).
+
 Mouse: drag anywhere to pan the document in both axes (the wheel still
 scrolls, `gg` returns to the start). A plain click on a diagram or local image
 opens the zoom popup; dragging from it pans the document instead.

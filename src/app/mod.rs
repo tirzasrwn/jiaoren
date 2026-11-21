@@ -127,7 +127,9 @@ impl ParagraphUi {
             Some(s) => s.clone(),
             None => return, // unknown id: draw nothing, never panic
         };
-        search.record(ui, source.clone());
+        // Search sees the rendered text, not the Markdown source: soft wraps
+        // become spaces and inline markup is dropped.
+        search.record(ui, crate::justify::search_text(&source));
         if source.contains("![") || source.contains('<') {
             CommonMarkViewer::new().show(ui, &mut self.cache, &source);
             return;
@@ -386,16 +388,11 @@ impl App {
         });
     }
 
-    /// Paint the bottom-left status line: the `/` command line while it is
-    /// open, otherwise a transient copy message, otherwise the active search
-    /// (`/pat [i/n]`). Anchored in the window margin, so it never takes layout
-    /// from the reading column; the document's bottom padding keeps text clear
-    /// of it.
+    /// Paint the bottom-left status line: a transient copy message, otherwise
+    /// the active search (`/pat [i/n]`). Anchored in the window margin, so it
+    /// never takes layout from the reading column; the document's bottom
+    /// padding keeps text clear of it.
     fn draw_status(&mut self, ctx: &egui::Context) {
-        if self.search.borrow().is_open() {
-            self.draw_search_prompt(ctx);
-            return;
-        }
         if let Some(status) = &self.status {
             let remaining = status.until.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -459,9 +456,9 @@ impl App {
         s.state.set_pattern(&texts, &pattern);
         let target = s.state.current_block().and_then(|b| s.block_y(b));
         self.jump_to = target;
-        if target.is_some() {
-            ctx.request_repaint();
-        }
+        // The prompt was drawn before the keys this frame; repaint so the
+        // status line replaces it even when there is nothing to jump to.
+        ctx.request_repaint();
     }
 
     /// Step to the next (`dir > 0`) or previous match and jump to its block.
@@ -556,27 +553,59 @@ impl eframe::App for App {
             }
         }
         let suppress_quit = quit_suppressed(input_time, popup_closed_at);
-        let command_open = self.search.borrow().is_open();
+        // The prompt is drawn before any key is acted on, so its TextEdit has
+        // already consumed this frame's text, paste and IME events. Enter then
+        // confirms the current buffer instead of the previous frame's.
+        let prompt_open = self.search.borrow().is_open();
+        if !popup_open && prompt_open {
+            self.draw_search_prompt(ui.ctx());
+        }
         let mut acts: Vec<Action> = Vec::new();
-        let mut confirm_search = false;
-        let mut cancel_search = false;
-        if !popup_open && command_open {
-            // While the command line owns the keyboard, only Enter and Esc are
-            // viewer keys: `q`, `t`, `r`, `0`, `/`, … must reach the TextEdit.
+        if !popup_open && prompt_open {
+            // While the command line owns the keyboard, document keys are
+            // suppressed: `q`, `t`, `r`, `0`, `/`, … reach the TextEdit.
+            let mut keys: Vec<(egui::Key, egui::Modifiers)> = Vec::new();
             ui.input(|i| {
                 for ev in &i.events {
                     if let egui::Event::Key {
-                        key, pressed: true, ..
+                        key,
+                        modifiers,
+                        pressed: true,
+                        ..
                     } = ev
                     {
-                        match *key {
-                            egui::Key::Enter => confirm_search = true,
-                            egui::Key::Escape => cancel_search = true,
-                            _ => {}
-                        }
+                        keys.push((*key, *modifiers));
                     }
                 }
             });
+            let ctx = ui.ctx().clone();
+            for (key, modifiers) in keys {
+                match key {
+                    // Enter first, so a following `n` in the same batch steps.
+                    egui::Key::Enter if self.search.borrow().is_open() => {
+                        self.confirm_search(&ctx);
+                    }
+                    egui::Key::Escape if self.search.borrow().is_open() => {
+                        self.search.borrow_mut().cancel();
+                        ctx.request_repaint();
+                    }
+                    // A character key typed before Enter stays text; only a
+                    // key after the prompt closed can step.
+                    egui::Key::N
+                        if !self.search.borrow().is_open()
+                            && modifiers.matches_exact(egui::Modifiers::SHIFT) =>
+                    {
+                        self.step_search(-1, &ctx);
+                    }
+                    egui::Key::N
+                        if !self.search.borrow().is_open()
+                            && modifiers.matches_exact(egui::Modifiers::NONE) =>
+                    {
+                        self.step_search(1, &ctx);
+                    }
+                    _ => {}
+                }
+            }
         } else if !popup_open {
             ui.input(|i| {
                 for ev in &i.events {
@@ -610,13 +639,6 @@ impl eframe::App for App {
                     }
                 }
             });
-        }
-        if cancel_search {
-            self.search.borrow_mut().cancel();
-            ui.ctx().request_repaint();
-        }
-        if confirm_search {
-            self.confirm_search(ui.ctx());
         }
         let page_h = ui.available_height();
         for act in acts {
@@ -807,7 +829,11 @@ impl eframe::App for App {
         if self.tables.borrow_mut().take_copied() {
             self.set_status("copied CSV");
         }
-        self.draw_status(ui.ctx());
+        // The prompt already occupied the bottom-left this frame; the next
+        // frame shows the confirmed status instead of drawing both at once.
+        if !prompt_open {
+            self.draw_status(ui.ctx());
+        }
     }
 }
 

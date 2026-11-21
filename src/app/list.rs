@@ -50,7 +50,7 @@ impl ListUi {
             ui.add_space(pad);
             for item in &spec.items {
                 // One searchable block per item, at the row it starts on.
-                search.record(ui, item.text.clone());
+                search.record(ui, crate::justify::search_text(&item.text));
                 let marker = match item.kind {
                     ListKind::Bullet if item.depth % 2 == 1 => Marker::Hollow,
                     ListKind::Bullet => Marker::Bullet,

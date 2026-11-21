@@ -43,7 +43,6 @@ impl HeadingUi {
         let font = egui::FontId::new(size, body.family.clone());
         let color = ui.visuals().strong_text_color();
         let runs = justify::parse_inline(&spec.text);
-        search.record(ui, spec.text.clone());
         let row_h = ui.text_style_height(&egui::TextStyle::Body);
         // The removed `<mdspace>` block was one empty body row above and below,
         // but a heading's own trailing spacing sat on top of it. These fractions
@@ -58,6 +57,9 @@ impl HeadingUi {
             if spec.space_before {
                 ui.add_space(before);
             }
+            // Record at the heading's text top, after the gap above, so a jump
+            // does not leave a blank band.
+            search.record(ui, justify::search_text(&spec.text));
             if runs.is_empty() {
                 // `#` still owns a heading row, not just the gaps.
                 let row_h = ui.fonts_mut(|f| f.row_height(&font));

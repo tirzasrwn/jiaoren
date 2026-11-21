@@ -21,8 +21,6 @@ Keyboard-first, almost no chrome, reloads when the file changes.
 ## Non-goals (v1)
 
 - Editing, tabs, TUI/terminal mode, PDF/HTML export.
-- `/` text search. Needs rendered-text access egui_commonmark doesn't expose;
-  upgrade path is an outline/heading sidebar built from the pulldown events.
 - Math, remote (`http`) images, mermaid interactivity (diagrams are static
   images).
 - Local `![](img.png)` images are in scope and resolve relative to the

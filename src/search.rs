@@ -251,6 +251,42 @@ mod tests {
         }
     }
 
+    mod rendered {
+        use super::super::find_matches;
+        use crate::justify::search_text;
+
+        #[test]
+        fn soft_wrapped_paragraph_matches_its_rendered_line() {
+            let block = search_text("tables and mermaid\ndiagrams render as one run");
+            assert_eq!(block, "tables and mermaid diagrams render as one run");
+            let hits = find_matches(&[block], "mermaid diagrams");
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].start, 11);
+        }
+
+        #[test]
+        fn emphasis_and_link_markup_match_visible_text_only() {
+            let block = search_text("a **bold** word and [label](https://x/y)");
+            assert_eq!(block, "a bold word and label");
+            assert_eq!(find_matches(std::slice::from_ref(&block), "bold").len(), 1);
+            assert_eq!(find_matches(&[block], "label").len(), 1);
+            // The Markdown markers themselves are not rendered, so not searchable.
+            assert!(find_matches(&[search_text("**bold**")], "**bold**").is_empty());
+        }
+
+        #[test]
+        fn code_text_is_matched_literally() {
+            let code = "let marker = \"**bold**\";\nrun `x`;".to_string();
+            assert_eq!(
+                find_matches(std::slice::from_ref(&code), "**bold**").len(),
+                1
+            );
+            let hits = find_matches(&[code], "`x`");
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].start, 29);
+        }
+    }
+
     mod stepping {
         use super::super::step;
 

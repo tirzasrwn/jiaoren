@@ -95,9 +95,9 @@ pub fn apply_key(
         Key::Q => Some(Action::Quit),
         // Escape clears an active search before it quits; the app decides which.
         Key::Escape => Some(Action::Escape),
-        Key::Slash if !modifiers.any() => Some(Action::SearchOpen),
-        Key::N if modifiers.shift => Some(Action::SearchPrev),
-        Key::N if !modifiers.command && !modifiers.ctrl => Some(Action::SearchNext),
+        Key::Slash if modifiers.is_none() => Some(Action::SearchOpen),
+        Key::N if modifiers.matches_exact(Modifiers::SHIFT) => Some(Action::SearchPrev),
+        Key::N if modifiers.matches_exact(Modifiers::NONE) => Some(Action::SearchNext),
         Key::Y if !modifiers.any() => {
             // Starting a `y` sequence breaks a pending `gg`.
             state.last_g = None;
@@ -443,8 +443,13 @@ mod tests {
                 apply_key(&mut s, Key::N, Modifiers::SHIFT, now),
                 Some(Action::SearchPrev)
             );
-            // Ctrl+N is not a match key.
+            // Ctrl+N and Alt+N are not match keys either.
             assert_eq!(apply_key(&mut s, Key::N, Modifiers::CTRL, now), None);
+            assert_eq!(apply_key(&mut s, Key::N, Modifiers::ALT, now), None);
+            assert_eq!(
+                apply_key(&mut s, Key::N, Modifiers::CTRL | Modifiers::SHIFT, now),
+                None
+            );
         }
 
         #[test]
