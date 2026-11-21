@@ -72,46 +72,58 @@ impl CodeUi {
         let (ranges, current) = search.highlights(block);
         let selection = search.selection_range(block);
         let row_h = ui.fonts_mut(|f| f.row_height(&mono));
+        let pad = row_h * 0.5;
         let lines = code_lines(&spec.text);
+        let spans = code_line_spans(&spec.text);
         let line_marks = line_highlights(&spec.text, &ranges, current);
         let sel_ranges: Vec<(usize, usize)> = selection.into_iter().collect();
         let sel_marks = line_highlights(&spec.text, &sel_ranges, None);
         let other_fill = crate::justify::highlight_color(ui, false);
         let current_fill = crate::justify::highlight_color(ui, true);
         let selection_fill = crate::justify::selection_color(ui);
-        let widest = widest_line(&lines, &|s| line_width(ui, s, &mono));
-        let pad = row_h * 0.5;
-        // Widest line plus padding, never narrower than the reading column: the
-        // scroll area sees the wider allocation and `h`/`l` can pan to it.
-        let width = self.column.max(widest + pad * 2.0);
-        let height = block_height(lines.len(), row_h) + pad * 2.0;
+        let cell = line_width(ui, "M", &mono);
+        // The number column plus one cell of gap; the text starts after it.
+        let gutter = gutter_width(lines.len(), cell);
+        // Leave the right padding inside the column so glyphs never spill past
+        // the block's background.
+        let content = (self.column - gutter - pad).max(cell);
+        let rows = layout_rows(&spec.text, content, &|s| line_width(ui, s, &mono));
+        let width = self.column.max(gutter + cell);
+        let height = rows.len().max(1) as f32 * row_h + pad * 2.0;
         let (_, rect) = ui.allocate_space(egui::vec2(width, height));
         search.set_height(block, height);
         search.set_rect(block, rect);
         let painter = ui.painter().clone();
         painter.rect_filled(rect, 2.0, ui.visuals().code_bg_color);
         let color = ui.visuals().text_color();
+        let number_color = ui.visuals().weak_text_color();
+        let text_left = rect.left() + pad + gutter;
         let mut chars = Vec::new();
-        let spans = code_line_spans(&spec.text);
-        for (row, (line, &(line_start, line_len))) in lines.iter().zip(&spans).enumerate() {
-            let pos = egui::Pos2::new(rect.left() + pad, rect.top() + pad + row as f32 * row_h);
+        for (row_index, row) in rows.iter().enumerate() {
+            let source = lines.get(row.line).copied().unwrap_or("");
+            let text: String = source.chars().skip(row.start).take(row.len).collect();
+            let pos = egui::Pos2::new(text_left, rect.top() + pad + row_index as f32 * row_h);
+            // The number sits on the first visual row of its source line only;
+            // wrapped continuations keep an empty gutter.
+            if row.start == 0 {
+                let number = format!("{}", row.line + 1);
+                let galley = ui.fonts_mut(|f| f.layout_no_wrap(number, mono.clone(), number_color));
+                let x = text_left - cell * 0.5 - galley.size().x;
+                painter.galley(egui::Pos2::new(x, pos.y), galley, number_color);
+            }
             // Selection first, then search hits, both behind the glyphs.
-            for &(start, end, _) in &sel_marks[row] {
-                let prefix: String = line.chars().take(start).collect();
-                let piece: String = line.chars().skip(start).take(end - start).collect();
-                let x = pos.x + line_width(ui, &prefix, &mono);
-                let w = line_width(ui, &piece, &mono);
+            for &(mark_start, mark_end, _) in &clip_marks(&sel_marks[row.line], row) {
+                let x = pos.x + line_width(ui, &prefix(&text, mark_start), &mono);
+                let w = line_width(ui, &slice(&text, mark_start, mark_end), &mono);
                 painter.rect_filled(
                     egui::Rect::from_min_size(egui::Pos2::new(x, pos.y), egui::vec2(w, row_h)),
                     2.0,
                     selection_fill,
                 );
             }
-            for &(start, end, is_current) in &line_marks[row] {
-                let prefix: String = line.chars().take(start).collect();
-                let piece: String = line.chars().skip(start).take(end - start).collect();
-                let x = pos.x + line_width(ui, &prefix, &mono);
-                let w = line_width(ui, &piece, &mono);
+            for &(mark_start, mark_end, is_current) in &clip_marks(&line_marks[row.line], row) {
+                let x = pos.x + line_width(ui, &prefix(&text, mark_start), &mono);
+                let w = line_width(ui, &slice(&text, mark_start, mark_end), &mono);
                 let fill = if is_current { current_fill } else { other_fill };
                 painter.rect_filled(
                     egui::Rect::from_min_size(egui::Pos2::new(x, pos.y), egui::vec2(w, row_h)),
@@ -119,14 +131,14 @@ impl CodeUi {
                     fill,
                 );
             }
-            if line.is_empty() {
+            if text.is_empty() {
                 continue; // the row is still reserved by `height`
             }
-            let galley = ui.fonts_mut(|f| f.layout_no_wrap(line.to_string(), mono.clone(), color));
+            let galley = ui.fonts_mut(|f| f.layout_no_wrap(text.clone(), mono.clone(), color));
             let line_w = galley.size().x.max(1.0);
             chars.push(crate::justify::CharSpan {
-                start: line_start,
-                len: line_len,
+                start: spans.get(row.line).map_or(0, |&(start, _)| start) + row.start,
+                len: row.len,
                 rect: egui::Rect::from_min_size(pos, egui::vec2(line_w, row_h)),
             });
             painter.galley(pos, galley, color);
@@ -259,6 +271,19 @@ pub(crate) fn line_highlights(
     out
 }
 
+/// The first `count` chars of `text`.
+fn prefix(text: &str, count: usize) -> String {
+    text.chars().take(count).collect()
+}
+
+/// `count` chars of `text` starting at `start`.
+fn slice(text: &str, start: usize, end: usize) -> String {
+    text.chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect()
+}
+
 /// Width of `text` in the code font, for prefix/substring highlight offsets.
 fn line_width(ui: &egui::Ui, text: &str, mono: &egui::FontId) -> f32 {
     ui.fonts_mut(|f| {
@@ -273,25 +298,12 @@ pub(crate) fn code_lines(text: &str) -> Vec<&str> {
     text.split('\n').collect()
 }
 
-/// Height of a block of `line_count` rows; an empty block still keeps one row.
-pub(crate) fn block_height(line_count: usize, row_height: f32) -> f32 {
-    line_count.max(1) as f32 * row_height
-}
-
-/// Width of the widest line under `measure`.
-pub(crate) fn widest_line(lines: &[&str], measure: &dyn Fn(&str) -> f32) -> f32 {
-    lines
-        .iter()
-        .map(|line| measure(line))
-        .fold(0.0f32, f32::max)
-}
-
 #[cfg(test)]
 mod tests {
     mod layout {
         use super::super::{
-            block_height, clip_marks, code_line_spans, code_lines, gutter_width, layout_rows,
-            line_highlights, widest_line, wrap_line, Row,
+            clip_marks, code_line_spans, code_lines, gutter_width, layout_rows, line_highlights,
+            wrap_line, Row,
         };
 
         #[test]
@@ -353,6 +365,39 @@ mod tests {
         }
 
         #[test]
+        fn wrapped_rows_have_disjoint_char_spans() {
+            let m = |s: &str| s.chars().count() as f32 * 10.0;
+            let rows = layout_rows("abcdef", 20.0, &m);
+            let offsets: Vec<usize> = rows.iter().map(|r| r.start).collect();
+            assert_eq!(offsets, vec![0, 2, 4]);
+            // Row starts plus lengths tile the line without gaps or overlap.
+            assert_eq!(
+                rows.iter().map(|r| (r.start, r.len)).collect::<Vec<_>>(),
+                vec![(0, 2), (2, 2), (4, 2)]
+            );
+        }
+
+        #[test]
+        fn pointer_on_a_continuation_row_maps_to_that_rows_chars() {
+            use crate::app::selection::hit_test;
+            use crate::justify::CharSpan;
+            let spans = vec![
+                CharSpan {
+                    start: 0,
+                    len: 2,
+                    rect: egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(20.0, 10.0)),
+                },
+                CharSpan {
+                    start: 2,
+                    len: 2,
+                    rect: egui::Rect::from_min_size(egui::pos2(0.0, 10.0), egui::vec2(20.0, 10.0)),
+                },
+            ];
+            // Midpoint of the second row: char 3, not char 1.
+            assert_eq!(hit_test(&spans, egui::pos2(10.0, 15.0)), Some(3));
+        }
+
+        #[test]
         fn gutter_is_digits_plus_one_cell() {
             assert_eq!(gutter_width(1, 8.0), 16.0);
             assert_eq!(gutter_width(9, 8.0), 16.0);
@@ -383,21 +428,6 @@ mod tests {
             );
             // A trailing newline is stripped in doc.rs; an empty block is one row.
             assert_eq!(code_lines(""), vec![""]);
-        }
-
-        #[test]
-        fn height_counts_every_line_including_empty_ones() {
-            assert_eq!(block_height(0, 20.0), 20.0);
-            assert_eq!(block_height(1, 20.0), 20.0);
-            assert_eq!(block_height(4, 20.0), 80.0);
-        }
-
-        #[test]
-        fn widest_line_measures_each_line() {
-            let measure = |s: &str| s.chars().count() as f32 * 10.0;
-            let lines = ["fn x() {}", "", "        indented"];
-            assert_eq!(widest_line(&lines, &measure), 160.0);
-            assert_eq!(widest_line(&[], &measure), 0.0);
         }
 
         #[test]
