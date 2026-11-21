@@ -30,6 +30,10 @@ table past the window.
 | Theme | `t` | Catppuccin |
 | Quit | `Ctrl+C` | `q` closes the popup |
 
+## Image
+
+![local image](../docs/assets/demo-image.png)
+
 ## Diagram
 
 ```mermaid
