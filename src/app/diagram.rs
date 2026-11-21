@@ -9,8 +9,8 @@ use std::thread;
 use crate::mermaid::{parse_svg_size, Renderer, Theme};
 
 use super::geometry::{
-    bucket_for_scale, bucket_scale, diagram_display_size, keep_bucket, popup_zoom_step, raster_key,
-    reanchor, RasterKey,
+    bucket_for_scale, bucket_scale, clamp_pan, diagram_display_size, keep_bucket, popup_zoom_step,
+    raster_key, reanchor, zoom_anchored, RasterKey,
 };
 use super::lock;
 use super::raster::{rasterize, Raster, RasterJob};
@@ -68,6 +68,9 @@ pub(crate) struct PopupState {
     pub(crate) id: String,
     pub(crate) zoom: f32,
     pan: egui::Vec2,
+    /// Visible scroll viewport size from the previous frame, for the pan clamp.
+    /// Zero until the first frame has laid the scroll area out.
+    view: egui::Vec2,
 }
 
 /// Paint the grey "rendering diagram…" box used by the inline placeholder and
@@ -433,6 +436,7 @@ impl DiagramUi {
                         id: id.to_string(),
                         zoom: 1.0,
                         pan: egui::Vec2::ZERO,
+                        view: egui::Vec2::ZERO,
                     });
                     self.popup_fresh = true;
                     ui.ctx().request_repaint();
@@ -458,8 +462,8 @@ impl DiagramUi {
     /// document behind it does not scroll.
     pub(crate) fn draw_popup(&mut self, ctx: &egui::Context, column: f32) {
         let input_time = ctx.input(|i| i.time);
-        let (id, mut zoom, mut pan) = match self.popup.as_ref() {
-            Some(p) => (p.id.clone(), p.zoom, p.pan),
+        let (id, mut zoom, mut pan, mut viewport_size) = match self.popup.as_ref() {
+            Some(p) => (p.id.clone(), p.zoom, p.pan, p.view),
             None => return,
         };
         let theme = self.theme;
@@ -525,6 +529,7 @@ impl DiagramUi {
             return;
         }
         let steps = i32::from(plus || wheel_up) - i32::from(minus || wheel_down);
+        let zoom_before = zoom;
         zoom = popup_zoom_step(zoom, steps);
         pan += egui::vec2(
             if l {
@@ -567,16 +572,30 @@ impl DiagramUi {
         let avail =
             (screen.size() - egui::vec2(2.0 * margin, 2.0 * margin)).max(egui::vec2(64.0, 64.0));
         let pad = 10.0;
+        // Fixed boomer-like viewport: the panel is always the window minus the
+        // margin, not the image size, so a small image sits centred in a large
+        // frame and a zoomed one has real overflow to drag.
         let view = (avail - egui::vec2(2.0 * pad, 2.0 * pad)).max(egui::vec2(1.0, 1.0));
-        let view_w = dw.min(view.x);
-        let view_h = dh.min(view.y);
-
-        // The frame hugs the image (up to the window's margin); both are
-        // centred, so the dim background stays visible around the panel.
-        let panel = egui::Rect::from_center_size(
-            screen.center(),
-            egui::vec2(view_w + 2.0 * pad, view_h + 2.0 * pad),
-        );
+        let (view_w, view_h) = (view.x, view.y);
+        let panel = egui::Rect::from_center_size(screen.center(), avail);
+        // Anchor a zoom step at the pointer: the content point under it must
+        // stay put. The viewport is the scroll area's visible rect; its
+        // top-left is the panel inset by the frame margin. Outside the
+        // viewport, zoom around the centre instead.
+        let view_size = if viewport_size.x > 0.0 && viewport_size.y > 0.0 {
+            viewport_size
+        } else {
+            view
+        };
+        if zoom != zoom_before {
+            let viewport = egui::Rect::from_center_size(screen.center(), view_size);
+            let anchor = ctx
+                .input(|i| i.pointer.hover_pos())
+                .filter(|pos| viewport.contains(*pos))
+                .map_or(view_size * 0.5, |pos| pos - viewport.min);
+            pan = zoom_anchored(pan, anchor, zoom_before, zoom);
+            pan = clamp_pan(pan, egui::vec2(dw, dh), view_size);
+        }
         let (dimmed, offset) = egui::Area::new(egui::Id::new("mdview-diagram-popup"))
             .order(egui::Order::Foreground)
             .fixed_pos(screen.min)
@@ -601,15 +620,22 @@ impl DiagramUi {
                                     .max_width(view_w)
                                     .max_height(view_h)
                                     .auto_shrink([false, false])
-                                    // The wheel zooms; panning is keys, the bars
-                                    // and pointer drag (both axes).
+                                    // The wheel zooms; panning is keys and
+                                    // pointer drag (both axes).
                                     .scroll_source(egui::scroll_area::ScrollSource {
                                         scroll_bar: true,
                                         drag: egui::scroll_area::DragScroll::Always,
                                         mouse_wheel: false,
                                     })
+                                    // No bars: the wheel zooms, drag pans.
+                                    .scroll_bar_visibility(
+                                        egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                                    )
                                     .scroll_offset(pan)
-                                    .show(ui, |ui| {
+                                    // Grab cursor over the image reads as "drag to pan".
+                                    .on_hover_cursor(egui::CursorIcon::Grab)
+                                    .show_viewport(ui, |ui, viewport| {
+                                        viewport_size = viewport.size();
                                         ui.add_space(((view_h - dh) * 0.5).max(0.0));
                                         ui.horizontal(|ui| {
                                             ui.add_space(((view_w - dw) * 0.5).max(0.0));
@@ -657,12 +683,18 @@ impl DiagramUi {
             .inner;
 
         // Drag and the scroll bars move the real offset; read it back so key
-        // deltas next frame start from where the pointer left the image.
-        pan = offset;
-        self.popup = Some(PopupState { id, zoom, pan });
+        // deltas next frame start from where the pointer left the image. Clamp
+        // against the real viewport so no drag can leave a gap at either edge.
+        pan = clamp_pan(offset, egui::vec2(dw, dh), viewport_size);
+        self.popup = Some(PopupState {
+            id,
+            zoom,
+            pan,
+            view: viewport_size,
+        });
         let fresh = std::mem::take(&mut self.popup_fresh);
         // Only a click on the dim background outside the frame closes: clicks
-        // on the frame's padding (or its scroll bars) keep it open.
+        // on the frame's padding keep it open.
         let inside_panel = ctx
             .input(|i| i.pointer.interact_pos())
             .is_some_and(|pos| panel.contains(pos));

@@ -193,6 +193,43 @@ pub(crate) fn popup_zoom_step(zoom: f32, delta: i32) -> f32 {
     (zoom + delta as f32 * 0.25).clamp(1.0, 3.0)
 }
 
+/// New scroll offset that keeps the content point under `pointer_in_view`
+/// fixed while the content scales from `old_zoom` to `new_zoom`.
+///
+/// `pointer_in_view` is relative to the visible viewport's top-left. The
+/// content point under it is `offset + pointer_in_view`; scaling that point and
+/// subtracting the pointer back out gives the offset that keeps it in place.
+/// A non-positive or non-finite zoom (or a non-finite offset/pointer) returns
+/// `offset` unchanged so the overlay never draws a NaN-sized image.
+pub(crate) fn zoom_anchored(
+    offset: egui::Vec2,
+    pointer_in_view: egui::Vec2,
+    old_zoom: f32,
+    new_zoom: f32,
+) -> egui::Vec2 {
+    if old_zoom <= 0.0
+        || new_zoom <= 0.0
+        || !old_zoom.is_finite()
+        || !new_zoom.is_finite()
+        || !offset.is_finite()
+        || !pointer_in_view.is_finite()
+    {
+        return offset;
+    }
+    (offset + pointer_in_view) * (new_zoom / old_zoom) - pointer_in_view
+}
+
+/// Clamp a scroll offset so content cannot be dragged past its edges.
+/// When the content is smaller than the view on an axis, the offset is 0 (the
+/// drawing code already centres it). Non-finite input clamps to 0.
+pub(crate) fn clamp_pan(pan: egui::Vec2, content: egui::Vec2, view: egui::Vec2) -> egui::Vec2 {
+    if !pan.is_finite() || !content.is_finite() || !view.is_finite() {
+        return egui::Vec2::ZERO;
+    }
+    let max = (content - view).max(egui::Vec2::ZERO);
+    pan.clamp(egui::Vec2::ZERO, max)
+}
+
 /// Pixel scale for `bucket` at a given display density. Textures are rendered
 /// at `bucket × pixels_per_point` texels per SVG unit.
 pub(crate) fn bucket_scale(bucket: u16, pixels_per_point: f32) -> f32 {
@@ -402,6 +439,118 @@ mod tests {
             assert_eq!(popup_zoom_step(2.0, -2), 1.5);
             assert_eq!(popup_zoom_step(2.875, 1), 3.0);
             assert_eq!(popup_zoom_step(f32::NAN, 1), 1.0);
+        }
+
+        #[test]
+        fn zoom_anchor_keeps_the_content_point_under_the_pointer() {
+            // Centre of a 400x300 viewport. The content point under it must be
+            // the same after scaling, which moves the scroll offset.
+            let p = egui::vec2(200.0, 150.0);
+            let new = zoom_anchored(egui::vec2(30.0, 40.0), p, 1.0, 2.0);
+            assert_eq!(new, egui::vec2(260.0, 230.0));
+            assert_eq!(new + p, (egui::vec2(30.0, 40.0) + p) * 2.0);
+        }
+
+        #[test]
+        fn zoom_anchor_at_top_left_scales_the_offset() {
+            let origin = egui::Vec2::ZERO;
+            // Zooming in doubles the offset; zooming back out halves it.
+            assert_eq!(
+                zoom_anchored(egui::vec2(100.0, 50.0), origin, 1.0, 2.0),
+                egui::vec2(200.0, 100.0)
+            );
+            assert_eq!(
+                zoom_anchored(egui::vec2(200.0, 100.0), origin, 2.0, 1.0),
+                egui::vec2(100.0, 50.0)
+            );
+            assert_eq!(
+                zoom_anchored(egui::Vec2::ZERO, origin, 1.0, 2.0),
+                egui::Vec2::ZERO
+            );
+        }
+
+        #[test]
+        fn zoom_anchor_at_a_mid_point() {
+            let new = zoom_anchored(egui::vec2(100.0, 60.0), egui::vec2(120.0, 80.0), 1.0, 2.0);
+            assert_eq!(new, egui::vec2(320.0, 200.0));
+        }
+
+        #[test]
+        fn zoom_anchor_guards_bad_zooms_and_values() {
+            let offset = egui::vec2(100.0, 50.0);
+            let p = egui::vec2(10.0, 20.0);
+            assert_eq!(zoom_anchored(offset, p, 0.0, 2.0), offset);
+            assert_eq!(zoom_anchored(offset, p, -1.0, 2.0), offset);
+            assert_eq!(zoom_anchored(offset, p, 1.0, 0.0), offset);
+            assert_eq!(zoom_anchored(offset, p, f32::NAN, 2.0), offset);
+            assert_eq!(zoom_anchored(offset, p, 1.0, f32::INFINITY), offset);
+            let nan_offset = zoom_anchored(egui::vec2(f32::NAN, 0.0), p, 1.0, 2.0);
+            assert!(nan_offset.x.is_nan() && nan_offset.y == 0.0);
+            assert_eq!(
+                zoom_anchored(offset, egui::vec2(f32::INFINITY, 0.0), 1.0, 2.0),
+                offset
+            );
+        }
+
+        #[test]
+        fn clamp_pan_limits_larger_content_to_its_edges() {
+            let view = egui::vec2(400.0, 300.0);
+            let content = egui::vec2(1000.0, 900.0);
+            assert_eq!(
+                clamp_pan(egui::vec2(120.0, 80.0), content, view),
+                egui::vec2(120.0, 80.0)
+            );
+            assert_eq!(
+                clamp_pan(egui::vec2(5000.0, 5000.0), content, view),
+                egui::vec2(600.0, 600.0)
+            );
+            assert_eq!(
+                clamp_pan(egui::vec2(-50.0, -50.0), content, view),
+                egui::Vec2::ZERO
+            );
+        }
+
+        #[test]
+        fn clamp_pan_zeroes_axes_where_content_fits() {
+            let view = egui::vec2(400.0, 300.0);
+            let pan = egui::vec2(120.0, 80.0);
+            // Wider than the view, shorter than it: only x may scroll.
+            assert_eq!(
+                clamp_pan(pan, egui::vec2(1000.0, 200.0), view),
+                egui::vec2(120.0, 0.0)
+            );
+            // Taller than the view, narrower than it: only y may scroll.
+            assert_eq!(
+                clamp_pan(pan, egui::vec2(200.0, 1000.0), view),
+                egui::vec2(0.0, 80.0)
+            );
+            // Fits on both axes: always centred (offset 0).
+            assert_eq!(
+                clamp_pan(pan, egui::vec2(100.0, 100.0), view),
+                egui::Vec2::ZERO
+            );
+        }
+
+        #[test]
+        fn clamp_pan_guards_non_finite_values() {
+            let content = egui::vec2(1000.0, 900.0);
+            let view = egui::vec2(400.0, 300.0);
+            assert_eq!(
+                clamp_pan(egui::vec2(f32::NAN, 10.0), content, view),
+                egui::Vec2::ZERO
+            );
+            assert_eq!(
+                clamp_pan(
+                    egui::vec2(10.0, 10.0),
+                    egui::vec2(f32::INFINITY, 900.0),
+                    view
+                ),
+                egui::Vec2::ZERO
+            );
+            assert_eq!(
+                clamp_pan(egui::vec2(10.0, 10.0), content, egui::vec2(f32::NAN, 300.0)),
+                egui::Vec2::ZERO
+            );
         }
 
         #[test]
