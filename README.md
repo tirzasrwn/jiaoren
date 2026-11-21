@@ -66,16 +66,32 @@ To go back to the defaults, delete (or comment out) the
 Rendering ```mermaid fences into images requires **Chromium (headless)**, which
 jiaoren runs to let mermaid.js rasterize each diagram.
 
-Chromium is already present on this machine via the playwright cache; jiaoren
-uses the newest `chromium-*` directory under `~/.cache/ms-playwright/`
-automatically. To point jiaoren at a different binary, set:
+jiaoren manages its own copy, so no Playwright, Node or sudo is needed. On
+startup it looks for a browser in this order:
+
+1. `JIAOREN_CHROMIUM` (an explicit binary path)
+2. `chrome-headless-shell`, `chromium`, `google-chrome` or `chrome` on `PATH`
+3. the managed install at
+   `~/.cache/jiaoren/chromium/<version>/chrome-headless-shell-linux64/chrome-headless-shell`
+
+When none is found, the first run downloads Chrome for Testing's
+`chrome-headless-shell` (pinned version `158.0.8127.36`, about 132 MB, so the
+first run needs network) and caches it under `~/.cache/jiaoren/chromium/<version>/`.
+Later runs reuse it; delete that directory to force a fresh download.
+
+To point jiaoren at a different binary instead, set:
 
 ```bash
 export JIAOREN_CHROMIUM=/path/to/chrome
 ```
 
-If no Chromium is found, the document still opens and a warning banner is
-shown; diagrams simply won't render.
+The pinned CfT URL has no `.sha256` file alongside it, so integrity is checked
+by `unzip -t` on the archive, a `--version` run of the extracted binary, and the
+pinned version itself. The download is extracted into a temp directory and
+renamed into place, so a failed install leaves no half-written binary.
+
+If Chromium cannot be found or installed, the document still opens and a
+warning banner names the failing step; diagrams simply won't render.
 
 A diagram is drawn at its intrinsic size (centred when narrower than the text
 column) and capped to the column width when wider, with the same vertical

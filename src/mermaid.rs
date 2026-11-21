@@ -225,46 +225,142 @@ fn dirs_cache() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
-/// Locate Chromium: `JIAOREN_CHROMIUM`, then `PATH`, then Playwright's cache.
+/// Chrome for Testing version jiaoren downloads and manages itself.
+pub const MANAGED_VERSION: &str = "158.0.8127.36";
+
+/// PATH names tried, in order, before the managed install.
+const CHROMIUM_NAMES: [&str; 4] = [
+    "chrome-headless-shell",
+    "chromium",
+    "google-chrome",
+    "chrome",
+];
+
+/// Path of the managed binary inside jiaoren's cache directory.
+fn managed_chromium_path(cache_dir: &Path) -> PathBuf {
+    cache_dir
+        .join("chromium")
+        .join(MANAGED_VERSION)
+        .join("chrome-headless-shell-linux64")
+        .join("chrome-headless-shell")
+}
+
+/// Candidate binaries in detection order for a given cache dir and PATH.
+#[cfg(test)]
+fn chromium_candidates(cache_dir: &Path, path_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for name in CHROMIUM_NAMES {
+        out.extend(path_dirs.iter().map(|d| d.join(name)));
+    }
+    out.push(managed_chromium_path(cache_dir));
+    out
+}
+
+/// Locate Chromium: `JIAOREN_CHROMIUM`, then `PATH`, then the managed install.
 pub fn find_chromium() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("JIAOREN_CHROMIUM") {
         let p = PathBuf::from(p);
         return p.exists().then_some(p);
     }
-    for name in ["chromium", "google-chrome", "chrome"] {
+    for name in CHROMIUM_NAMES {
         if let Some(p) = find_in_path(name) {
             return Some(p);
         }
     }
-    let base = dirs_cache().join("ms-playwright");
-    let mut entries: Vec<PathBuf> = fs::read_dir(&base)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.starts_with("chromium-"))
-                .unwrap_or(false)
-        })
-        .collect();
-    // Descending numeric suffix: chromium-1255 is newer than chromium-999.
-    entries.sort_by_key(|p| {
-        std::cmp::Reverse(
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .and_then(|n| n.strip_prefix("chromium-"))
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0),
-        )
-    });
-    for e in entries {
-        let chrome = e.join("chrome-linux64/chrome");
-        if chrome.exists() {
-            return Some(chrome);
+    let managed = managed_chromium_path(&dirs_cache().join("jiaoren"));
+    is_executable(&managed).then_some(managed)
+}
+
+/// Return an existing Chromium, or download the pinned `chrome-headless-shell`
+/// into `cache_dir` (`~/.cache/jiaoren`) and return its path.
+pub fn ensure_chromium(cache_dir: &Path) -> Result<PathBuf, String> {
+    if let Some(p) = find_chromium() {
+        return Ok(p);
+    }
+    install_chromium(cache_dir)
+}
+
+fn install_chromium(cache_dir: &Path) -> Result<PathBuf, String> {
+    let version_dir = cache_dir.join("chromium").join(MANAGED_VERSION);
+    let final_dir = version_dir.join("chrome-headless-shell-linux64");
+    let final_bin = final_dir.join("chrome-headless-shell");
+    // Build everything in a temp dir beside the target so the last step is an
+    // atomic rename and a failed install never leaves a half-written binary.
+    let tmp_dir = version_dir.join(format!(".tmp-{}", std::process::id()));
+    let zip = tmp_dir.join("chrome-headless-shell-linux64.zip");
+    let url = format!(
+        "https://storage.googleapis.com/chrome-for-testing-public/{MANAGED_VERSION}/linux64/chrome-headless-shell-linux64.zip"
+    );
+
+    let fail = |step: &str, e: String| -> String {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        format!("{step}: {e}")
+    };
+
+    fs::create_dir_all(&tmp_dir).map_err(|e| format!("create {}: {e}", tmp_dir.display()))?;
+    eprintln!("installing chrome-headless-shell {MANAGED_VERSION} (132 MB)…");
+    let status = Command::new("curl")
+        .arg("-fL")
+        .arg("--retry")
+        .arg("2")
+        .arg("-o")
+        .arg(&zip)
+        .arg(&url)
+        .status()
+        .map_err(|e| fail("spawn curl", e.to_string()))?;
+    if !status.success() {
+        return Err(fail("download", format!("curl exited {status}")));
+    }
+    let status = Command::new("unzip")
+        .arg("-t")
+        .arg(&zip)
+        .status()
+        .map_err(|e| fail("spawn unzip -t", e.to_string()))?;
+    if !status.success() {
+        return Err(fail("archive test", format!("unzip -t exited {status}")));
+    }
+    let status = Command::new("unzip")
+        .arg("-q")
+        .arg("-o")
+        .arg(&zip)
+        .arg("-d")
+        .arg(&tmp_dir)
+        .status()
+        .map_err(|e| fail("spawn unzip", e.to_string()))?;
+    if !status.success() {
+        return Err(fail("extract", format!("unzip exited {status}")));
+    }
+    let _ = fs::remove_file(&zip);
+    let tmp_bin = tmp_dir.join("chrome-headless-shell-linux64/chrome-headless-shell");
+    if !tmp_bin.is_file() {
+        return Err(fail("extract", "chrome-headless-shell missing".to_string()));
+    }
+    let _ = fs::remove_dir_all(&final_dir);
+    if let Err(e) = fs::rename(tmp_dir.join("chrome-headless-shell-linux64"), &final_dir) {
+        return Err(fail("rename into place", e.to_string()));
+    }
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = fs::set_permissions(&final_bin, fs::Permissions::from_mode(0o755)) {
+        let _ = fs::remove_dir_all(&final_dir);
+        return Err(fail("chmod", e.to_string()));
+    }
+    match Command::new(&final_bin).arg("--version").output() {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            let _ = fs::remove_dir_all(&final_dir);
+            return Err(fail(
+                "binary check",
+                format!("--version exited {}", out.status),
+            ));
+        }
+        Err(e) => {
+            let _ = fs::remove_dir_all(&final_dir);
+            return Err(fail("binary check", e.to_string()));
         }
     }
-    None
+    let _ = fs::remove_dir_all(&tmp_dir);
+    eprintln!("installed chrome-headless-shell at {}", final_bin.display());
+    Ok(final_bin)
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -547,10 +643,93 @@ mod tests {
         }
 
         #[test]
-        fn env_override_wins_for_chromium() {
-            std::env::set_var("JIAOREN_CHROMIUM", "/bin/true");
-            assert_eq!(find_chromium(), Some(PathBuf::from("/bin/true")));
-            std::env::remove_var("JIAOREN_CHROMIUM");
+        fn candidate_order_is_path_then_managed() {
+            use std::os::unix::fs::PermissionsExt;
+            let base = std::env::temp_dir().join(format!("jiaoren-cand-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&base);
+            let bin_dir = base.join("bin");
+            let cache = base.join("cache");
+            fs::create_dir_all(&bin_dir).unwrap();
+            fs::create_dir_all(&cache).unwrap();
+            let chrome = bin_dir.join("chromium");
+            fs::write(&chrome, b"#!/bin/sh\n").unwrap();
+            fs::set_permissions(&chrome, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let cands = chromium_candidates(&cache, std::slice::from_ref(&bin_dir));
+            let names: Vec<String> = cands
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                names,
+                [
+                    "chrome-headless-shell",
+                    "chromium",
+                    "google-chrome",
+                    "chrome",
+                    "chrome-headless-shell"
+                ]
+            );
+            assert_eq!(cands.last(), Some(&managed_chromium_path(&cache)));
+            assert!(is_executable(&chrome));
+            let _ = fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn managed_install_is_detected_from_cache_dir() {
+            use std::os::unix::fs::PermissionsExt;
+            let cache =
+                std::env::temp_dir().join(format!("jiaoren-managed-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&cache);
+            let bin = managed_chromium_path(&cache);
+            assert!(bin.ends_with(format!(
+                "chromium/{MANAGED_VERSION}/chrome-headless-shell-linux64/chrome-headless-shell"
+            )));
+            fs::create_dir_all(bin.parent().unwrap()).unwrap();
+            fs::write(&bin, b"#!/bin/sh\n").unwrap();
+            fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+
+            // The pure path builder plus executability is what detection checks.
+            let detected = chromium_candidates(&cache, &[])
+                .into_iter()
+                .find(|p| is_executable(p));
+            assert_eq!(detected, Some(bin));
+            let _ = fs::remove_dir_all(&cache);
+        }
+
+        #[test]
+        fn ensure_chromium_returns_env_override_without_downloading() {
+            use std::os::unix::fs::PermissionsExt;
+            static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let base = std::env::temp_dir().join(format!("jiaoren-env-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&base);
+            fs::create_dir_all(&base).unwrap();
+            let fake = base.join("chrome-headless-shell");
+            fs::write(&fake, b"#!/bin/sh\necho 'HeadlessChrome 0.0'\n").unwrap();
+            fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+            let cache = base.join("cache");
+            let saved = std::env::var_os("JIAOREN_CHROMIUM");
+            std::env::set_var("JIAOREN_CHROMIUM", &fake);
+            let got = ensure_chromium(&cache);
+            match saved {
+                Some(v) => std::env::set_var("JIAOREN_CHROMIUM", v),
+                None => std::env::remove_var("JIAOREN_CHROMIUM"),
+            }
+            assert_eq!(got, Ok(fake));
+            // No managed install was attempted.
+            assert!(!cache.join("chromium").exists());
+            let _ = fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn ensure_chromium_errors_when_cache_dir_is_a_file() {
+            let base = std::env::temp_dir().join(format!("jiaoren-bad-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&base);
+            fs::write(&base, b"not a dir").unwrap();
+            let err = install_chromium(&base.join("cache")).unwrap_err();
+            assert!(err.contains("create"), "{err}");
+            let _ = fs::remove_file(&base);
         }
 
         #[test]

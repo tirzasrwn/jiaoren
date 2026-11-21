@@ -12,7 +12,7 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use notify::{RecursiveMode, Watcher};
 
 use crate::doc::{prepare, Prepared};
-use crate::mermaid::{find_chromium, Renderer, Theme};
+use crate::mermaid::{ensure_chromium, Renderer, Theme};
 
 mod diagram;
 mod geometry;
@@ -129,13 +129,13 @@ pub(crate) struct App {
     pub path: PathBuf,
     /// Pre-parsed document text and placeholders.
     pub prepared: Prepared,
-    /// Renderer shared with the diagram workers.
-    pub renderer: Renderer,
     /// Active colour theme.
     pub theme: Theme,
     /// Text and diagram zoom factor.
     pub zoom: f32,
     error: Option<String>,
+    /// Why Chromium is unavailable, when auto-install failed.
+    chromium_error: Option<String>,
     cache: CommonMarkCache,
     diagrams: Rc<RefCell<DiagramUi>>,
     tables: Rc<RefCell<TableUi>>,
@@ -168,12 +168,19 @@ impl App {
         crate::fonts::install(ctx);
         apply_theme(ctx, theme);
         let mut renderer = Renderer::new();
-        renderer.chromium = find_chromium();
-        // First-run download happens here, once, on the UI thread, before any
+        // First-run downloads happen here, once, on the UI thread, before any
         // render worker can spawn: concurrent workers must never race on the
         // shared temp file.
-        if renderer.chromium.is_some() {
-            let _ = renderer.ensure_mermaid_js();
+        let mut chromium_error = None;
+        match ensure_chromium(&renderer.cache_dir) {
+            Ok(path) => {
+                renderer.chromium = Some(path);
+                let _ = renderer.ensure_mermaid_js();
+            }
+            Err(msg) => {
+                renderer.chromium = None;
+                chromium_error = Some(msg);
+            }
         }
         let shared = Arc::new(Renderer {
             chromium: renderer.chromium.clone(),
@@ -233,10 +240,10 @@ impl App {
         App {
             path,
             prepared,
-            renderer,
             theme,
             zoom: 1.0,
             error: None,
+            chromium_error,
             cache: CommonMarkCache::default(),
             diagrams,
             tables,
@@ -431,10 +438,12 @@ impl eframe::App for App {
                 .map(|(kind, font)| (kind, egui::FontId::new(font.size * z, font.family)))
                 .collect();
 
-            if self.renderer.chromium.is_none() {
+            if let Some(reason) = &self.chromium_error {
                 ui.colored_label(
                     egui::Color32::YELLOW,
-                    "warning: chromium not found — mermaid diagrams will not render",
+                    format!(
+                        "warning: chromium not found — mermaid diagrams will not render ({reason})"
+                    ),
                 );
             }
             if let Some(err) = &self.error {
