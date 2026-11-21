@@ -10,6 +10,22 @@ pub const FAMILY: &str = "FiraCode Nerd Font";
 const REGULAR: &str = "FiraCodeNerdFont-Regular";
 const BOLD: &str = "FiraCodeNerdFont-Bold";
 
+/// Family holding only the Bold face, so `**strong**` runs can ask for a real
+/// bold weight. egui has no per-run weight flag: a face listed as a *fallback*
+/// is only used for missing glyphs, so bold text needs its own family.
+pub const BOLD_FAMILY: &str = "FiraCode Bold";
+
+/// The font id for bold text at `size`.
+pub fn bold_font(size: f32) -> egui::FontId {
+    egui::FontId::new(size, egui::FontFamily::Name(BOLD_FAMILY.into()))
+}
+
+/// Whether `font` asks for the bold family.
+#[cfg(test)]
+pub fn is_bold(font: &egui::FontId) -> bool {
+    matches!(&font.family, egui::FontFamily::Name(name) if &**name == BOLD_FAMILY)
+}
+
 /// Load FiraCode Nerd Font from the first user font directory that has the
 /// Regular face. Returns `None` (keeping egui defaults) when no copy is found,
 /// so a missing font never prevents the app from starting.
@@ -50,14 +66,25 @@ pub fn load_from_dir(dir: &Path) -> Option<egui::FontDefinitions> {
         REGULAR.to_owned(),
         Arc::new(egui::FontData::from_owned(regular)),
     );
-    // List the Bold face so bold text renders as real bold rather than a
-    // synthetic weight.
-    let mut faces = vec![REGULAR.to_owned()];
+    // List the Bold face as its own family so bold runs get a real bold
+    // weight rather than the Regular face plus a darker colour.
+    let faces = [REGULAR.to_owned()];
+    // Registered even without the Bold file, so `bold_font` always resolves;
+    // it then falls back to Regular.
+    let mut bold_family = Vec::new();
     if let Some(b) = bold {
         defs.font_data
             .insert(BOLD.to_owned(), Arc::new(egui::FontData::from_owned(b)));
-        faces.push(BOLD.to_owned());
+        bold_family.push(BOLD.to_owned());
     }
+    bold_family.push(REGULAR.to_owned());
+    bold_family.extend(
+        defs.families[&egui::FontFamily::Proportional]
+            .iter()
+            .cloned(),
+    );
+    defs.families
+        .insert(egui::FontFamily::Name(BOLD_FAMILY.into()), bold_family);
 
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
         let list = defs.families.entry(family).or_default();
@@ -103,11 +130,20 @@ mod tests {
         }
 
         #[test]
-        fn bold_face_is_listed_after_regular() {
+        fn bold_face_has_its_own_family_after_regular() {
             let defs = load().expect("font installed");
             let mono = &defs.families[&egui::FontFamily::Monospace];
             assert_eq!(mono[0], "FiraCodeNerdFont-Regular");
-            assert_eq!(mono[1], "FiraCodeNerdFont-Bold");
+            let bold = &defs.families[&egui::FontFamily::Name(BOLD_FAMILY.into())];
+            assert_eq!(bold[0], "FiraCodeNerdFont-Bold");
+            assert_eq!(bold[1], "FiraCodeNerdFont-Regular");
+        }
+
+        #[test]
+        fn bold_font_selects_the_bold_family() {
+            assert!(is_bold(&bold_font(14.0)));
+            assert!(!is_bold(&egui::FontId::proportional(14.0)));
+            assert!(!is_bold(&egui::FontId::monospace(14.0)));
         }
     }
 }

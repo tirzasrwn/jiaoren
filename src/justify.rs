@@ -756,9 +756,21 @@ fn push_frag(
 ) {
     let (font, color, italics, underline, strikethrough) = match &run.kind {
         RunKind::Text => (body.clone(), text_color, false, Stroke::NONE, Stroke::NONE),
-        RunKind::Bold => (body.clone(), strong, false, Stroke::NONE, Stroke::NONE),
+        RunKind::Bold => (
+            crate::fonts::bold_font(body.size),
+            strong,
+            false,
+            Stroke::NONE,
+            Stroke::NONE,
+        ),
         RunKind::Italic => (body.clone(), text_color, true, Stroke::NONE, Stroke::NONE),
-        RunKind::BoldItalic => (body.clone(), strong, true, Stroke::NONE, Stroke::NONE),
+        RunKind::BoldItalic => (
+            crate::fonts::bold_font(body.size),
+            strong,
+            true,
+            Stroke::NONE,
+            Stroke::NONE,
+        ),
         RunKind::Code => (mono.clone(), text_color, false, Stroke::NONE, Stroke::NONE),
         RunKind::Strike => (
             body.clone(),
