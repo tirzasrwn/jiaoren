@@ -205,16 +205,17 @@ pub(crate) fn table_to_csv(spec: &TableSpec) -> String {
         return String::new();
     }
     let mut out = String::new();
-    push_csv_row(&mut out, &spec.header, ncols);
+    push_csv_row(&mut out, &spec.header, ncols, true);
     for row in &spec.rows {
-        push_csv_row(&mut out, row, ncols);
+        push_csv_row(&mut out, row, ncols, false);
     }
     out
 }
 
-/// Append one CSV row, padding short rows with empty cells.
-fn push_csv_row(out: &mut String, cells: &[String], ncols: usize) {
-    if !out.is_empty() {
+/// Append one CSV row, padding short rows with empty cells. `first` marks the
+/// header row so an all-empty header still emits its leading blank line.
+fn push_csv_row(out: &mut String, cells: &[String], ncols: usize, first: bool) {
+    if !first {
         out.push('\n');
     }
     for i in 0..ncols {
@@ -227,12 +228,60 @@ fn push_csv_row(out: &mut String, cells: &[String], ncols: usize) {
 }
 
 /// Visible text of a Markdown cell: inline markup dropped, code and link
-/// labels kept.
+/// labels kept, image syntax reduced to its alt text, raw HTML tags removed.
 fn plain_text(md: &str) -> String {
-    crate::justify::parse_inline(md)
-        .into_iter()
-        .map(|run| run.text)
-        .collect()
+    let mut out = String::new();
+    let mut prev_was_text_with_bang = false;
+    for run in crate::justify::parse_inline(md) {
+        let is_link = matches!(run.kind, crate::justify::RunKind::Link(_));
+        let next_prev_bang =
+            matches!(run.kind, crate::justify::RunKind::Text) && run.text.ends_with('!');
+        let mut text = run.text;
+        if !matches!(run.kind, crate::justify::RunKind::Code) {
+            text = strip_html(&text);
+        }
+        // `parse_inline` has no image rule: `![alt](u)` arrives as a literal
+        // `!` text run followed by a link run. Dropping that `!` leaves the alt
+        // text (empty alt included); a bang at the end of a link label is not
+        // touched.
+        if is_link && prev_was_text_with_bang && out.ends_with('!') {
+            out.pop();
+        }
+        out.push_str(&text);
+        prev_was_text_with_bang = next_prev_bang;
+    }
+    out
+}
+
+/// Drop raw HTML tags (`<b>`, `</b>`, `<br>`, comments) from visible text.
+/// `<` not followed by a tag-like character is kept literally.
+fn strip_html(s: &str) -> String {
+    if !s.contains('<') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let rest = &s[i..];
+        if let Some(len) = html_tag_len(rest) {
+            i += len;
+            continue;
+        }
+        let c = rest.chars().next().unwrap();
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// Byte length of a tag-like `<...>` at the start of `s`, if any.
+fn html_tag_len(s: &str) -> Option<usize> {
+    let rest = s.strip_prefix('<')?;
+    let first = rest.chars().next()?;
+    if !(first.is_ascii_alphabetic() || matches!(first, '/' | '!' | '?')) {
+        return None;
+    }
+    rest.find('>').map(|end| end + 2)
 }
 
 /// Quote a CSV field when it contains a comma, quote or line break.
@@ -417,6 +466,30 @@ mod tests {
         fn csv_pads_empty_cells_and_short_rows() {
             let s = spec(&["a", ""], &[&[""], &["x"]]);
             assert_eq!(table_to_csv(&s), "a,\n,\nx,");
+        }
+
+        #[test]
+        fn csv_strips_images_and_html() {
+            let s = spec(&["![alt](u.png)", "![](u.png)"], &[&["<b>x</b>", "a<br>b"]]);
+            assert_eq!(table_to_csv(&s), "alt,\nx,ab");
+        }
+
+        #[test]
+        fn csv_keeps_bang_at_end_of_a_link_label() {
+            let s = spec(&["[a!](u)[b](v)"], &[]);
+            assert_eq!(table_to_csv(&s), "a!b");
+        }
+
+        #[test]
+        fn csv_keeps_non_tag_angle_brackets() {
+            let s = spec(&["1 < 2"], &[]);
+            assert_eq!(table_to_csv(&s), "1 < 2");
+        }
+
+        #[test]
+        fn csv_all_empty_header_still_emits_the_header_row() {
+            let s = spec(&[""], &[&["x"], &["y"]]);
+            assert_eq!(table_to_csv(&s), "\nx\ny");
         }
 
         #[test]

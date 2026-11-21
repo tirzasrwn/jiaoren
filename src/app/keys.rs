@@ -85,16 +85,22 @@ pub fn apply_key(
         Key::R => Some(Action::Reload),
         Key::C if modifiers.command || modifiers.ctrl => Some(Action::Quit),
         Key::Q | Key::Escape => Some(Action::Quit),
-        Key::Y if !modifiers.any() => match state.last_y.take() {
-            Some(t) if now.duration_since(t) < GG_WINDOW => Some(Action::CopyDocument),
-            // A `y` with no recent predecessor (including one after the window
-            // elapsed) arms a fresh `yy`; a single `y` never copies.
-            _ => {
-                state.last_y = Some(now);
-                None
+        Key::Y if !modifiers.any() => {
+            // Starting a `y` sequence breaks a pending `gg`.
+            state.last_g = None;
+            match state.last_y.take() {
+                Some(t) if now.duration_since(t) < GG_WINDOW => Some(Action::CopyDocument),
+                // A `y` with no recent predecessor (including one after the
+                // window elapsed) arms a fresh `yy`; a single `y` never copies.
+                _ => {
+                    state.last_y = Some(now);
+                    None
+                }
             }
-        },
+        }
         Key::G => {
+            // Starting a `g` sequence breaks a pending `yy`.
+            state.last_y = None;
             // Shift+G (bottom) is immediate; a lone `g` starts the gg window.
             if modifiers.shift {
                 state.last_g = None;
@@ -186,6 +192,62 @@ mod tests {
                 ),
                 Some(Action::CopyDocument)
             );
+        }
+
+        #[test]
+        fn yy_window_boundary_is_exclusive() {
+            let mut s = KeyState::default();
+            let t0 = std::time::Instant::now();
+            assert_eq!(apply_key(&mut s, Key::Y, Modifiers::NONE, t0), None);
+            assert_eq!(
+                apply_key(
+                    &mut s,
+                    Key::Y,
+                    Modifiers::NONE,
+                    t0 + std::time::Duration::from_millis(499)
+                ),
+                Some(Action::CopyDocument)
+            );
+
+            let mut s = KeyState::default();
+            assert_eq!(apply_key(&mut s, Key::Y, Modifiers::NONE, t0), None);
+            assert_eq!(
+                apply_key(
+                    &mut s,
+                    Key::Y,
+                    Modifiers::NONE,
+                    t0 + std::time::Duration::from_millis(500)
+                ),
+                None
+            );
+            assert!(s.last_y.is_some());
+        }
+
+        #[test]
+        fn g_then_y_then_g_neither_copies_nor_jumps() {
+            let mut s = KeyState::default();
+            let t0 = std::time::Instant::now();
+            assert_eq!(apply_key(&mut s, Key::G, Modifiers::NONE, t0), None);
+            assert_eq!(
+                apply_key(
+                    &mut s,
+                    Key::Y,
+                    Modifiers::NONE,
+                    t0 + std::time::Duration::from_millis(100)
+                ),
+                None
+            );
+            assert_eq!(
+                apply_key(
+                    &mut s,
+                    Key::G,
+                    Modifiers::NONE,
+                    t0 + std::time::Duration::from_millis(200)
+                ),
+                None
+            );
+            assert!(s.last_g.is_some());
+            assert!(s.last_y.is_none());
         }
 
         #[test]
