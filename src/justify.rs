@@ -588,57 +588,128 @@ fn build_words(ui: &egui::Ui, runs: &[Run], face: Option<&(FontId, Color32)>) ->
 
     let mut words: Vec<Word> = Vec::new();
     let mut open = false; // a word is being filled
-                          // Char offset of the current run in the block's recorded search text.
-    let mut run_start = 0usize;
+    for frag in fragment_plan(runs) {
+        if frag.gap_before {
+            open = false;
+        }
+        let run = &runs[frag.run];
+        push_frag(
+            ui,
+            &mut words,
+            &mut open,
+            &frag.text,
+            frag.offset,
+            run,
+            &body,
+            &mono,
+            text_color,
+            strong,
+            link_color,
+        );
+    }
+    words
+}
 
-    for run in runs {
-        let atomic = matches!(run.kind, RunKind::Code);
+/// A painted fragment and its char offset in the block's recorded search text.
+struct PlanFragment {
+    /// Index into the run list.
+    run: usize,
+    /// The fragment's visible text.
+    text: String,
+    /// Char offset of `text` in `search_text(runs)`.
+    offset: usize,
+    /// The fragment starts a new word (whitespace precedes it).
+    gap_before: bool,
+}
+
+/// Char cursor over the text model produced by [`search_text`]: whitespace in
+/// non-code runs collapses to one space, leading whitespace is skipped, and code
+/// runs are appended literally. Keeping the same state here is what makes
+/// fragment offsets line up with highlight ranges.
+#[derive(Default)]
+struct RecordedCursor {
+    len: usize,
+    ends_space: bool,
+}
+
+impl RecordedCursor {
+    /// Append a code run literally and return its start.
+    fn code(&mut self, text: &str) -> usize {
+        let start = self.len;
+        self.len += text.chars().count();
+        self.ends_space = text.ends_with(' ');
+        start
+    }
+
+    /// Append one non-whitespace char and return its offset.
+    fn push(&mut self, _ch: char) -> usize {
+        let at = self.len;
+        self.len += 1;
+        self.ends_space = false;
+        at
+    }
+
+    /// Fold one whitespace char into the model: one space between words, none
+    /// at the start and none after a space already present.
+    fn space(&mut self) {
+        if self.len > 0 && !self.ends_space {
+            self.len += 1;
+            self.ends_space = true;
+        }
+    }
+}
+
+/// Split the runs into painted fragments with offsets in the recorded text.
+fn fragment_plan(runs: &[Run]) -> Vec<PlanFragment> {
+    let mut plan = Vec::new();
+    let mut cursor = RecordedCursor::default();
+    let mut open = false;
+    for (run_index, run) in runs.iter().enumerate() {
+        if matches!(run.kind, RunKind::Code) {
+            let offset = cursor.code(&run.text);
+            plan.push(PlanFragment {
+                run: run_index,
+                text: run.text.clone(),
+                offset,
+                gap_before: !open,
+            });
+            open = true;
+            continue;
+        }
         let mut buf = String::new();
         let mut buf_start = 0usize;
-        for (char_index, ch) in run.text.chars().enumerate() {
-            if ch.is_whitespace() && !atomic {
+        for ch in run.text.chars() {
+            if ch.is_whitespace() {
                 if !buf.is_empty() {
-                    push_frag(
-                        ui,
-                        &mut words,
-                        &mut open,
-                        &buf,
-                        run_start + buf_start,
-                        run,
-                        &body,
-                        &mono,
-                        text_color,
-                        strong,
-                        link_color,
-                    );
-                    buf.clear();
+                    plan.push(PlanFragment {
+                        run: run_index,
+                        text: std::mem::take(&mut buf),
+                        offset: buf_start,
+                        gap_before: !open,
+                    });
                 }
+                cursor.space();
                 open = false;
             } else {
                 if buf.is_empty() {
-                    buf_start = char_index;
+                    buf_start = cursor.push(ch);
+                } else {
+                    cursor.push(ch);
                 }
                 buf.push(ch);
             }
         }
         if !buf.is_empty() {
-            push_frag(
-                ui,
-                &mut words,
-                &mut open,
-                &buf,
-                run_start + buf_start,
-                run,
-                &body,
-                &mono,
-                text_color,
-                strong,
-                link_color,
-            );
+            plan.push(PlanFragment {
+                run: run_index,
+                text: buf,
+                offset: buf_start,
+                gap_before: !open,
+            });
+            open = true;
         }
-        run_start += run.text.chars().count();
     }
-    words
+    plan
 }
 
 /// Lay out one text fragment and append it to the current word, opening a new
@@ -769,7 +840,10 @@ pub struct MatchHighlight<'a> {
 pub(crate) fn highlight_color(ui: &egui::Ui, current: bool) -> Color32 {
     let selection = ui.visuals().selection.bg_fill;
     if current {
-        Color32::from_rgba_unmultiplied(selection.r(), selection.g(), selection.b(), 0xb4)
+        // `bg_fill` is premultiplied; feed its straight-alpha channels back so
+        // the current fill is the same lavender, only more opaque.
+        let [r, g, b, _] = selection.to_srgba_unmultiplied();
+        Color32::from_rgba_unmultiplied(r, g, b, 0xb4)
     } else {
         selection
     }
@@ -1325,6 +1399,39 @@ mod tests {
         fn unicode_fragment_offsets_are_chars() {
             // "é東x" is 3 chars; the range starts one char into the fragment.
             assert_eq!(local_ranges(4, "é東x", &[(5, 7)]), vec![(1, 3, 0)]);
+        }
+    }
+
+    mod fragment_offsets {
+        use super::super::{fragment_plan, parse_inline, search_text};
+
+        #[test]
+        fn every_fragment_offset_matches_its_text_in_the_model() {
+            for source in [
+                "a  b",
+                "`x ` y",
+                "**b**  t",
+                "[t](u)  z",
+                "&amp;  q",
+                "![alt](x)  z",
+            ] {
+                let model: Vec<char> = search_text(source).chars().collect();
+                let mut after = 0usize;
+                for fragment in fragment_plan(&parse_inline(source)) {
+                    let text: Vec<char> = fragment.text.chars().collect();
+                    assert!(!text.is_empty());
+                    let last = model.len().saturating_sub(text.len());
+                    let found = (after..=last).find(|&i| model[i..i + text.len()] == text[..]);
+                    assert_eq!(
+                        found,
+                        Some(fragment.offset),
+                        "{source:?}: fragment {:?} at model {:?}",
+                        fragment.text,
+                        model.iter().collect::<String>()
+                    );
+                    after = fragment.offset + text.len();
+                }
+            }
         }
     }
 
