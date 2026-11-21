@@ -1,6 +1,6 @@
-# mdview
+# jiaoren
 
-A zathura-like Markdown viewer. `mdview doc.md` opens one window showing the
+A zathura-like Markdown viewer. `jr doc.md` opens one window showing the
 rendered Markdown — the way `zathura doc.pdf` does for PDFs — with ```mermaid
 fences drawn as real diagrams.
 
@@ -12,12 +12,12 @@ Keyboard-first, almost no chrome, live-reloads when the file changes on disk.
 cargo install --path . --locked
 ```
 
-Installs `mdview` to `~/.cargo/bin/mdview`. No sudo needed.
+Installs the binary `jr` to `~/.cargo/bin/jr`. No sudo needed.
 
 ## Usage
 
 ```bash
-mdview [--dark] file.md
+jr [--dark] file.md
 ```
 
 - `--dark` — start with the dark theme.
@@ -30,11 +30,11 @@ same palette.
 
 ## Typography
 
-mdview uses **FiraCode Nerd Font** (family name `FiraCode Nerd Font`) for both
+jiaoren uses **FiraCode Nerd Font** (family name `FiraCode Nerd Font`) for both
 body text and code, and for mermaid diagram labels. It looks for
 `FiraCodeNerdFont-Regular.ttf` / `FiraCodeNerdFont-Bold.ttf` in `~/.fonts`,
 `$XDG_DATA_HOME/fonts`, `~/.local/share/fonts`, then
-`/usr/share/fonts/truetype`. When the font is absent mdview starts normally on
+`/usr/share/fonts/truetype`. When the font is absent jiaoren starts normally on
 egui's built-in fonts.
 
 To go back to the defaults, delete (or comment out) the
@@ -64,14 +64,14 @@ To go back to the defaults, delete (or comment out) the
 ## Mermaid diagrams
 
 Rendering ```mermaid fences into images requires **Chromium (headless)**, which
-mdview runs to let mermaid.js rasterize each diagram.
+jiaoren runs to let mermaid.js rasterize each diagram.
 
-Chromium is already present on this machine via the playwright cache; mdview
+Chromium is already present on this machine via the playwright cache; jiaoren
 uses the newest `chromium-*` directory under `~/.cache/ms-playwright/`
-automatically. To point mdview at a different binary, set:
+automatically. To point jiaoren at a different binary, set:
 
 ```bash
-export MDVIEW_CHROMIUM=/path/to/chrome
+export JIAOREN_CHROMIUM=/path/to/chrome
 ```
 
 If no Chromium is found, the document still opens and a warning banner is
@@ -84,19 +84,19 @@ overlay: `+`/`-` or the wheel zoom (1×–3×), `h`/`l`/`j`/`k` and mouse drag p
 (both axes, with half a frame of overscroll past every edge), and `Esc`, `q`,
 `Ctrl+C` or a click outside closes it. Zoom is anchored at the pointer when it is over the diagram, so the
 same part of the image stays under the cursor. `q` and `Ctrl+C` only close the overlay; `Ctrl+C` with no overlay open quits
-mdview. On Linux the window backend reports `Ctrl+C` as egui's `Event::Copy`
+jiaoren. On Linux the window backend reports `Ctrl+C` as egui's `Event::Copy`
 rather than `Key::C`; `Cmd+C` on macOS and `Ctrl+Insert` also map to `Copy`, so
 they quit too when no overlay is open.
 
 ## Cache
 
-Rendered diagrams are cached as SVG under `~/.cache/mdview/` (keyed by diagram
+Rendered diagrams are cached as SVG under `~/.cache/jiaoren/` (keyed by diagram
 content and theme), so reopening a document is instant and diagrams stay sharp
 at any zoom level. `mermaid.min.js` is downloaded there on first run, not
 bundled. Clear it with:
 
 ```bash
-rm -rf ~/.cache/mdview
+rm -rf ~/.cache/jiaoren
 ```
 
 The directory and `mermaid.min.js` are recreated on the next run.

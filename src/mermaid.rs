@@ -30,7 +30,7 @@ impl Theme {
 #[derive(Debug, thiserror::Error)]
 pub enum RenderError {
     /// No Chromium binary was found.
-    #[error("chromium not found; set MDVIEW_CHROMIUM")]
+    #[error("chromium not found; set JIAOREN_CHROMIUM")]
     ChromiumMissing,
     /// mermaid.js failed to load, or mermaid reported an error (text passed through).
     #[error("{0}")]
@@ -62,9 +62,9 @@ pub struct Renderer {
 impl Renderer {
     /// Renderer using the user cache dir, with no Chromium discovered yet.
     pub fn new() -> Self {
-        let cache_dir = dirs_cache().join("mdview");
+        let cache_dir = dirs_cache().join("jiaoren");
         fs::create_dir_all(&cache_dir).ok();
-        let mermaid_js = std::env::var_os("MDVIEW_MERMAID_JS")
+        let mermaid_js = std::env::var_os("JIAOREN_MERMAID_JS")
             .map(PathBuf::from)
             .unwrap_or_else(|| cache_dir.join("mermaid.min.js"));
         Renderer {
@@ -213,7 +213,7 @@ impl Renderer {
             Ok(())
         } else {
             let _ = fs::remove_file(&tmp);
-            Err(RenderError::MermaidJs("failed to download mermaid.min.js (network needed on first run only; set MDVIEW_MERMAID_JS to use an existing copy)".to_string()))
+            Err(RenderError::MermaidJs("failed to download mermaid.min.js (network needed on first run only; set JIAOREN_MERMAID_JS to use an existing copy)".to_string()))
         }
     }
 }
@@ -225,9 +225,9 @@ fn dirs_cache() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
-/// Locate Chromium: `MDVIEW_CHROMIUM`, then `PATH`, then Playwright's cache.
+/// Locate Chromium: `JIAOREN_CHROMIUM`, then `PATH`, then Playwright's cache.
 pub fn find_chromium() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("MDVIEW_CHROMIUM") {
+    if let Some(p) = std::env::var_os("JIAOREN_CHROMIUM") {
         let p = PathBuf::from(p);
         return p.exists().then_some(p);
     }
@@ -316,7 +316,7 @@ pub(crate) fn file_url(path: &Path) -> String {
 }
 
 // Build the Chromium page. The JS is referenced by absolute file:// URL so a
-// $MDVIEW_MERMAID_JS override outside cache_dir still loads.
+// $JIAOREN_MERMAID_JS override outside cache_dir still loads.
 fn build_html(mermaid_js: &Path, source: &str, theme: Theme) -> String {
     let abs = mermaid_js
         .canonicalize()
@@ -431,7 +431,7 @@ mod tests {
         fn render_error_messages_are_unchanged() {
             assert_eq!(
                 RenderError::ChromiumMissing.to_string(),
-                "chromium not found; set MDVIEW_CHROMIUM"
+                "chromium not found; set JIAOREN_CHROMIUM"
             );
             assert_eq!(
                 RenderError::MermaidJs("ERR:oops".into()).to_string(),
@@ -463,7 +463,7 @@ mod tests {
 
         #[test]
         fn cache_paths_include_theme_and_render_version() {
-            let d = std::env::temp_dir().join("mdview-test-paths");
+            let d = std::env::temp_dir().join("jiaoren-test-paths");
             let r = test_renderer(&d);
             let p = r.svg_path("abc", Theme::Dark);
             assert_eq!(
@@ -475,7 +475,7 @@ mod tests {
 
         #[test]
         fn cached_reports_missing_failure_and_success() {
-            let d = std::env::temp_dir().join(format!("mdview-test-cache-{}", std::process::id()));
+            let d = std::env::temp_dir().join(format!("jiaoren-test-cache-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&d);
             std::fs::create_dir_all(&d).unwrap();
             let r = test_renderer(&d);
@@ -548,9 +548,9 @@ mod tests {
 
         #[test]
         fn env_override_wins_for_chromium() {
-            std::env::set_var("MDVIEW_CHROMIUM", "/bin/true");
+            std::env::set_var("JIAOREN_CHROMIUM", "/bin/true");
             assert_eq!(find_chromium(), Some(PathBuf::from("/bin/true")));
-            std::env::remove_var("MDVIEW_CHROMIUM");
+            std::env::remove_var("JIAOREN_CHROMIUM");
         }
 
         #[test]
@@ -581,7 +581,7 @@ mod tests {
 
         #[test]
         fn ensure_mermaid_js_is_idempotent() {
-            let d = std::env::temp_dir().join(format!("mdview-js-{}", std::process::id()));
+            let d = std::env::temp_dir().join(format!("jiaoren-js-{}", std::process::id()));
             let _ = fs::remove_dir_all(&d);
             fs::create_dir_all(&d).unwrap();
             let r = test_renderer(&d);

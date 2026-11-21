@@ -68,7 +68,7 @@ mod tests {
         #[test]
         fn rasterize_produces_scaled_premultiplied_rgba() {
             // A 10x5 red rect rendered at scale 2 must be a 20x10 opaque red image.
-            let p = std::env::temp_dir().join(format!("mdview-raster-{}.svg", std::process::id()));
+            let p = std::env::temp_dir().join(format!("jiaoren-raster-{}.svg", std::process::id()));
             std::fs::write(
                 &p,
                 r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 5"><rect width="10" height="5" fill="#ff0000"/></svg>"##,

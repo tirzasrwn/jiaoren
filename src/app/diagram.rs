@@ -262,7 +262,7 @@ impl DiagramUi {
                 }
                 WorkerMsg::Raster(key, Ok(image)) => {
                     // Only the UI thread ever creates a texture.
-                    let name = format!("mdview-raster-{}-{}-{}-{}", key.0, key.1, key.2, key.3);
+                    let name = format!("jiaoren-raster-{}-{}-{}-{}", key.0, key.1, key.2, key.3);
                     let handle = ctx.load_texture(name, image, egui::TextureOptions::LINEAR);
                     self.rasters.insert(key, Raster::Ready(handle));
                 }
@@ -591,7 +591,7 @@ impl DiagramUi {
             pan = zoom_anchored(pan, anchor, old_size, image);
         }
         pan = clamp_pan(pan, image, view);
-        let dimmed = egui::Area::new(egui::Id::new("mdview-diagram-popup"))
+        let dimmed = egui::Area::new(egui::Id::new("jiaoren-diagram-popup"))
             .order(egui::Order::Foreground)
             .fixed_pos(screen.min)
             .constrain(false)
@@ -611,7 +611,7 @@ impl DiagramUi {
                 );
                 let drag = ui.interact(
                     view_rect,
-                    egui::Id::new("mdview-diagram-popup-drag"),
+                    egui::Id::new("jiaoren-diagram-popup-drag"),
                     egui::Sense::drag(),
                 );
                 let dragging = drag.dragged();
@@ -846,7 +846,7 @@ mod tests {
 
         #[test]
         fn failed_raster_is_reported_and_not_requeued() {
-            let d = std::env::temp_dir().join(format!("mdview-failed-{}", std::process::id()));
+            let d = std::env::temp_dir().join(format!("jiaoren-failed-{}", std::process::id()));
             let r = Arc::new(Renderer {
                 chromium: None,
                 mermaid_js: d.join("mermaid.min.js"),
@@ -874,7 +874,7 @@ mod tests {
 
         #[test]
         fn reload_drops_queued_jobs() {
-            let d = std::env::temp_dir().join(format!("mdview-reload-{}", std::process::id()));
+            let d = std::env::temp_dir().join(format!("jiaoren-reload-{}", std::process::id()));
             let r = Arc::new(Renderer {
                 chromium: None,
                 mermaid_js: d.join("mermaid.min.js"),

@@ -122,7 +122,7 @@ impl ParagraphUi {
 /// Renders an HTML placeholder through the diagram, table or paragraph UI.
 type HtmlFn = Box<dyn Fn(&mut egui::Ui, &str)>;
 
-/// The mdview window: document state, theme/zoom, scrolling, and the HTML
+/// The jiaoren window: document state, theme/zoom, scrolling, and the HTML
 /// render hook.
 pub(crate) struct App {
     /// Path of the open document.
@@ -515,7 +515,7 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("cannot read"));
-            let bad = std::env::temp_dir().join("mdview-bad-utf8.md");
+            let bad = std::env::temp_dir().join("jiaoren-bad-utf8.md");
             std::fs::write(&bad, [0xff, 0xfe]).unwrap();
             assert!(read_doc(&bad).unwrap_err().to_string().contains("UTF-8"));
             let _ = std::fs::remove_file(&bad);

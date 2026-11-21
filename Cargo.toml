@@ -1,7 +1,12 @@
 [package]
-name = "mdview"
+name = "jiaoren"
 version = "0.1.0"
 edition = "2021"
+description = "jiaoren (jr) — a zathura-like Markdown viewer with mermaid diagrams"
+
+[[bin]]
+name = "jr"
+path = "src/main.rs"
 
 [dependencies]
 eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }

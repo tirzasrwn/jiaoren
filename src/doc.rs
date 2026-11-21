@@ -1266,7 +1266,7 @@ mod tests {
         #[test]
         fn read_doc_invalid_utf8_message_is_unchanged() {
             let path =
-                std::env::temp_dir().join(format!("mdview-bad-utf8-{}.md", std::process::id()));
+                std::env::temp_dir().join(format!("jiaoren-bad-utf8-{}.md", std::process::id()));
             std::fs::write(&path, [0xff, 0xfe]).unwrap();
             let err = read_doc(&path).unwrap_err();
             assert_eq!(

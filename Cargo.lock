@@ -1169,6 +1169,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "jiaoren"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "eframe",
+ "egui",
+ "egui_commonmark",
+ "egui_extras",
+ "notify",
+ "resvg 0.48.1",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "jni"
 version = "0.22.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1368,21 +1383,6 @@ name = "log"
 version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
-
-[[package]]
-name = "mdview"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "eframe",
- "egui",
- "egui_commonmark",
- "egui_extras",
- "notify",
- "resvg 0.48.1",
- "thiserror 2.0.21",
-]
 
 [[package]]
 name = "memchr"
