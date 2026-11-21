@@ -6,7 +6,7 @@ fences drawn as real diagrams.
 
 Keyboard-first, almost no chrome, live-reloads when the file changes on disk.
 
-![Opening examples/demo.md: justified text and lists, a table copied as CSV, a local image and a mermaid diagram in the zoomable popup, Catppuccin themes, `/` search with `n` jumping between highlighted matches, and `yy` copying the document](docs/assets/demo.gif)
+![Opening examples/demo.md: justified prose with inline code and links, dragging a phrase and `y` copying the selection, a vim-style `/` live search that highlights matches as you type with Ctrl+W erasing a word, Enter and `n` jumping between matches, clicking the table icon to copy CSV, searching for the diagram and opening it in the zoomable popup, and the Catppuccin dark theme](docs/assets/demo.gif)
 
 ## Why "jiaoren"?
 

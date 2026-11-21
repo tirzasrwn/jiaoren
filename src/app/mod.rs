@@ -195,8 +195,10 @@ fn status_area(ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui)) {
         .interactable(false)
         .show(ctx, |ui| {
             // Solid chip: the status sits over the document and must stay legible.
+            // `panel_fill` is the page colour here, so use the faint fill
+            // (Catppuccin mantle) for contrast.
             egui::Frame::new()
-                .fill(ui.visuals().panel_fill)
+                .fill(ui.visuals().faint_bg_color)
                 .inner_margin(egui::Margin::symmetric(4, 2))
                 .show(ui, add);
         });
@@ -214,7 +216,7 @@ fn prompt_area(ctx: &egui::Context, text: String) {
         .show(ctx, |ui| {
             // Same chip as the committed search status, for the same reason.
             egui::Frame::new()
-                .fill(ui.visuals().panel_fill)
+                .fill(ui.visuals().faint_bg_color)
                 .inner_margin(egui::Margin::symmetric(4, 2))
                 .show(ui, |ui| {
                     let color = ui.visuals().text_color();
