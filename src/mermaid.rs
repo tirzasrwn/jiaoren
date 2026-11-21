@@ -1,8 +1,10 @@
 //! Locate Chromium, download mermaid.js once, and cache diagram renders as SVG.
 
 use std::fs;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Once;
 
 /// Cache-key version: bump when the render page or mermaid version changes.
 pub const RENDER_VERSION: &str = "5-mermaid11.12.0-htmlLabelsOff-2x-strict-svg-catppuccin-firacode";
@@ -115,7 +117,7 @@ impl Renderer {
         let chromium = self
             .chromium
             .clone()
-            .or_else(find_chromium)
+            .or_else(|| find_chromium(&self.cache_dir))
             .ok_or(RenderError::ChromiumMissing)?;
 
         self.ensure_mermaid_js()?;
@@ -198,6 +200,10 @@ impl Renderer {
         let tmp = PathBuf::from(format!("{}.tmp", self.mermaid_js.display()));
         let status = Command::new("curl")
             .arg("-fsSL")
+            .arg("--proto")
+            .arg("=https")
+            .arg("--proto-redir")
+            .arg("=https")
             .arg("--connect-timeout")
             .arg("5")
             .arg("--max-time")
@@ -256,37 +262,133 @@ fn chromium_candidates(cache_dir: &Path, path_dirs: &[PathBuf]) -> Vec<PathBuf> 
     out
 }
 
-/// Locate Chromium: `JIAOREN_CHROMIUM`, then `PATH`, then the managed install.
-pub fn find_chromium() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("JIAOREN_CHROMIUM") {
-        let p = PathBuf::from(p);
-        return p.exists().then_some(p);
+/// Locate Chromium: `JIAOREN_CHROMIUM`, then `PATH`, then the managed install
+/// under `cache_dir`.
+pub fn find_chromium(cache_dir: &Path) -> Option<PathBuf> {
+    static WARNED: Once = Once::new();
+    if let Some(raw) = std::env::var_os("JIAOREN_CHROMIUM") {
+        let p = PathBuf::from(raw);
+        if is_executable(&p) {
+            return Some(p);
+        }
+        WARNED.call_once(|| {
+            eprintln!(
+                "warning: JIAOREN_CHROMIUM={} is not an executable file; ignoring it",
+                p.display()
+            );
+        });
     }
     for name in CHROMIUM_NAMES {
         if let Some(p) = find_in_path(name) {
             return Some(p);
         }
     }
-    let managed = managed_chromium_path(&dirs_cache().join("jiaoren"));
+    let managed = managed_chromium_path(cache_dir);
     is_executable(&managed).then_some(managed)
 }
 
 /// Return an existing Chromium, or download the pinned `chrome-headless-shell`
 /// into `cache_dir` (`~/.cache/jiaoren`) and return its path.
 pub fn ensure_chromium(cache_dir: &Path) -> Result<PathBuf, String> {
-    if let Some(p) = find_chromium() {
+    if let Some(p) = find_chromium(cache_dir) {
         return Ok(p);
     }
     install_chromium(cache_dir)
 }
 
+/// Take an exclusive lock covering detect → validate → rename. Blocking: a
+/// second instance waits for the first, then re-checks detection and reuses
+/// its install.
+fn acquire_install_lock(cache_dir: &Path) -> Result<fs::File, String> {
+    let dir = cache_dir.join("chromium");
+    fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let path = dir.join(".install.lock");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    loop {
+        // SAFETY: `file` owns a valid fd for the duration of the call.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc == 0 {
+            return Ok(file);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(format!("lock {}: {err}", path.display()));
+        }
+    }
+}
+
+fn pid_is_alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks for existence; no signal is delivered.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Remove `.tmp-<pid>` dirs left behind by installs whose process is gone.
+fn cleanup_stale_temps(version_dir: &Path) {
+    let Ok(entries) = fs::read_dir(version_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix(".tmp-"))
+            .and_then(|p| p.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if pid > 0 && !pid_is_alive(pid) {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Require `path` to be executable and `--version` to exit 0.
+fn validate_binary(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+        .map_err(|e| format!("chmod: {e}"))?;
+    let out = Command::new(path)
+        .arg("--version")
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!("--version exited {}", out.status))
+    }
+}
+
 fn install_chromium(cache_dir: &Path) -> Result<PathBuf, String> {
+    let _lock = acquire_install_lock(cache_dir)?;
+    // Another instance may have installed while we waited for the lock.
+    if let Some(p) = find_chromium(cache_dir) {
+        return Ok(p);
+    }
     let version_dir = cache_dir.join("chromium").join(MANAGED_VERSION);
     let final_dir = version_dir.join("chrome-headless-shell-linux64");
     let final_bin = final_dir.join("chrome-headless-shell");
+    fs::create_dir_all(&version_dir)
+        .map_err(|e| format!("create {}: {e}", version_dir.display()))?;
+    cleanup_stale_temps(&version_dir);
+    if final_dir.exists() {
+        // Never remove or move a published install out from under a running
+        // process; a half-written one can only come from an older build.
+        return Err(format!(
+            "{} exists but is not a usable chrome-headless-shell; remove it to reinstall",
+            final_dir.display()
+        ));
+    }
     // Build everything in a temp dir beside the target so the last step is an
     // atomic rename and a failed install never leaves a half-written binary.
     let tmp_dir = version_dir.join(format!(".tmp-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp_dir);
     let zip = tmp_dir.join("chrome-headless-shell-linux64.zip");
     let url = format!(
         "https://storage.googleapis.com/chrome-for-testing-public/{MANAGED_VERSION}/linux64/chrome-headless-shell-linux64.zip"
@@ -301,6 +403,10 @@ fn install_chromium(cache_dir: &Path) -> Result<PathBuf, String> {
     eprintln!("installing chrome-headless-shell {MANAGED_VERSION} (132 MB)…");
     let status = Command::new("curl")
         .arg("-fL")
+        .arg("--proto")
+        .arg("=https")
+        .arg("--proto-redir")
+        .arg("=https")
         .arg("--retry")
         .arg("2")
         .arg("-o")
@@ -335,28 +441,11 @@ fn install_chromium(cache_dir: &Path) -> Result<PathBuf, String> {
     if !tmp_bin.is_file() {
         return Err(fail("extract", "chrome-headless-shell missing".to_string()));
     }
-    let _ = fs::remove_dir_all(&final_dir);
+    // Validate inside the temp dir: only a working binary gets published, so a
+    // killed process leaves either no final dir or a fully validated one.
+    validate_binary(&tmp_bin).map_err(|e| fail("binary check", e))?;
     if let Err(e) = fs::rename(tmp_dir.join("chrome-headless-shell-linux64"), &final_dir) {
         return Err(fail("rename into place", e.to_string()));
-    }
-    use std::os::unix::fs::PermissionsExt;
-    if let Err(e) = fs::set_permissions(&final_bin, fs::Permissions::from_mode(0o755)) {
-        let _ = fs::remove_dir_all(&final_dir);
-        return Err(fail("chmod", e.to_string()));
-    }
-    match Command::new(&final_bin).arg("--version").output() {
-        Ok(out) if out.status.success() => {}
-        Ok(out) => {
-            let _ = fs::remove_dir_all(&final_dir);
-            return Err(fail(
-                "binary check",
-                format!("--version exited {}", out.status),
-            ));
-        }
-        Err(e) => {
-            let _ = fs::remove_dir_all(&final_dir);
-            return Err(fail("binary check", e.to_string()));
-        }
     }
     let _ = fs::remove_dir_all(&tmp_dir);
     eprintln!("installed chrome-headless-shell at {}", final_bin.display());
@@ -514,6 +603,40 @@ pub fn parse_svg_size(svg: &str) -> Option<(f32, f32)> {
 mod tests {
     mod mermaid {
         use super::super::*;
+        use std::sync::Mutex;
+
+        /// Every test that mutates process env holds this, so they never race.
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+        fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+            ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        }
+
+        /// Restores an environment variable on drop, even when a test panics.
+        struct EnvVar(&'static str, Option<std::ffi::OsString>);
+
+        impl EnvVar {
+            fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+                let saved = std::env::var_os(name);
+                std::env::set_var(name, value);
+                Self(name, saved)
+            }
+
+            fn unset(name: &'static str) -> Self {
+                let saved = std::env::var_os(name);
+                std::env::remove_var(name);
+                Self(name, saved)
+            }
+        }
+
+        impl Drop for EnvVar {
+            fn drop(&mut self) {
+                match &self.1 {
+                    Some(v) => std::env::set_var(self.0, v),
+                    None => std::env::remove_var(self.0),
+                }
+            }
+        }
 
         fn test_renderer(cache: &Path) -> Renderer {
             Renderer {
@@ -676,11 +799,14 @@ mod tests {
         }
 
         #[test]
-        fn managed_install_is_detected_from_cache_dir() {
+        fn managed_install_is_detected_from_passed_cache_dir() {
             use std::os::unix::fs::PermissionsExt;
-            let cache =
-                std::env::temp_dir().join(format!("jiaoren-managed-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&cache);
+            let _guard = env_lock();
+            let base = std::env::temp_dir().join(format!("jiaoren-managed-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&base);
+            let cache = base.join("cache");
+            let empty_path = base.join("empty-path");
+            fs::create_dir_all(&empty_path).unwrap();
             let bin = managed_chromium_path(&cache);
             assert!(bin.ends_with(format!(
                 "chromium/{MANAGED_VERSION}/chrome-headless-shell-linux64/chrome-headless-shell"
@@ -689,19 +815,37 @@ mod tests {
             fs::write(&bin, b"#!/bin/sh\n").unwrap();
             fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
 
-            // The pure path builder plus executability is what detection checks.
-            let detected = chromium_candidates(&cache, &[])
-                .into_iter()
-                .find(|p| is_executable(p));
-            assert_eq!(detected, Some(bin));
-            let _ = fs::remove_dir_all(&cache);
+            let _env = EnvVar::unset("JIAOREN_CHROMIUM");
+            let _path = EnvVar::set("PATH", &empty_path);
+            assert_eq!(find_chromium(&cache), Some(bin));
+            let _ = fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn invalid_env_path_falls_through_to_path() {
+            use std::os::unix::fs::PermissionsExt;
+            let _guard = env_lock();
+            let base = std::env::temp_dir().join(format!("jiaoren-env-bad-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&base);
+            let bin_dir = base.join("bin");
+            fs::create_dir_all(&bin_dir).unwrap();
+            let chrome = bin_dir.join("chromium");
+            fs::write(&chrome, b"#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&chrome, fs::Permissions::from_mode(0o755)).unwrap();
+            let cache = base.join("cache");
+
+            // A directory passed as JIAOREN_CHROMIUM must be ignored, not stored.
+            let _env = EnvVar::set("JIAOREN_CHROMIUM", &base);
+            let _path = EnvVar::set("PATH", &bin_dir);
+            assert_eq!(ensure_chromium(&cache), Ok(chrome));
+            assert!(!cache.join("chromium").exists());
+            let _ = fs::remove_dir_all(&base);
         }
 
         #[test]
         fn ensure_chromium_returns_env_override_without_downloading() {
             use std::os::unix::fs::PermissionsExt;
-            static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = env_lock();
             let base = std::env::temp_dir().join(format!("jiaoren-env-{}", std::process::id()));
             let _ = fs::remove_dir_all(&base);
             fs::create_dir_all(&base).unwrap();
@@ -709,16 +853,42 @@ mod tests {
             fs::write(&fake, b"#!/bin/sh\necho 'HeadlessChrome 0.0'\n").unwrap();
             fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
             let cache = base.join("cache");
-            let saved = std::env::var_os("JIAOREN_CHROMIUM");
-            std::env::set_var("JIAOREN_CHROMIUM", &fake);
-            let got = ensure_chromium(&cache);
-            match saved {
-                Some(v) => std::env::set_var("JIAOREN_CHROMIUM", v),
-                None => std::env::remove_var("JIAOREN_CHROMIUM"),
-            }
-            assert_eq!(got, Ok(fake));
+            let _env = EnvVar::set("JIAOREN_CHROMIUM", &fake);
+            assert_eq!(ensure_chromium(&cache), Ok(fake));
             // No managed install was attempted.
             assert!(!cache.join("chromium").exists());
+            let _ = fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn validate_binary_sets_exec_bit_and_requires_zero_exit() {
+            let base =
+                std::env::temp_dir().join(format!("jiaoren-validate-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&base);
+            fs::create_dir_all(&base).unwrap();
+            let ok = base.join("ok");
+            fs::write(&ok, b"#!/bin/sh\nexit 0\n").unwrap();
+            // Not executable yet: validate must chmod before running it.
+            assert!(validate_binary(&ok).is_ok());
+            assert!(is_executable(&ok));
+            let bad = base.join("bad");
+            fs::write(&bad, b"#!/bin/sh\nexit 7\n").unwrap();
+            let err = validate_binary(&bad).unwrap_err();
+            assert!(err.contains("--version exited"), "{err}");
+            let _ = fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn stale_temp_dirs_for_dead_pids_are_removed() {
+            let base = std::env::temp_dir().join(format!("jiaoren-tmp-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&base);
+            let dead = base.join(".tmp-2147483647");
+            let live = base.join(format!(".tmp-{}", std::process::id()));
+            fs::create_dir_all(&dead).unwrap();
+            fs::create_dir_all(&live).unwrap();
+            cleanup_stale_temps(&base);
+            assert!(!dead.exists());
+            assert!(live.exists());
             let _ = fs::remove_dir_all(&base);
         }
 

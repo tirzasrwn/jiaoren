@@ -69,15 +69,19 @@ jiaoren runs to let mermaid.js rasterize each diagram.
 jiaoren manages its own copy, so no Playwright, Node or sudo is needed. On
 startup it looks for a browser in this order:
 
-1. `JIAOREN_CHROMIUM` (an explicit binary path)
+1. `JIAOREN_CHROMIUM` (an explicit binary path; ignored with a warning unless
+   it is an executable file)
 2. `chrome-headless-shell`, `chromium`, `google-chrome` or `chrome` on `PATH`
 3. the managed install at
    `~/.cache/jiaoren/chromium/<version>/chrome-headless-shell-linux64/chrome-headless-shell`
+   (under `$XDG_CACHE_HOME/jiaoren/...` when that variable is set)
 
 When none is found, the first run downloads Chrome for Testing's
 `chrome-headless-shell` (pinned version `158.0.8127.36`, about 132 MB, so the
-first run needs network) and caches it under `~/.cache/jiaoren/chromium/<version>/`.
-Later runs reuse it; delete that directory to force a fresh download.
+first run needs network plus `curl` and `unzip` on `PATH`) and caches it under
+`~/.cache/jiaoren/chromium/<version>/`. Later runs reuse it; delete that
+directory to force a fresh download. Concurrent first runs are serialized by a
+lock file, so only one instance downloads and the other reuses its install.
 
 To point jiaoren at a different binary instead, set:
 
@@ -85,10 +89,12 @@ To point jiaoren at a different binary instead, set:
 export JIAOREN_CHROMIUM=/path/to/chrome
 ```
 
-The pinned CfT URL has no `.sha256` file alongside it, so integrity is checked
-by `unzip -t` on the archive, a `--version` run of the extracted binary, and the
-pinned version itself. The download is extracted into a temp directory and
-renamed into place, so a failed install leaves no half-written binary.
+There is no official hash for the pinned CfT artifact, so no artifact hash is
+verified: the pinned version only selects the download URL, and integrity is
+limited to `unzip -t` on the archive and a `--version` run of the extracted
+binary before it is published. Those are smoke checks, not a supply-chain
+guarantee. The download is validated in a temp directory and only then renamed
+into place, so a killed install leaves no half-written binary.
 
 If Chromium cannot be found or installed, the document still opens and a
 warning banner names the failing step; diagrams simply won't render.

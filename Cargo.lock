@@ -1178,6 +1178,7 @@ dependencies = [
  "egui",
  "egui_commonmark",
  "egui_extras",
+ "libc",
  "notify",
  "resvg 0.48.1",
  "thiserror 2.0.21",
