@@ -185,6 +185,31 @@ fn is_thematic_break(t: &str) -> bool {
     }
 }
 
+/// An ATX heading: 1–6 `#` at column 0, then a space (or end of line).
+fn is_atx_heading(line: &str) -> bool {
+    let t = line.trim_end_matches(['\r', '\n']);
+    let hashes = t.chars().take_while(|&c| c == '#').count();
+    (1..=6).contains(&hashes) && matches!(t.as_bytes().get(hashes), None | Some(b' '))
+}
+
+/// Emit a spacer placeholder before a heading, unless the document has no
+/// content yet (a leading heading needs no gap).
+fn push_space_before(out: &mut String) {
+    if out.trim().is_empty() {
+        return;
+    }
+    // Spot the placeholder as its own HTML block: a blank line first.
+    if !out.ends_with("\n\n") {
+        out.push('\n');
+    }
+    out.push_str("<mdspace>\n\n");
+}
+
+/// Emit a spacer placeholder after a heading.
+fn push_space_after(out: &mut String) {
+    out.push_str("<mdspace>\n\n");
+}
+
 /// A setext underline: one or more `=` or `-` and nothing else (up to 3 spaces
 /// of indent). It turns the preceding line into a heading, so the library must
 /// own both lines instead of us extracting that line as a paragraph.
@@ -313,13 +338,25 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                             j += 1;
                         }
                         // A setext underline anywhere in/after the run makes the
-                        // library's heading win: emit this line verbatim and let
-                        // the underline end the block on the next iteration.
-                        let setext = (j < lines.len() && is_setext_underline(lines[j]))
-                            || lines[i + 1..j].iter().any(|l| is_setext_underline(l));
-                        if setext {
-                            out.push_str(&rewrite_images(line, doc_dir));
-                            i += 1;
+                        // library's heading win: emit the title and underline
+                        // verbatim, wrapped in spacers like ATX headings.
+                        let setext_end = if j < lines.len() && is_setext_underline(lines[j]) {
+                            Some(j + 1)
+                        } else {
+                            lines[i + 1..j]
+                                .iter()
+                                .position(|l| is_setext_underline(l))
+                                .map(|k| i + 2 + k)
+                        };
+                        if let Some(end) = setext_end {
+                            push_space_before(&mut out);
+                            for l in &lines[i..end] {
+                                out.push_str(&rewrite_images(l, doc_dir));
+                            }
+                            if end < lines.len() {
+                                push_space_after(&mut out);
+                            }
+                            i = end;
                             continue;
                         }
                         // CRLF safe: each line is trimmed at its end, then joined.
@@ -338,6 +375,15 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         // paragraph out of the placeholder's HTML block.
                         out.push_str(&format!("<mdpara id=\"{id}\">\n\n"));
                         i = j;
+                        continue;
+                    }
+                    if is_atx_heading(line) {
+                        push_space_before(&mut out);
+                        out.push_str(&rewrite_images(line, doc_dir));
+                        if i + 1 < lines.len() {
+                            push_space_after(&mut out);
+                        }
+                        i += 1;
                         continue;
                     }
                     out.push_str(&rewrite_images(line, doc_dir));
@@ -1222,6 +1268,66 @@ mod tests {
             assert_eq!(p.paragraphs.len(), 1);
             assert_eq!(p.paragraphs.values().next().unwrap(), "Hello world");
             assert!(p.markdown.contains("    code"));
+        }
+    }
+
+    mod headings {
+        use super::super::*;
+
+        fn spaces(out: &str) -> usize {
+            out.matches("<mdspace>").count()
+        }
+
+        #[test]
+        fn heading_between_paragraphs_gets_spacers_on_both_sides() {
+            let p = prepare("before\n\n# Title\n\nafter\n", Path::new("/d"));
+            assert_eq!(p.paragraphs.len(), 2);
+            assert_eq!(spaces(&p.markdown), 2);
+            let before = p.markdown.find("<mdspace>").unwrap();
+            let title = p.markdown.find("# Title").unwrap();
+            let after = p.markdown.rfind("<mdspace>").unwrap();
+            assert!(before < title && title < after);
+        }
+
+        #[test]
+        fn document_starting_with_a_heading_has_no_leading_spacer() {
+            let p = prepare("# Title\n\nbody\n", Path::new("/d"));
+            assert_eq!(spaces(&p.markdown), 1);
+            assert!(p.markdown.starts_with("# Title"));
+        }
+
+        #[test]
+        fn heading_at_eof_has_no_trailing_spacer() {
+            let p = prepare("body\n\n## Last", Path::new("/d"));
+            assert_eq!(spaces(&p.markdown), 1);
+            assert!(p.markdown.ends_with("## Last"));
+        }
+
+        #[test]
+        fn heading_inside_a_fence_is_untouched() {
+            let p = prepare("```\n# not a heading\n```\n", Path::new("/d"));
+            assert_eq!(spaces(&p.markdown), 0);
+            assert!(p.markdown.contains("# not a heading"));
+        }
+
+        #[test]
+        fn setext_heading_gets_spacers_around_title_and_underline() {
+            let p = prepare("before\n\nTitle\n===\n\nafter\n", Path::new("/d"));
+            assert_eq!(p.paragraphs.len(), 2);
+            assert_eq!(spaces(&p.markdown), 2);
+            let before = p.markdown.find("<mdspace>").unwrap();
+            let title = p.markdown.find("Title\n===").unwrap();
+            let after = p.markdown.rfind("<mdspace>").unwrap();
+            assert!(before < title && title < after);
+        }
+
+        #[test]
+        fn headings_in_quotes_lists_and_indented_code_are_untouched() {
+            let p = prepare("> # q\n\n- # item\n\n    # code\n", Path::new("/d"));
+            assert_eq!(spaces(&p.markdown), 0);
+            assert!(p.markdown.contains("> # q"));
+            assert!(p.markdown.contains("    # code"));
+            assert_eq!(p.lists.values().next().unwrap().items[0].text, "# item");
         }
     }
 
