@@ -76,14 +76,14 @@ impl TableUi {
         // A distinct id per occurrence so two identical tables never share state.
         let grid_id = ui.id().with(("mdtable", id, occurrence));
         let body_row_height = ui.text_style_height(&egui::TextStyle::Body);
-        let (row_fill, header_fill) = table_fills(ui.visuals().dark_mode);
+        let dark = ui.visuals().dark_mode;
         // The html hook runs in a wrapping left-to-right layout, where a bare
         // `add_space` would advance horizontally; the vertical wrapper turns the
         // padding into real space above and below the grid.
         ui.vertical(|ui| {
             ui.add_space(table_pad(body_row_height));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if copy_csv_button(ui, header_fill) {
+                if copy_csv_button(ui) {
                     ui.ctx().copy_text(table_to_csv(&spec));
                     self.copied = true;
                 }
@@ -91,13 +91,8 @@ impl TableUi {
             // The row colour paints the full table width behind the cells, so
             // the header reads as one bar instead of per-cell chips; data rows
             // alternate from the first one.
-            let row_color = move |row: usize, _style: &egui::Style| match row {
-                0 => Some(header_fill),
-                r if r % 2 == 1 => Some(row_fill),
-                _ => None,
-            };
             egui::Grid::new(grid_id)
-                .with_row_color(row_color)
+                .with_row_color(move |row, _style| row_fill(dark, row))
                 .show(ui, |ui| {
                     for i in 0..ncols {
                         let cell = spec.header.get(i).map_or("", String::as_str);
@@ -169,6 +164,11 @@ pub(crate) fn table_pad(row_height: f32) -> f32 {
 /// Background fills for a table: the alternating data-row fill and the header
 /// fill, taken from the active Catppuccin palette. Both sit on top of the
 /// theme's `base`, so they read as a distinct block rather than loose text.
+/// The light theme's header uses `crust`: in Latte the surface roles get
+/// darker with elevation, so `surface2` (#acb0be) is darker than `surface1`
+/// and would lower the body-text contrast to 3.69:1. `crust` (#dce0e8) is
+/// lighter and reaches 6.04:1. The dark theme's `surface1` already passes AA
+/// at 5.59:1.
 fn table_fills(dark: bool) -> (egui::Color32, egui::Color32) {
     let theme = if dark {
         crate::mermaid::Theme::Dark
@@ -176,14 +176,24 @@ fn table_fills(dark: bool) -> (egui::Color32, egui::Color32) {
         crate::mermaid::Theme::Light
     };
     let p = crate::theme::palette(theme);
-    (p.surface0.into(), p.surface1.into())
+    let header = if dark { p.surface1 } else { p.crust };
+    (p.surface0.into(), header.into())
+}
+
+/// Background fill for `row_index`: the header row, the alternating data rows
+/// (`surface0` on odd rows), or none.
+fn row_fill(dark: bool, row_index: usize) -> Option<egui::Color32> {
+    let (body, header) = table_fills(dark);
+    match row_index {
+        0 => Some(header),
+        r if r % 2 == 1 => Some(body),
+        _ => None,
+    }
 }
 
 /// Icon-only copy control: two overlapping rounded sheets drawn with the
-/// painter, so it never depends on a font glyph. Returns true on click. The
-/// front sheet is filled with `fill`, the colour behind the icon, so the back
-/// outline never cuts through it.
-fn copy_csv_button(ui: &mut egui::Ui, fill: egui::Color32) -> bool {
+/// painter, so it never depends on a font glyph. Returns true on click.
+fn copy_csv_button(ui: &mut egui::Ui) -> bool {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::CLICK);
     let response = response.on_hover_text("Copy table as CSV");
     let hovered = response.hovered();
@@ -207,7 +217,15 @@ fn copy_csv_button(ui: &mut egui::Ui, fill: egui::Color32) -> bool {
     let radius = egui::CornerRadius::same(1);
     let painter = ui.painter();
     painter.rect_stroke(back, radius, stroke, egui::StrokeKind::Inside);
-    painter.rect_filled(front, radius, if hovered { hover_bg } else { fill });
+    painter.rect_filled(
+        front,
+        radius,
+        if hovered {
+            hover_bg
+        } else {
+            visuals.panel_fill
+        },
+    );
     painter.rect_stroke(front, radius, stroke, egui::StrokeKind::Inside);
     response.clicked()
 }
@@ -447,6 +465,7 @@ fn render_cell(ui: &mut egui::Ui, w: f32, cell_md: &str, cache: &mut CommonMarkC
 mod tests {
     mod table {
         use super::super::cell_needs_library_fallback;
+        use super::super::row_fill;
         use super::super::table_fills;
         use super::super::table_pad;
         use super::super::table_to_csv;
@@ -524,14 +543,24 @@ mod tests {
         }
 
         #[test]
-        fn table_fills_use_surface0_rows_and_surface1_header() {
+        fn table_fills_use_surface0_rows_and_theme_header() {
             let hex = |c: egui::Color32| crate::theme::Rgb(c.r(), c.g(), c.b()).to_hex();
             let (row, header) = table_fills(false);
             assert_eq!(hex(row), "#ccd0da");
-            assert_eq!(hex(header), "#bcc0cc");
+            assert_eq!(hex(header), "#dce0e8");
             let (row, header) = table_fills(true);
             assert_eq!(hex(row), "#363a4f");
             assert_eq!(hex(header), "#494d64");
+        }
+
+        #[test]
+        fn row_fill_maps_header_and_alternating_rows() {
+            let hex = |c: egui::Color32| crate::theme::Rgb(c.r(), c.g(), c.b()).to_hex();
+            let l = |s: &str| Some(s.to_string());
+            let light: Vec<_> = (0..=3).map(|r| row_fill(false, r).map(hex)).collect();
+            assert_eq!(light, [l("#dce0e8"), l("#ccd0da"), None, l("#ccd0da")]);
+            let dark: Vec<_> = (0..=3).map(|r| row_fill(true, r).map(hex)).collect();
+            assert_eq!(dark, [l("#494d64"), l("#363a4f"), None, l("#363a4f")]);
         }
 
         #[test]

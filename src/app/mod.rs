@@ -170,6 +170,9 @@ pub(crate) struct App {
     last_mtime: Option<SystemTime>,
     last_poll: Instant,
     status: Option<Status>,
+    /// Height reserved by the horizontal scroll bar this frame (0 when hidden),
+    /// so the status line can sit above it.
+    h_bar: f32,
 }
 
 impl App {
@@ -275,6 +278,7 @@ impl App {
             last_mtime,
             last_poll: Instant::now(),
             status: None,
+            h_bar: 0.0,
         }
     }
 
@@ -324,12 +328,16 @@ impl App {
             return;
         }
         let message = status.message;
+        let color: egui::Color32 = crate::theme::palette(self.theme).subtext0.into();
         egui::Area::new(egui::Id::new("jiaoren-status"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
+            .order(egui::Order::Middle)
+            .anchor(
+                egui::Align2::LEFT_BOTTOM,
+                egui::vec2(8.0, -8.0 - self.h_bar),
+            )
             .interactable(false)
             .show(ctx, |ui| {
-                ui.label(egui::RichText::new(message).color(ui.visuals().weak_text_color()));
+                ui.label(egui::RichText::new(message).color(color));
             });
         ctx.request_repaint_after(remaining);
     }
@@ -542,6 +550,14 @@ impl eframe::App for App {
             });
             let max_y = (output.content_size.y - output.inner_rect.height()).max(0.0);
             let max_x = (output.content_size.x - output.inner_rect.width()).max(0.0);
+            // The default ScrollStyle floats its bars, so a visible horizontal
+            // bar covers `bar_width` at the bottom of the viewport; lift the
+            // status line by that much when the content overflows sideways.
+            self.h_bar = if max_x > 0.0 {
+                ui.spacing().scroll.bar_width
+            } else {
+                0.0
+            };
             let adjust = std::mem::take(&mut self.diagrams.borrow_mut().scroll_adjust);
             let jump_bottom = std::mem::take(&mut self.scroll_bottom);
             self.scroll_y = if jump_bottom {
