@@ -204,7 +204,7 @@ fn status_area(ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui)) {
 
 /// Plain bottom-left `/query` line: no frame or background, so the document
 /// stays visible behind it like vim's command line. Monospace keeps the ASCII
-/// block cursor glyph available and lets a long query show its tail.
+/// bar cursor available and lets a long query show its tail.
 fn prompt_area(ctx: &egui::Context, text: String) {
     let screen = ctx.content_rect();
     egui::Area::new(egui::Id::new("jiaoren-search-line"))
@@ -222,10 +222,16 @@ fn prompt_area(ctx: &egui::Context, text: String) {
                 })
             };
             let max_width = (screen.width() * 0.8).max(40.0);
-            let mut shown = text.clone();
-            while !shown.is_empty() && measure(&shown) > max_width {
-                shown.remove(0);
-            }
+            // Keep the leading `/` (vim always shows it) and trim only the query
+            // tail, so the caret at the end stays visible.
+            let (prefix, body) = match text.strip_prefix('/') {
+                Some(body) => ("/", body),
+                None => ("", text.as_str()),
+            };
+            let shown = format!(
+                "{prefix}{}",
+                tail_within(body, max_width - measure(prefix), &measure)
+            );
             let width = measure(&shown);
             let bottom = screen.bottom() - 8.0;
             let ime_rect = egui::Rect::from_min_size(
@@ -251,6 +257,21 @@ fn prompt_area(ctx: &egui::Context, text: String) {
                     .wrap_mode(egui::TextWrapMode::Extend),
             );
         });
+}
+
+/// Longest suffix of `text` that fits `max_width`, cut on a char boundary.
+fn tail_within(text: &str, max_width: f32, measure: &dyn Fn(&str) -> f32) -> String {
+    if measure(text) <= max_width {
+        return text.to_owned();
+    }
+    let mut start = 0;
+    for (i, c) in text.char_indices() {
+        start = i + c.len_utf8();
+        if measure(&text[start..]) <= max_width {
+            break;
+        }
+    }
+    text[start..].to_owned()
 }
 
 /// One raw command-line edit in event order.
@@ -1156,7 +1177,7 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     mod search_batch {
-        use super::super::{read_search_batch, sanitize_paste, SearchEdit};
+        use super::super::{read_search_batch, sanitize_paste, tail_within, SearchEdit};
         use egui::{Event, Key, Modifiers};
 
         fn pressed(key: Key) -> Event {
@@ -1187,6 +1208,16 @@ mod tests {
             assert_eq!(sanitize_paste("a\r\nb\tc"), "abc");
             let batch = read_search_batch(&[Event::Paste("a\r\nb\tc".into())]);
             assert_eq!(batch.edits, vec![SearchEdit::Text("abc".into())]);
+        }
+
+        #[test]
+        fn tail_trim_keeps_longest_suffix_on_char_boundary() {
+            let chars = |s: &str| s.chars().count() as f32;
+            assert_eq!(tail_within("abcdef", 10.0, &chars), "abcdef");
+            assert_eq!(tail_within("abcdef", 3.0, &chars), "def");
+            // Multi-byte scalars: trimming by bytes would split a char.
+            assert_eq!(tail_within("ééé３", 1.0, &chars), "３");
+            assert_eq!(tail_within("", 0.0, &chars), "");
         }
     }
 
