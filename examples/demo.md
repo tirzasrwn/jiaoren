@@ -1,31 +1,51 @@
-# jiaoren demo
+# jiaoren
 
-A keyboard-first Markdown viewer: Markdown, diagrams and tables in one window.
+A Markdown viewer in one window: justified prose, lists, tables and mermaid
+diagrams — no browser tab, no editor.
 
-## What it does
+## Text
 
-- Renders GitHub-flavoured Markdown with justified text
-- Draws ```mermaid fences via a bundled headless Chromium
-- Wraps tables to the reading column; click the icon to copy one as CSV
-- `yy` copies the whole document as Markdown; `Ctrl+C` quits
+Every paragraph is justified to the reading column, so both edges line up while
+inline **bold**, *italic*, `code()` and [links](https://example.com) keep their
+own styling. Long tokens such as
+`src/db/schema.ts:293-311,1148-1175` break at separators instead of pushing the
+table past the window.
+
+- bullets wrap with a hanging indent
+- long URLs like
+  https://example.com/very/long/path/segment/abcdefghijklmnopqrstuvwxyz/0123456789
+  stay inside the column
+- [x] task done
+- [ ] task left
+
+1. ordered items share the same layout
+2. second item
+
+## Table
+
+| Feature | How | Note |
+| --- | --- | --- |
+| Copy table | click the icon | pastes as CSV |
+| Copy document | `yy` | Markdown |
+| Theme | `t` | Catppuccin |
+| Quit | `Ctrl+C` | `q` closes the popup |
 
 ## Diagram
 
 ```mermaid
 flowchart LR
-    A[Markdown] --> B[jiaoren]
-    B --> C{Diagram?}
-    C -->|yes| D[mermaid -> SVG]
-    C -->|no| E[text]
-    D --> F[window]
-    E --> F
+    MD[Markdown] --> JR[jiaoren]
+    JR --> D{diagram?}
+    D -->|yes| SVG[mermaid to SVG]
+    D -->|no| TXT[text]
+    SVG --> W[window]
+    TXT --> W
 ```
 
-## Table
+## Code
 
-| Key | Action |
-| --- | --- |
-| `j` / `k` | scroll a line |
-| `t` | light / dark theme |
-| `yy` | copy the document |
-| `Ctrl+C` | quit |
+```rust
+fn main() {
+    println!("jiaoren");
+}
+```
