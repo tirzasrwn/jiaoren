@@ -437,6 +437,30 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         i = j;
                         continue;
                     }
+                    // Blockquote that is exactly a table: extract it before the
+                    // library sees it. A table nested in a blockquote leaves
+                    // egui_commonmark's table flag set, and the next event makes
+                    // it swallow the rest of the document (audit T-CM-061).
+                    if let Some((j, mut spec)) = quote_table_block(&lines, i) {
+                        for c in &mut spec.header {
+                            *c = rewrite_images(c, doc_dir);
+                        }
+                        for row in &mut spec.rows {
+                            for c in row {
+                                *c = rewrite_images(c, doc_dir);
+                            }
+                        }
+                        let id = table_id(&spec);
+                        tables.insert(id.clone(), spec);
+                        if !out.is_empty() && !out.ends_with("\n\n") {
+                            out.push('\n');
+                        }
+                        // Render at top level: the library's quote layout clips
+                        // the table's full reading-column width.
+                        out.push_str(&format!("<mdtable id=\"{id}\">\n\n"));
+                        i = j;
+                        continue;
+                    }
                     // Table block: consecutive `|`-lines starting at a top-level
                     // line (GFM headers may omit the leading pipe); block-level
                     // structures end the run. ponytail: an emphasis header like
@@ -648,6 +672,26 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
 /// `TableSpec`. The delimiter row must have the same cell count as the header
 /// and each cell must match `:?-{1,}:?`. Malformed blocks return `None`, so
 /// the caller can fall back to emitting the lines verbatim.
+pub fn quote_table_block(lines: &[&str], start: usize) -> Option<(usize, TableSpec)> {
+    let mut end = start;
+    let mut body = Vec::new();
+    while end < lines.len() {
+        let Some(rest) = lines[end].trim_start().strip_prefix('>') else {
+            break;
+        };
+        let rest = rest.strip_prefix(' ').unwrap_or(rest).trim_end();
+        if !rest.trim().is_empty() && !rest.contains('|') {
+            return None;
+        }
+        body.push(rest);
+        end += 1;
+    }
+    if end == start {
+        return None;
+    }
+    parse_table_block(&body).map(|spec| (end, spec))
+}
+
 pub fn parse_table_block(lines: &[&str]) -> Option<TableSpec> {
     if lines.len() < 2 {
         return None;
@@ -727,7 +771,13 @@ fn open_fence(t: &str) -> Option<(char, usize, &str)> {
     if len < 3 {
         return None;
     }
-    Some((ch, len, &t[len..]))
+    let info = &t[len..];
+    // CommonMark: a backtick fence's info string may not contain a backtick,
+    // so such a line is not a fence opener at all.
+    if ch == '`' && info.contains('`') {
+        return None;
+    }
+    Some((ch, len, info))
 }
 
 /// A closing fence: same char, run at least as long as the opener, at most 3
@@ -1038,8 +1088,46 @@ fn rewrite_images(mut rest: &str, doc_dir: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    mod quote_table {
+        use super::super::prepare;
+
+        #[test]
+        fn table_inside_a_blockquote_becomes_a_placeholder_and_keeps_later_content() {
+            let p = prepare(
+                "> | a | b |\n> | - | - |\n> | 1 | 2 |\n\nafter marker\n",
+                std::path::Path::new("/tmp"),
+            );
+            assert_eq!(p.tables.len(), 1, "the quote table must be extracted");
+            assert_eq!(
+                p.tables.values().next().unwrap().header,
+                vec!["a".to_string(), "b".to_string()]
+            );
+            assert!(
+                p.markdown.contains("<mdtable"),
+                "the quote table gets a placeholder: {:?}",
+                p.markdown
+            );
+            assert!(
+                p.markdown.contains("<mdpara"),
+                "content after the quote must survive: {:?}",
+                p.markdown
+            );
+        }
+    }
+
     mod fences {
         use super::super::*;
+
+        #[test]
+        fn backtick_info_string_cannot_contain_a_backtick() {
+            // CommonMark: a backtick fence's info string may not contain a
+            // backtick; the line is ordinary text, not a fence opener.
+            assert_eq!(open_fence("``` `not a fence`"), None);
+            assert!(open_fence("```rust").is_some());
+            assert!(open_fence("````").is_some());
+            // Tilde fences may carry backticks in the info string.
+            assert!(open_fence("~~~ `ok`").is_some());
+        }
 
         #[test]
         fn extracts_mermaid_and_code_separately() {
