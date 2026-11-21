@@ -24,6 +24,8 @@ so wrapped code stays readable and referenceable.
 - Syntax highlighting.
 - Re-numbering continuation rows, folding, or per-line copy buttons.
 - Any wrapping change outside fenced code blocks.
+- Table hover is a separate small addition (see below), not part of the code
+  block design.
 
 ## Design
 
@@ -43,6 +45,17 @@ so wrapped code stays readable and referenceable.
   button are unchanged.
 - Line numbers are decoration: never part of the text model, selection, search
   text, or clipboard.
+
+## Table row hover (added on request)
+
+Hovering a table row highlights that whole row so it is easier to trace across
+columns. Use the existing Catppuccin row fills: `surface1` for data rows and
+`surface2` for the header row (both via `theme::palette`), replacing the normal
+`surface0`/header fill while hovered. The hovered row is tracked per table id
+and applied on the next frame through `Grid::with_row_color` (one frame of lag,
+invisible at pointer speed); row rects are recorded during the same draw. Copy
+icon, search, selection, and CSV output are unaffected. Line numbers and hover
+colours are decoration only.
 
 ## Constraints
 
