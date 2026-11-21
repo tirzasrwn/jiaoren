@@ -195,12 +195,14 @@ impl SearchUi {
         self.state.clear();
     }
 
-    /// Close the command line and restore the pre-`/` search state.
-    pub(crate) fn cancel(&mut self) {
+    /// Close the command line and restore the pre-`/` search state. Returns the
+    /// restored current match's block, so the app can re-centre the viewport.
+    pub(crate) fn cancel(&mut self) -> Option<usize> {
         if let Some(state) = self.backup.take() {
             self.state = state;
         }
         self.input = None;
+        self.state.current_block()
     }
 
     /// Keep the live search and leave input mode.
@@ -214,7 +216,9 @@ impl SearchUi {
         self.input.as_deref().unwrap_or_default()
     }
 
-    /// Append raw typed/pasted text and recompute hits live.
+    /// Append raw typed/pasted text and recompute hits live. Test-only: the app
+    /// applies a frame's edits in one batch, then calls [`Self::recompute_live`].
+    #[cfg(test)]
     pub(crate) fn type_text(&mut self, text: &str) {
         if let Some(query) = self.input.as_mut() {
             query.push_str(text);
@@ -222,7 +226,8 @@ impl SearchUi {
         self.live_update();
     }
 
-    /// Delete the last char (unicode-aware) and recompute live.
+    /// Delete the last char (unicode-aware) and recompute live. Test-only.
+    #[cfg(test)]
     pub(crate) fn backspace(&mut self) {
         if let Some(query) = self.input.as_mut() {
             query.pop();
@@ -230,12 +235,19 @@ impl SearchUi {
         self.live_update();
     }
 
+    /// Recompute hits after applying a frame's edits. One pass per frame, no
+    /// per-event block cloning.
+    pub(crate) fn recompute_live(&mut self) {
+        self.live_update();
+    }
+
     /// Recompute the live match set from the current query. An empty query
     /// clears hits but stays in input mode.
     fn live_update(&mut self) {
         let pattern = self.query().to_string();
-        let texts = self.texts.clone();
+        let texts = std::mem::take(&mut self.texts);
         self.state.set_pattern(&texts, &pattern);
+        self.texts = texts;
     }
 
     /// Whether the command line owns the keyboard.
@@ -284,10 +296,13 @@ mod tests {
             assert_eq!(s.query(), "ab");
             assert_eq!(s.state.hits.len(), 2);
 
-            s.cancel();
+            let restored = s.cancel();
             assert!(!s.is_open());
             assert_eq!(s.state.pattern.as_deref(), Some("two"));
             assert_eq!(s.state.hits.len(), 1);
+            // Restored current block is returned so the app can re-centre.
+            assert_eq!(restored, Some(1));
+            assert_eq!(s.state.current_block(), Some(1));
         }
 
         #[test]
@@ -309,6 +324,16 @@ mod tests {
             assert!(s.is_open(), "empty query stays in input mode");
             s.commit();
             assert_eq!(s.state.pattern, None);
+        }
+
+        #[test]
+        fn cancel_without_prior_search_has_no_jump_target() {
+            let mut s = SearchUi::new();
+            s.texts = vec!["abc".to_string()];
+            s.open();
+            s.type_text("abc");
+            assert_eq!(s.cancel(), None);
+            assert!(s.state.pattern.is_none());
         }
 
         #[test]

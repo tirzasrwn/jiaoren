@@ -203,24 +203,151 @@ fn status_area(ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 /// Plain bottom-left `/query` line: no frame or background, so the document
-/// stays visible behind it like vim's command line.
+/// stays visible behind it like vim's command line. Monospace keeps the ASCII
+/// block cursor glyph available and lets a long query show its tail.
 fn prompt_area(ctx: &egui::Context, text: String) {
+    let screen = ctx.content_rect();
     egui::Area::new(egui::Id::new("jiaoren-search-line"))
         .order(egui::Order::Middle)
         .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
         .interactable(false)
         .show(ctx, |ui| {
+            let color = ui.visuals().text_color();
+            let font = egui::TextStyle::Monospace.resolve(ui.style());
+            let measure = |s: &str| {
+                ui.fonts_mut(|f| {
+                    f.layout_no_wrap(s.to_string(), font.clone(), color)
+                        .size()
+                        .x
+                })
+            };
+            let max_width = (screen.width() * 0.8).max(40.0);
+            let mut shown = text.clone();
+            while !shown.is_empty() && measure(&shown) > max_width {
+                shown.remove(0);
+            }
+            let width = measure(&shown);
+            let bottom = screen.bottom() - 8.0;
+            let ime_rect = egui::Rect::from_min_size(
+                egui::Pos2::new(screen.left() + 8.0, bottom - 20.0),
+                egui::vec2(max_width, 20.0),
+            );
+            let cursor_rect = egui::Rect::from_min_size(
+                egui::Pos2::new(screen.left() + 8.0 + width, bottom - 20.0),
+                egui::vec2(1.0, 20.0),
+            );
+            // Ask the integration to route IME commits here while the command
+            // line is open; preedit is deliberately ignored.
+            ctx.output_mut(|o| {
+                o.ime = Some(egui::output::IMEOutput {
+                    purpose: egui::IMEPurpose::Normal,
+                    rect: ime_rect,
+                    cursor_rect,
+                    should_interrupt_composition: false,
+                });
+            });
             ui.add(
-                egui::Label::new(egui::RichText::new(text).color(ui.visuals().text_color()))
+                egui::Label::new(egui::RichText::new(shown).monospace().color(color))
                     .wrap_mode(egui::TextWrapMode::Extend),
             );
         });
 }
 
 /// One raw command-line edit in event order.
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum SearchEdit {
     Text(String),
     Backspace,
+}
+
+/// One frame of raw search input, stopping at Enter so later text cannot be
+/// appended to the committed pattern.
+#[derive(Default)]
+struct SearchBatch {
+    edits: Vec<SearchEdit>,
+    enter: bool,
+    cancel: bool,
+    copy: bool,
+    /// Keys after Enter, handed to the document action path (e.g. `n`).
+    after_enter: Vec<(egui::Key, egui::Modifiers)>,
+}
+
+/// Paste is a command line, not multiline text: strip CR/LF and controls.
+fn sanitize_paste(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
+}
+
+fn read_search_batch(events: &[egui::Event]) -> SearchBatch {
+    let mut batch = SearchBatch::default();
+    let mut after_enter = false;
+    for ev in events {
+        if after_enter {
+            if let egui::Event::Key {
+                key,
+                modifiers,
+                pressed: true,
+                ..
+            } = ev
+            {
+                batch.after_enter.push((*key, *modifiers));
+            }
+            continue;
+        }
+        match ev {
+            egui::Event::Text(text) if !text.is_empty() => {
+                batch.edits.push(SearchEdit::Text(text.clone()));
+            }
+            egui::Event::Paste(text) => {
+                let text = sanitize_paste(text);
+                if !text.is_empty() {
+                    batch.edits.push(SearchEdit::Text(text));
+                }
+            }
+            egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
+                let text = sanitize_paste(text);
+                if !text.is_empty() {
+                    batch.edits.push(SearchEdit::Text(text));
+                }
+            }
+            egui::Event::Ime(_) => {} // preedit: ignored
+            egui::Event::Key {
+                key: egui::Key::Backspace,
+                pressed: true,
+                ..
+            } => batch.edits.push(SearchEdit::Backspace),
+            egui::Event::Key {
+                key: egui::Key::Enter,
+                pressed: true,
+                ..
+            } => {
+                batch.enter = true;
+                after_enter = true;
+            }
+            egui::Event::Key {
+                key: egui::Key::Escape,
+                pressed: true,
+                ..
+            } => {
+                batch.cancel = true;
+                break;
+            }
+            egui::Event::Key {
+                key: egui::Key::C,
+                modifiers,
+                pressed: true,
+                ..
+            } if modifiers.ctrl || modifiers.command => {
+                batch.cancel = true;
+                break;
+            }
+            egui::Event::Copy => {
+                batch.copy = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    batch
 }
 
 /// The jiaoren window: document state, theme/zoom, scrolling, and the HTML
@@ -457,7 +584,7 @@ impl App {
     /// padding keeps text clear of it.
     fn draw_status(&mut self, ctx: &egui::Context) {
         if self.search.borrow().is_open() {
-            let line = format!("/{}▏", self.search.borrow().query());
+            let line = format!("/{}|", self.search.borrow().query());
             prompt_area(ctx, line);
             return;
         }
@@ -549,8 +676,8 @@ impl App {
         let selection_active = self.search.borrow().selection.is_active();
         match cancel_action(prompt_open, search_active, selection_active) {
             CancelAction::CancelPrompt => {
-                self.search.borrow_mut().cancel();
-                self.jump_to = None;
+                let restored = self.search.borrow_mut().cancel();
+                self.jump_to = restored;
                 ctx.request_repaint();
             }
             CancelAction::ClearSearch => {
@@ -672,9 +799,6 @@ impl eframe::App for App {
             }
         }
         let suppress_quit = quit_suppressed(input_time, popup_closed_at);
-        // The prompt is drawn before any key is acted on, so its TextEdit has
-        // already consumed this frame's text, paste and IME events. Enter then
-        // confirms the current buffer instead of the previous frame's.
         let prompt_open = self.search.borrow().is_open();
         // Pointer selection runs before the scroll area so a press on text can
         // suppress drag-panning in the same frame.
@@ -692,78 +816,53 @@ impl eframe::App for App {
         }
         let mut acts: Vec<Action> = Vec::new();
         if !popup_open && prompt_open {
-            // Raw vim-style input: no widget, no focus. Text appends, Backspace
-            // deletes a unicode char, Enter commits, Esc/Ctrl+C restores the
-            // pre-`/` search. Every other document key is ignored.
-            let mut edits: Vec<SearchEdit> = Vec::new();
-            let mut enter = false;
-            let mut escape = false;
-            let mut ctrl_c = false;
-            let mut copy = false;
-            ui.input(|i| {
-                for ev in &i.events {
-                    match ev {
-                        egui::Event::Text(text) if !text.is_empty() => {
-                            edits.push(SearchEdit::Text(text.clone()));
-                        }
-                        egui::Event::Paste(text) if !text.is_empty() => {
-                            edits.push(SearchEdit::Text(text.clone()));
-                        }
-                        egui::Event::Key {
-                            key: egui::Key::Backspace,
-                            pressed: true,
-                            ..
-                        } => edits.push(SearchEdit::Backspace),
-                        egui::Event::Key {
-                            key: egui::Key::Enter,
-                            pressed: true,
-                            ..
-                        } => enter = true,
-                        egui::Event::Key {
-                            key: egui::Key::Escape,
-                            pressed: true,
-                            ..
-                        } => escape = true,
-                        egui::Event::Key {
-                            key: egui::Key::C,
-                            modifiers,
-                            pressed: true,
-                            ..
-                        } if modifiers.ctrl || modifiers.command => ctrl_c = true,
-                        egui::Event::Copy => copy = true,
-                        _ => {}
-                    }
-                }
-            });
+            // Raw vim-style input: no widget, no focus. Events are consumed in
+            // order and stop at Enter; later text cannot join the pattern.
+            let batch = ui.input(|i| read_search_batch(&i.events));
             let ctx = ui.ctx().clone();
             let mut cancelled = false;
-            if copy && self.copy_guard.accept() {
+            if batch.copy && self.copy_guard.accept() {
                 self.cancel_search(&ctx);
                 cancelled = true;
             }
-            if !cancelled && (escape || ctrl_c) {
+            if !cancelled && batch.cancel {
                 self.cancel_search(&ctx);
                 cancelled = true;
             }
             if !cancelled {
-                let mut changed = false;
-                for edit in edits {
-                    match edit {
-                        SearchEdit::Text(text) => {
-                            self.search.borrow_mut().type_text(&text);
+                let changed = !batch.edits.is_empty();
+                if changed || batch.enter {
+                    let mut s = self.search.borrow_mut();
+                    if let Some(query) = s.input.as_mut() {
+                        for edit in &batch.edits {
+                            match edit {
+                                SearchEdit::Text(text) => query.push_str(text),
+                                SearchEdit::Backspace => {
+                                    query.pop();
+                                }
+                            }
                         }
-                        SearchEdit::Backspace => self.search.borrow_mut().backspace(),
                     }
-                    changed = true;
-                }
-                if changed {
-                    let target = self.search.borrow().state.current_block();
+                    if changed {
+                        // One match recompute for the whole frame.
+                        s.recompute_live();
+                    }
+                    let target = s.state.current_block();
+                    if batch.enter {
+                        s.commit();
+                    }
+                    drop(s);
+                    // A live edit jumps to its match; Enter keeps it. Cancelling
+                    // already returned through cancel_search above.
                     self.jump_to = target;
                     ctx.request_repaint();
                 }
-                if enter {
-                    self.search.borrow_mut().commit();
-                    ctx.request_repaint();
+                // Keys after Enter run through the document action path, so
+                // `Enter n` commits the pattern and then steps.
+                for (key, modifiers) in batch.after_enter {
+                    if let Some(action) = apply_key(&mut self.keys, key, modifiers, now) {
+                        acts.push(action);
+                    }
                 }
             }
         } else if !popup_open {
@@ -1056,6 +1155,41 @@ impl eframe::App for App {
 
 #[cfg(test)]
 mod tests {
+    mod search_batch {
+        use super::super::{read_search_batch, sanitize_paste, SearchEdit};
+        use egui::{Event, Key, Modifiers};
+
+        fn pressed(key: Key) -> Event {
+            Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            }
+        }
+
+        #[test]
+        fn stops_at_enter_and_keeps_later_keys_for_actions() {
+            let batch = read_search_batch(&[
+                Event::Text("foo".into()),
+                pressed(Key::Enter),
+                Event::Text("n".into()),
+                pressed(Key::N),
+            ]);
+            assert_eq!(batch.edits, vec![SearchEdit::Text("foo".into())]);
+            assert!(batch.enter);
+            assert_eq!(batch.after_enter, vec![(Key::N, Modifiers::NONE)]);
+        }
+
+        #[test]
+        fn paste_is_single_line_and_strips_controls() {
+            assert_eq!(sanitize_paste("a\r\nb\tc"), "abc");
+            let batch = read_search_batch(&[Event::Paste("a\r\nb\tc".into())]);
+            assert_eq!(batch.edits, vec![SearchEdit::Text("abc".into())]);
+        }
+    }
+
     mod read_doc {
         use super::super::*;
 
