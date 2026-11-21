@@ -8,10 +8,16 @@ use crate::mermaid::Theme;
 /// image. Matches the `(id, theme, bucket, ppp_rounded_2dp)` interface.
 pub(crate) type RasterKey = (String, &'static str, u16, i32);
 
-/// Width of the reading column: the window minus 64 px of margins, capped at
-/// 900 px scaled by zoom. Floored at 0 so a tiny window never goes negative.
+/// Width of the reading column. At or below 1x it fits the window: the window
+/// minus 64 px of margins, capped at 900 px scaled by zoom, floored at 0 so a
+/// tiny window never goes negative. Above 1x it magnifies instead: 900 px times
+/// zoom, which may exceed the window and pan sideways.
 pub(crate) fn content_column(available: f32, zoom: f32) -> f32 {
-    (available - 64.0).min(900.0 * zoom).max(0.0)
+    if zoom <= 1.0 {
+        (available - 64.0).min(900.0 * zoom).max(0.0)
+    } else {
+        900.0 * zoom
+    }
 }
 
 /// Widths proportional to each column's desired width, fitting `available`
@@ -263,11 +269,12 @@ mod tests {
         #[test]
         fn column_grows_with_zoom() {
             assert_eq!(content_column(1800.0, 1.0), 900.0);
-            assert_eq!(content_column(1800.0, 2.0), 1736.0);
-            assert_eq!(content_column(1800.0, 3.0), 1736.0);
+            assert_eq!(content_column(1800.0, 2.0), 1800.0);
+            assert_eq!(content_column(1800.0, 3.0), 2700.0);
             assert_eq!(content_column(600.0, 1.0), 536.0);
-            assert_eq!(content_column(1800.0, 0.5), 450.0);
+            assert_eq!(content_column(600.0, 2.0), 1800.0);
             assert_eq!(content_column(40.0, 1.0), 0.0);
+            assert_eq!(content_column(1800.0, 0.5), 450.0);
         }
 
         #[test]
