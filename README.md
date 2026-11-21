@@ -144,8 +144,10 @@ A paragraph that contains only one local image is drawn as an image block:
 ```
 
 Relative paths resolve against the document directory; the title is ignored
-and the alt text is kept. **PNG, JPEG, GIF (first frame) and WebP** are decoded
-locally by the `image` crate.
+and the alt text is kept. A destination with spaces can be bracketed:
+`![alt](<a b.png>)`. Paths are used literally, so `%20` is **not** decoded.
+**PNG, JPEG, GIF (first frame) and WebP** are decoded locally by the `image`
+crate.
 
 Remote images are never fetched: `http(s)://`, `data:` and absolute paths keep
 the Markdown library's placeholder. Inline images (an image among text), and
@@ -154,11 +156,17 @@ are not clickable.
 
 An image is drawn at its intrinsic pixel size (centred when narrower than the
 text column) and capped to the column width when wider, with the same vertical
-spacing above and below as a table. Click it to open the same dimmed overlay as
-a diagram: `+`/`-` or the wheel zoom (1×–3×), `h`/`l`/`j`/`k` and mouse drag
-pan, and `Esc`, `q`, `Ctrl+C` or a click outside closes it. A changed file
-reloads automatically (the texture is keyed by the file's mtime); a missing or
-undecodable file draws a red error line naming the path.
+spacing above and below as a table. Decoding runs on a background worker with
+bounded dimensions/allocation; the pixels are downscaled to the display size
+before upload, so a 4000×3000 photo does not keep a full-resolution texture.
+The zoom popup re-resizes from the decoded source when zooming in, so `+` stays
+sharp.
+
+Click an image to open the same dimmed overlay as a diagram: `+`/`-` or the
+wheel zoom (1×–3×), `h`/`l`/`j`/`k` and mouse drag pan, and `Esc`, `q`, `Ctrl+C`
+or a click outside closes it. A changed file reloads automatically (the texture
+is keyed by the file's mtime); a missing or undecodable file draws a red error
+line naming the path.
 
 ## Cache
 

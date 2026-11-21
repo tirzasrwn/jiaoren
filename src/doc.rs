@@ -785,11 +785,27 @@ fn link_inner(s: &str) -> Option<(&str, usize)> {
 }
 
 /// True when `line` is one standalone image paragraph, allowing CommonMark's
-/// up-to-three-space paragraph indent. Four or more spaces stay indented code.
+/// up-to-three-space paragraph indent. A leading tab is four columns, and four
+/// or more columns stay indented code.
 fn is_standalone_image_start(line: &str) -> bool {
     let t = line.trim_end_matches(['\r', '\n']);
-    let indent = t.len() - t.trim_start_matches(' ').len();
-    indent <= 3 && parse_standalone_image(&t[indent..]).is_some()
+    let body = t.trim_start_matches([' ', '\t']);
+    let lead = &t[..t.len() - body.len()];
+    !lead.contains('\t') && lead.len() <= 3 && parse_standalone_image(body).is_some()
+}
+
+/// The destination of an image/link body: `<a b.png>` keeps its spaces, an
+/// unbracketed destination ends at the first whitespace. Returns `None` for an
+/// empty destination.
+fn image_target(inner: &str) -> Option<&str> {
+    let s = inner.trim();
+    if let Some(rest) = s.strip_prefix('<') {
+        let end = rest.find('>')?;
+        let target = &rest[..end];
+        return (!target.is_empty()).then_some(target);
+    }
+    let target = s.split_whitespace().next()?;
+    (!target.is_empty()).then_some(target)
 }
 
 /// Parse `source` as exactly one Markdown image, optionally wrapped in
@@ -805,7 +821,7 @@ fn parse_standalone_image(source: &str) -> Option<(String, String)> {
     if !tail[consumed..].trim().is_empty() {
         return None;
     }
-    let target = inner.split_whitespace().next().unwrap_or("");
+    let target = image_target(inner)?;
     Some((alt.to_string(), target.to_string()))
 }
 
@@ -834,10 +850,13 @@ fn rewrite_images(mut rest: &str, doc_dir: &Path) -> String {
             None => break,
         };
         let alt = &rest[2..mid];
-        // Drop an optional `"title"` (and any other trailing link text).
-        let target = inner.split_whitespace().next().unwrap_or("");
-        let skip = target.is_empty()
-            || target.starts_with('/')
+        // Drop an optional `"title"` and keep a bracketed destination's spaces.
+        let Some(target) = image_target(inner) else {
+            out.push_str("![");
+            rest = &rest[2..];
+            continue;
+        };
+        let skip = target.starts_with('/')
             || target.starts_with('#')
             || target.starts_with("data:")
             || target.contains("://");
@@ -1637,6 +1656,32 @@ mod tests {
             let p = prepare("    ![x](a.png)\n", Path::new("/docs"));
             assert!(p.images.is_empty());
             assert!(p.markdown.contains("    ![x](file:///docs/a.png)"));
+        }
+
+        #[test]
+        fn tab_indented_image_stays_on_the_library_path() {
+            let p = prepare("\t![x](a.png)\n", Path::new("/docs"));
+            assert!(p.images.is_empty());
+            assert!(p.markdown.contains("\t![x](file:///docs/a.png)"));
+        }
+
+        #[test]
+        fn angle_bracket_destination_keeps_its_spaces() {
+            let md = "![x](<a b.png> \"title\")\n";
+            let p = prepare(md, Path::new("/docs"));
+            let spec = p.images.values().next().unwrap();
+            assert_eq!(spec.src, "/docs/a b.png");
+            assert_eq!(spec.alt, "x");
+            assert!(p.markdown.contains("<mdimg id="));
+        }
+
+        #[test]
+        fn inline_angle_bracket_destination_is_rewritten_not_truncated() {
+            let md = "before ![x](<a b.png>) after\n";
+            let p = prepare(md, Path::new("/docs"));
+            assert!(p.images.is_empty());
+            let source = p.paragraphs.values().next().unwrap();
+            assert!(source.contains("![x](file:///docs/a%20b.png)"));
         }
     }
 

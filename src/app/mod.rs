@@ -395,6 +395,7 @@ impl App {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.diagrams.borrow_mut().poll(ctx);
+        self.images.borrow_mut().poll(ctx);
         self.watch_tick(ctx);
     }
 
