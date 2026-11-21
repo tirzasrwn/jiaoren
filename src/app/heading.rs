@@ -59,13 +59,18 @@ impl HeadingUi {
             }
             // Record at the heading's text top, after the gap above, so a jump
             // does not leave a blank band.
-            search.record(ui, justify::search_text(&spec.text));
+            let block = search.record(ui, justify::search_text(&spec.text));
+            let (ranges, current) = search.highlights(block);
+            let highlights = justify::MatchHighlight {
+                ranges: &ranges,
+                current,
+            };
             if runs.is_empty() {
                 // `#` still owns a heading row, not just the gaps.
                 let row_h = ui.fonts_mut(|f| f.row_height(&font));
                 ui.allocate_space(egui::vec2(column, row_h));
             } else {
-                justify::draw_with(ui, &runs, column, font, color, false);
+                justify::draw_with(ui, &runs, column, font, color, false, highlights);
             }
             if spec.space_after {
                 ui.add_space(after);

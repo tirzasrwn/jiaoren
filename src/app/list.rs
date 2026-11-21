@@ -50,7 +50,12 @@ impl ListUi {
             ui.add_space(pad);
             for item in &spec.items {
                 // One searchable block per item, at the row it starts on.
-                search.record(ui, crate::justify::search_text(&item.text));
+                let block = search.record(ui, crate::justify::search_text(&item.text));
+                let (ranges, current) = search.highlights(block);
+                let highlights = justify::MatchHighlight {
+                    ranges: &ranges,
+                    current,
+                };
                 let marker = match item.kind {
                     ListKind::Bullet if item.depth % 2 == 1 => Marker::Hollow,
                     ListKind::Bullet => Marker::Bullet,
@@ -59,7 +64,7 @@ impl ListUi {
                 };
                 let runs = justify::parse_inline(&item.text);
                 let indent = justify::list_indent(item.depth, space);
-                justify::draw_indented(ui, &runs, column, indent, marker);
+                justify::draw_indented(ui, &runs, column, indent, marker, highlights);
             }
             ui.add_space(pad);
         });

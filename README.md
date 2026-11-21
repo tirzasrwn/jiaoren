@@ -80,10 +80,12 @@ To go back to the defaults, delete (or comment out) the
 | `q` / `ctrl+c` | quit |
 
 Search matches the rendered text: soft-wrapped source lines are joined, inline
-emphasis and HTML markup are dropped, link labels and image alt text are kept,
-and code blocks are literal. Patterns are smartcase — any uppercase character
-makes the search case-sensitive. `n`/`N` wrap around; a hit jumps the document
-so its block is at the top of the viewport (clamped at the document edges).
+emphasis is dropped, link labels and code text are kept, and code blocks are
+literal. Paragraphs and table cells routed to the library (inline images or raw
+HTML) are not searchable because their painted glyphs are not modelled.
+Patterns are smartcase — any uppercase character makes the search
+case-sensitive. Every hit is highlighted in place, with a stronger fill for the
+current one; `n`/`N` wrap around and scroll the current hit's block into view.
 
 Mouse: drag anywhere to pan the document in both axes (the wheel still
 scrolls, `gg` returns to the start). A plain click on a diagram or local image

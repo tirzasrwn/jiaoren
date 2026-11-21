@@ -98,16 +98,41 @@ impl TableUi {
                     for i in 0..ncols {
                         let cell = spec.header.get(i).map_or("", String::as_str);
                         // One block per cell, row-major; the row top is enough
-                        // to jump to it.
-                        search.record(ui, plain_text(cell));
-                        render_cell(ui, cell_width(&widths, i), cell, &mut self.cell_cache);
+                        // to jump to it. Cells routed to the library are not
+                        // searchable, so they are not recorded.
+                        let (ranges, current) = if cell_needs_library_fallback(cell) {
+                            (Vec::new(), None)
+                        } else {
+                            let block = search.record(ui, crate::justify::search_text(cell));
+                            search.highlights(block)
+                        };
+                        render_cell(
+                            ui,
+                            cell_width(&widths, i),
+                            cell,
+                            &mut self.cell_cache,
+                            &ranges,
+                            current,
+                        );
                     }
                     ui.end_row();
                     for row in &spec.rows {
                         for i in 0..ncols {
                             let cell = row.get(i).map_or("", String::as_str);
-                            search.record(ui, plain_text(cell));
-                            render_cell(ui, cell_width(&widths, i), cell, &mut self.cell_cache);
+                            let (ranges, current) = if cell_needs_library_fallback(cell) {
+                                (Vec::new(), None)
+                            } else {
+                                let block = search.record(ui, crate::justify::search_text(cell));
+                                search.highlights(block)
+                            };
+                            render_cell(
+                                ui,
+                                cell_width(&widths, i),
+                                cell,
+                                &mut self.cell_cache,
+                                &ranges,
+                                current,
+                            );
                         }
                         ui.end_row();
                     }
@@ -415,7 +440,14 @@ fn cell_needs_library_fallback(md: &str) -> bool {
 /// Render one cell, capped at `w` so text wraps and inline formatting (bold,
 /// code, links) still applies. Long tokens break at separators, so a cell never
 /// widens the grid past its column.
-fn render_cell(ui: &mut egui::Ui, w: f32, cell_md: &str, cache: &mut CommonMarkCache) {
+fn render_cell(
+    ui: &mut egui::Ui,
+    w: f32,
+    cell_md: &str,
+    cache: &mut CommonMarkCache,
+    highlights: &[(usize, usize)],
+    current: Option<usize>,
+) {
     // A vertical scope reports the real content height back to the grid; a
     // zero-height `allocate_ui_with_layout` would collapse every row to 0 and
     // let wrapped text paint over the next row.
@@ -431,7 +463,15 @@ fn render_cell(ui: &mut egui::Ui, w: f32, cell_md: &str, cache: &mut CommonMarkC
             ui.add_space(ui.spacing().interact_size.y);
             return;
         }
-        crate::justify::draw_left(ui, &runs, w);
+        crate::justify::draw_left(
+            ui,
+            &runs,
+            w,
+            crate::justify::MatchHighlight {
+                ranges: highlights,
+                current,
+            },
+        );
     });
 }
 

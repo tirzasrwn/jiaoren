@@ -119,6 +119,23 @@ impl SearchState {
         self.hits.get(self.current_match).map(|h| h.block)
     }
 
+    /// All hit ranges on `block`, in order, plus the index into that slice of
+    /// the current match when it belongs to this block.
+    pub fn block_highlights(&self, block: usize) -> (Vec<(usize, usize)>, Option<usize>) {
+        let mut ranges = Vec::new();
+        let mut current = None;
+        for (index, hit) in self.hits.iter().enumerate() {
+            if hit.block != block {
+                continue;
+            }
+            if index == self.current_match {
+                current = Some(ranges.len());
+            }
+            ranges.push((hit.start, hit.end));
+        }
+        (ranges, current)
+    }
+
     /// Status line text: `/pattern [i/n]`, 1-based. `None` for no pattern.
     pub fn status_text(&self) -> Option<String> {
         let pattern = self.pattern.as_ref()?;
@@ -354,6 +371,26 @@ mod tests {
             assert!(s.pattern.is_none());
             assert!(s.hits.is_empty());
             assert_eq!(s.status_text(), None);
+        }
+
+        #[test]
+        fn block_highlights_are_local_and_mark_the_current_hit() {
+            let mut s = SearchState::default();
+            s.set_pattern(&blocks(&["mermaid mermaid", "other mermaid"]), "mermaid");
+            // Three hits: blocks 0, 0, 1; current starts at 0.
+            let (ranges, current) = s.block_highlights(0);
+            assert_eq!(ranges, vec![(0, 7), (8, 15)]);
+            assert_eq!(current, Some(0));
+            let (ranges, current) = s.block_highlights(1);
+            assert_eq!(ranges, vec![(6, 13)]);
+            assert_eq!(current, None);
+            s.next();
+            s.next();
+            assert_eq!(s.current_block(), Some(1));
+            let (_, current) = s.block_highlights(0);
+            assert_eq!(current, None);
+            let (_, current) = s.block_highlights(1);
+            assert_eq!(current, Some(0));
         }
     }
 }

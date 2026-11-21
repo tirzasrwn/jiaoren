@@ -465,6 +465,8 @@ struct Frag {
     color: Color32,
     format: TextFormat,
     text: String,
+    /// Char offset of `text` in the block's recorded search text.
+    offset: usize,
     galley: Arc<Galley>,
     width: f32,
 }
@@ -478,33 +480,20 @@ struct Word {
     split: bool,
 }
 
-/// Layout every word fragment with the real egui font metrics. Words are split
-/// on whitespace; a code span stays one atomic word. `face` overrides the body
-/// font (headings scale it); the strong colour follows the body colour so a
-/// heading's bold runs stay one ink.
-/// Visible plain text of inline Markdown on one line, for search: emphasis and
-/// HTML markup dropped, inline code and link labels kept, image alt kept (the
-/// leading `!` dropped), and every whitespace run collapsed to one space. This
-/// is the text a reader sees, so a soft-wrapped source matches its rendered
-/// form and stage-3 highlighting can slice it by chars.
+/// Visible text of inline Markdown exactly as the painter lays it out: run
+/// texts joined in order, escapes and entities already decoded by
+/// [`parse_inline`], link labels kept, inline HTML kept as literal text, and
+/// image syntax kept literally (`![alt](x)` becomes `!alt`). Whitespace in
+/// non-code runs collapses to one space because the painter splits those runs
+/// on whitespace; code spans keep their literal interior characters.
 pub fn search_text(md: &str) -> String {
     let mut out = String::new();
-    let mut prev_was_text_with_bang = false;
     for run in parse_inline(md) {
-        let is_link = matches!(run.kind, RunKind::Link(_));
-        let next_prev_bang = matches!(run.kind, RunKind::Text) && run.text.ends_with('!');
-        let mut text = run.text;
-        if !matches!(run.kind, RunKind::Code) {
-            text = strip_html(&text);
+        if matches!(run.kind, RunKind::Code) {
+            out.push_str(&run.text);
+        } else {
+            push_collapsed(&mut out, &run.text);
         }
-        // `parse_inline` has no image rule: `![alt](u)` arrives as a literal `!`
-        // text run followed by a link run. Dropping that `!` leaves the alt
-        // text; a bang at the end of a link label is not touched.
-        if is_link && prev_was_text_with_bang && out.ends_with('!') {
-            out.pop();
-        }
-        push_collapsed(&mut out, &text);
-        prev_was_text_with_bang = next_prev_bang;
     }
     while out.ends_with(' ') {
         out.pop();
@@ -557,6 +546,10 @@ fn html_tag_len(s: &str) -> Option<usize> {
     rest.find('>').map(|end| end + 2)
 }
 
+/// Layout every word fragment with the real egui font metrics. Words are split
+/// on whitespace; a code span stays one atomic word. `face` overrides the body
+/// font (headings scale it); the strong colour follows the body colour so a
+/// heading's bold runs stay one ink.
 fn build_words(ui: &egui::Ui, runs: &[Run], face: Option<&(FontId, Color32)>) -> Vec<Word> {
     let body = face.map_or_else(
         || {
@@ -595,29 +588,55 @@ fn build_words(ui: &egui::Ui, runs: &[Run], face: Option<&(FontId, Color32)>) ->
 
     let mut words: Vec<Word> = Vec::new();
     let mut open = false; // a word is being filled
+                          // Char offset of the current run in the block's recorded search text.
+    let mut run_start = 0usize;
 
     for run in runs {
         let atomic = matches!(run.kind, RunKind::Code);
         let mut buf = String::new();
-        for ch in run.text.chars() {
+        let mut buf_start = 0usize;
+        for (char_index, ch) in run.text.chars().enumerate() {
             if ch.is_whitespace() && !atomic {
                 if !buf.is_empty() {
                     push_frag(
-                        ui, &mut words, &mut open, &buf, run, &body, &mono, text_color, strong,
+                        ui,
+                        &mut words,
+                        &mut open,
+                        &buf,
+                        run_start + buf_start,
+                        run,
+                        &body,
+                        &mono,
+                        text_color,
+                        strong,
                         link_color,
                     );
                     buf.clear();
                 }
                 open = false;
             } else {
+                if buf.is_empty() {
+                    buf_start = char_index;
+                }
                 buf.push(ch);
             }
         }
         if !buf.is_empty() {
             push_frag(
-                ui, &mut words, &mut open, &buf, run, &body, &mono, text_color, strong, link_color,
+                ui,
+                &mut words,
+                &mut open,
+                &buf,
+                run_start + buf_start,
+                run,
+                &body,
+                &mono,
+                text_color,
+                strong,
+                link_color,
             );
         }
+        run_start += run.text.chars().count();
     }
     words
 }
@@ -633,6 +652,7 @@ fn push_frag(
     words: &mut Vec<Word>,
     open: &mut bool,
     text: &str,
+    offset: usize,
     run: &Run,
     body: &FontId,
     mono: &FontId,
@@ -687,6 +707,7 @@ fn push_frag(
         color,
         format,
         text: text.to_string(),
+        offset,
         galley,
         width,
     });
@@ -733,17 +754,69 @@ pub fn list_indent(depth: u8, space_width: f32) -> f32 {
     depth.min(5) as f32 * 2.0 * space_width
 }
 
+/// Highlight ranges for one block, as char ranges into its recorded search
+/// text, plus which range is the current match.
+#[derive(Clone, Copy, Default)]
+pub struct MatchHighlight<'a> {
+    /// Block-local char ranges.
+    pub ranges: &'a [(usize, usize)],
+    /// Index into `ranges` of the current match, if it belongs to this block.
+    pub current: Option<usize>,
+}
+
+/// Fill colour behind a match: the theme selection colour for all hits, and a
+/// stronger (more opaque) version of the same ink for the current hit.
+pub(crate) fn highlight_color(ui: &egui::Ui, current: bool) -> Color32 {
+    let selection = ui.visuals().selection.bg_fill;
+    if current {
+        Color32::from_rgba_unmultiplied(selection.r(), selection.g(), selection.b(), 0xb4)
+    } else {
+        selection
+    }
+}
+
+/// Intersection of `ranges` with the char span `[start, start + text.chars())`,
+/// returned as local char offsets within `text` plus the global range index.
+/// Range ends are exclusive.
+pub(crate) fn local_ranges(
+    start: usize,
+    text: &str,
+    ranges: &[(usize, usize)],
+) -> Vec<(usize, usize, usize)> {
+    let end = start + text.chars().count();
+    ranges
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &(s, e))| {
+            let s = s.max(start);
+            let e = e.min(end);
+            if s < e {
+                Some((s - start, e - start, index))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Paint `runs` as a fully justified paragraph in a `column`-wide slot starting
 /// at the current cursor. Every line but the last (and any line without a
 /// stretchable gap) is spread so its right edge lands on `cursor.left() + column`.
-pub fn draw(ui: &mut egui::Ui, runs: &[Run], column: f32) {
-    paint(ui, runs, column, true);
+pub fn draw(ui: &mut egui::Ui, runs: &[Run], column: f32, highlights: MatchHighlight<'_>) {
+    paint(ui, runs, column, true, highlights);
 }
 
 /// Justified variant with a hanging indent: the marker sits at `indent` and the
 /// text starts one marker width plus one space later, so wrapped lines align
 /// under the item's text. `column` is the whole block width.
-pub fn draw_indented(ui: &mut egui::Ui, runs: &[Run], column: f32, indent: f32, marker: Marker) {
+pub fn draw_indented(
+    ui: &mut egui::Ui,
+    runs: &[Run],
+    column: f32,
+    indent: f32,
+    marker: Marker,
+    highlights: MatchHighlight<'_>,
+) {
     let column = column.max(0.0);
     let space = space_width(ui);
     let galley = layout(ui, &marker.label(), &marker_format(ui));
@@ -761,13 +834,14 @@ pub fn draw_indented(ui: &mut egui::Ui, runs: &[Run], column: f32, indent: f32, 
         offset,
         Some((indent, galley)),
         None,
+        highlights,
     );
 }
 
 /// Left-aligned variant of [`draw`]: same wrapping, splitting and painting, but
 /// gaps never stretch and rows hug the left edge. Used by table cells.
-pub fn draw_left(ui: &mut egui::Ui, runs: &[Run], column: f32) {
-    paint(ui, runs, column, false);
+pub fn draw_left(ui: &mut egui::Ui, runs: &[Run], column: f32, highlights: MatchHighlight<'_>) {
+    paint(ui, runs, column, false, highlights);
 }
 
 /// Paint `runs` with an explicit body font and text colour. `justify` selects
@@ -780,12 +854,28 @@ pub fn draw_with(
     font: FontId,
     color: Color32,
     justify: bool,
+    highlights: MatchHighlight<'_>,
 ) {
-    paint_at(ui, runs, column, justify, 0.0, None, Some((font, color)));
+    paint_at(
+        ui,
+        runs,
+        column,
+        justify,
+        0.0,
+        None,
+        Some((font, color)),
+        highlights,
+    );
 }
 
-fn paint(ui: &mut egui::Ui, runs: &[Run], column: f32, justify: bool) {
-    paint_at(ui, runs, column, justify, 0.0, None, None);
+fn paint(
+    ui: &mut egui::Ui,
+    runs: &[Run],
+    column: f32,
+    justify: bool,
+    highlights: MatchHighlight<'_>,
+) {
+    paint_at(ui, runs, column, justify, 0.0, None, None, highlights);
 }
 
 pub(crate) fn body_font(ui: &egui::Ui) -> FontId {
@@ -819,6 +909,10 @@ fn marker_format(ui: &egui::Ui) -> TextFormat {
 /// The paragraph painter, with an optional hanging indent: `offset` shifts every
 /// row's text right of the allocated `rect`, and `marker` (x, galley) is painted
 /// once at the first row. `face` overrides the body font and ink colour.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the painter needs layout, face, marker and highlight context"
+)]
 fn paint_at(
     ui: &mut egui::Ui,
     runs: &[Run],
@@ -827,6 +921,7 @@ fn paint_at(
     offset: f32,
     marker: Option<(f32, Arc<Galley>)>,
     face: Option<(FontId, Color32)>,
+    highlights: MatchHighlight<'_>,
 ) {
     let column = column.max(0.0);
     if column <= 0.0 {
@@ -912,7 +1007,7 @@ fn paint_at(
             let word = &words[wi];
             for frag in &word.frags {
                 let pos = Pos2::new(x, y);
-                paint_frag(ui, &painter, pos, frag);
+                paint_frag(ui, &painter, pos, frag, highlights);
                 x += frag.width;
             }
         }
@@ -969,15 +1064,19 @@ fn split_overwide(ui: &egui::Ui, words: Vec<Word>, column: f32) -> Vec<Word> {
             continue;
         }
         let first = out.len();
+        let mut part_offset = 0usize;
         for part in parts {
             let galley = layout(ui, &part, &frag.format);
             let width = galley.size().x;
+            let offset = frag.offset + part_offset;
+            part_offset += part.chars().count();
             out.push(Word {
                 frags: vec![Frag {
                     kind: frag.kind.clone(),
                     color: frag.color,
                     format: frag.format.clone(),
                     text: part,
+                    offset,
                     galley,
                     width,
                 }],
@@ -991,12 +1090,44 @@ fn split_overwide(ui: &egui::Ui, words: Vec<Word>, column: f32) -> Vec<Word> {
     out
 }
 
-fn paint_frag(ui: &egui::Ui, painter: &egui::Painter, pos: Pos2, frag: &Frag) {
+/// Paint the portions of one fragment covered by a match range, behind its
+/// glyphs. Partial overlap is measured with the fragment's own format so the
+/// rect covers only the matched characters.
+fn paint_highlights(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    pos: Pos2,
+    frag: &Frag,
+    highlights: MatchHighlight<'_>,
+) {
+    for (start, end, index) in local_ranges(frag.offset, &frag.text, highlights.ranges) {
+        let prefix: String = frag.text.chars().take(start).collect();
+        let piece: String = frag.text.chars().skip(start).take(end - start).collect();
+        let prefix_w = layout(ui, &prefix, &frag.format).size().x;
+        let piece_w = layout(ui, &piece, &frag.format).size().x;
+        let color = highlight_color(ui, highlights.current == Some(index));
+        let rect = Rect::from_min_size(
+            Pos2::new(pos.x + prefix_w, pos.y),
+            egui::vec2(piece_w, frag.galley.size().y),
+        );
+        painter.rect_filled(rect, 2.0, color);
+    }
+}
+
+fn paint_frag(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    pos: Pos2,
+    frag: &Frag,
+    highlights: MatchHighlight<'_>,
+) {
     let size = frag.galley.size();
     if frag.kind == RunKind::Code {
         let bg = Rect::from_min_size(pos, size).expand2(egui::vec2(1.0, 0.0));
         painter.rect_filled(bg, 2.0, ui.visuals().code_bg_color);
     }
+    // Above the code background, below the glyphs.
+    paint_highlights(ui, painter, pos, frag, highlights);
     painter.galley(pos, frag.galley.clone(), frag.color);
 
     if let RunKind::Link(url) = &frag.kind {
@@ -1125,7 +1256,7 @@ mod tests {
     }
 
     mod search_text {
-        use super::super::search_text;
+        use super::super::{parse_inline, search_text};
 
         #[test]
         fn soft_wrap_becomes_one_space() {
@@ -1136,23 +1267,64 @@ mod tests {
         }
 
         #[test]
-        fn inline_markup_is_reduced_to_visible_text() {
+        fn inline_markup_matches_the_painted_run_text() {
             assert_eq!(
                 search_text("a **bold** and *it* word"),
                 "a bold and it word"
             );
             assert_eq!(search_text("see [label](https://x/y)"), "see label");
             assert_eq!(search_text("run `code()` now"), "run code() now");
-            assert_eq!(search_text("![alt text](i.png)"), "alt text");
-            assert_eq!(search_text("![](i.png)"), "");
-            assert_eq!(search_text("<b>x</b> and <br> y"), "x and y");
+            // Image syntax is painted literally by this viewer: `!alt`.
+            assert_eq!(search_text("![alt text](i.png)"), "!alt text");
+            assert_eq!(search_text("![](i.png)"), "!");
+            // Inline HTML is painted as text, not stripped.
+            assert_eq!(search_text("<b>x</b> and <br> y"), "<b>x</b> and <br> y");
             assert_eq!(search_text("1 < 2"), "1 < 2");
+        }
+
+        #[test]
+        fn recorded_text_equals_the_concatenated_run_texts() {
+            let md = "**b** `a  b` [t](u) &amp; ![alt](x)";
+            let painted: String = parse_inline(md).iter().map(|r| r.text.as_str()).collect();
+            assert_eq!(search_text(md), painted);
+            assert_eq!(search_text(md), "b a  b t & !alt");
+        }
+
+        #[test]
+        fn code_span_keeps_its_literal_interior() {
+            assert_eq!(search_text("`a  b`"), "a  b");
+            assert_eq!(search_text("x `  ` y"), "x   y");
         }
 
         #[test]
         fn whitespace_runs_collapse_and_edges_trim() {
             assert_eq!(search_text("  padded \n\t text  "), "padded text");
             assert_eq!(search_text(""), "");
+        }
+    }
+
+    mod highlights {
+        use super::super::local_ranges;
+
+        #[test]
+        fn maps_block_ranges_to_fragment_offsets() {
+            // Fragment starts at block char 10 and is 5 chars long. Ranges
+            // entirely before or after it are dropped, not subtracted.
+            assert_eq!(
+                local_ranges(10, "abcde", &[(0, 5), (8, 12), (12, 14), (15, 20)]),
+                vec![(0, 2, 1), (2, 4, 2)]
+            );
+        }
+
+        #[test]
+        fn partial_fragment_gets_local_prefix_and_tail() {
+            assert_eq!(local_ranges(0, "abcdef", &[(2, 4)]), vec![(2, 4, 0)]);
+        }
+
+        #[test]
+        fn unicode_fragment_offsets_are_chars() {
+            // "é東x" is 3 chars; the range starts one char into the fragment.
+            assert_eq!(local_ranges(4, "é東x", &[(5, 7)]), vec![(1, 3, 0)]);
         }
     }
 

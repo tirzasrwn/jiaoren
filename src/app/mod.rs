@@ -89,6 +89,13 @@ fn same_file(event: &Path, doc: &Path) -> bool {
     abs(event) == abs(doc)
 }
 
+/// Whether a paragraph is painted by the library instead of the justify
+/// painter: images and raw HTML. Those blocks are not searchable because their
+/// painted glyphs are not the recorded run text.
+pub(crate) fn paragraph_needs_library(source: &str) -> bool {
+    source.contains("![") || source.contains('<')
+}
+
 /// Shared, interior-mutable state backing the `<mdpara>` render path. Body
 /// paragraphs are painted justified by `justify`; anything the mini-parser
 /// cannot express (images, raw HTML) falls back to the library with a cache of
@@ -127,15 +134,25 @@ impl ParagraphUi {
             Some(s) => s.clone(),
             None => return, // unknown id: draw nothing, never panic
         };
-        // Search sees the rendered text, not the Markdown source: soft wraps
-        // become spaces and inline markup is dropped.
-        search.record(ui, crate::justify::search_text(&source));
-        if source.contains("![") || source.contains('<') {
+        // Library-routed paragraphs paint glyphs this module does not model, so
+        // they are not searchable: skip recording rather than index text that is
+        // not on screen.
+        if paragraph_needs_library(&source) {
             CommonMarkViewer::new().show(ui, &mut self.cache, &source);
             return;
         }
+        let block = search.record(ui, crate::justify::search_text(&source));
+        let (ranges, current) = search.highlights(block);
         let runs = crate::justify::parse_inline(&source);
-        crate::justify::draw(ui, &runs, self.column);
+        crate::justify::draw(
+            ui,
+            &runs,
+            self.column,
+            crate::justify::MatchHighlight {
+                ranges: &ranges,
+                current,
+            },
+        );
     }
 }
 
@@ -425,21 +442,23 @@ impl App {
     /// when nothing else owns the keyboard.
     fn draw_search_prompt(&mut self, ctx: &egui::Context) {
         let input_id = egui::Id::new("jiaoren-search-input");
+        // Focus before the widget runs: the TextEdit then sees this frame's
+        // text/paste/IME events, and a `/` that opened the prompt in this same
+        // frame can accept a paste. The widget is drawn below, so egui's
+        // dead-man focus switch keeps the id.
+        ctx.memory_mut(|m| m.request_focus(input_id));
         let mut text = self.search.borrow_mut().input.take().unwrap_or_default();
         egui::Area::new(egui::Id::new("jiaoren-search"))
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
             .show(ctx, |ui| {
                 ui.set_max_width(500.0);
-                let response = ui.add(
+                ui.add(
                     egui::TextEdit::singleline(&mut text)
                         .id(input_id)
                         .desired_width(500.0)
                         .hint_text("search"),
                 );
-                if !response.has_focus() && ui.memory(|m| m.focused()).is_none() {
-                    response.request_focus();
-                }
             });
         self.search.borrow_mut().input = Some(text);
     }
@@ -557,6 +576,7 @@ impl eframe::App for App {
         // already consumed this frame's text, paste and IME events. Enter then
         // confirms the current buffer instead of the previous frame's.
         let prompt_open = self.search.borrow().is_open();
+        let mut prompt_drawn = prompt_open;
         if !popup_open && prompt_open {
             self.draw_search_prompt(ui.ctx());
         }
@@ -607,8 +627,14 @@ impl eframe::App for App {
                 }
             }
         } else if !popup_open {
+            // Once `/` opens the prompt in this batch, later keys are text for
+            // the prompt, not viewer actions (`q`, `t`, `n`, …).
+            let mut search_opened = false;
             ui.input(|i| {
                 for ev in &i.events {
+                    if search_opened {
+                        continue;
+                    }
                     if let egui::Event::Key {
                         key,
                         modifiers,
@@ -631,6 +657,7 @@ impl eframe::App for App {
                             continue;
                         }
                         if let Some(a) = apply_key(&mut self.keys, *key, *modifiers, now) {
+                            search_opened = a == Action::SearchOpen;
                             acts.push(a);
                         }
                     } else if !suppress_quit && matches!(ev, egui::Event::Copy) {
@@ -671,6 +698,24 @@ impl eframe::App for App {
                     self.set_status("copied markdown");
                 }
                 Action::SearchOpen => {
+                    // The printable event for the `/` that opened the prompt
+                    // must not become part of the pattern when the prompt is
+                    // drawn (and focused) in this same frame. Drop just the
+                    // first `/` text event.
+                    let mut dropped = false;
+                    ui.input_mut(|i| {
+                        i.events.retain(|ev| {
+                            if !dropped {
+                                if let egui::Event::Text(text) = ev {
+                                    if text == "/" {
+                                        dropped = true;
+                                        return false;
+                                    }
+                                }
+                            }
+                            true
+                        });
+                    });
                     self.search.borrow_mut().open();
                     ui.ctx().request_repaint();
                 }
@@ -687,6 +732,14 @@ impl eframe::App for App {
                 }
                 Action::Quit => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
             }
+        }
+        // If `/` opened the prompt this frame, draw it now: the TextEdit gets
+        // focus before it handles events, so a paste/type in this frame lands in
+        // the buffer.
+        if !prompt_drawn && !popup_open && self.search.borrow().is_open() {
+            self.draw_search_prompt(ui.ctx());
+            prompt_drawn = true;
+            ui.ctx().request_repaint();
         }
 
         {
@@ -831,7 +884,7 @@ impl eframe::App for App {
         }
         // The prompt already occupied the bottom-left this frame; the next
         // frame shows the confirmed status instead of drawing both at once.
-        if !prompt_open {
+        if !prompt_drawn {
             self.draw_status(ui.ctx());
         }
     }
@@ -867,6 +920,19 @@ mod tests {
             let res = catch_worker("decode", || panic!("boom"));
             assert_eq!(res.unwrap_err(), "decode panicked");
             assert_eq!(catch_worker("raster", || 7), Ok(7));
+        }
+    }
+
+    mod search_blocks {
+        use super::super::paragraph_needs_library;
+
+        #[test]
+        fn library_routed_paragraphs_are_not_searchable() {
+            assert!(paragraph_needs_library("see ![x](a.png)"));
+            assert!(paragraph_needs_library("a<br>b"));
+            assert!(!paragraph_needs_library("**bold** and `code`"));
+            assert!(paragraph_needs_library("1 < 2"));
+            assert!(!paragraph_needs_library("1 > 2"));
         }
     }
 

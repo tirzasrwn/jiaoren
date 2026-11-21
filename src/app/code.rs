@@ -43,17 +43,14 @@ impl CodeUi {
             .get(&egui::TextStyle::Monospace)
             .cloned()
             .unwrap_or_else(|| egui::FontId::monospace(14.0));
-        search.record(ui, spec.text.clone());
+        let block = search.record(ui, spec.text.clone());
+        let (ranges, current) = search.highlights(block);
         let row_h = ui.fonts_mut(|f| f.row_height(&mono));
         let lines = code_lines(&spec.text);
-        let measure = |s: &str| {
-            ui.fonts_mut(|f| {
-                f.layout_no_wrap(s.to_string(), mono.clone(), egui::Color32::PLACEHOLDER)
-                    .size()
-                    .x
-            })
-        };
-        let widest = widest_line(&lines, &measure);
+        let line_marks = line_highlights(&spec.text, &ranges, current);
+        let other_fill = crate::justify::highlight_color(ui, false);
+        let current_fill = crate::justify::highlight_color(ui, true);
+        let widest = widest_line(&lines, &|s| line_width(ui, s, &mono));
         let pad = row_h * 0.5;
         // Widest line plus padding, never narrower than the reading column: the
         // scroll area sees the wider allocation and `h`/`l` can pan to it.
@@ -64,14 +61,63 @@ impl CodeUi {
         painter.rect_filled(rect, 2.0, ui.visuals().code_bg_color);
         let color = ui.visuals().text_color();
         for (row, line) in lines.iter().enumerate() {
+            let pos = egui::Pos2::new(rect.left() + pad, rect.top() + pad + row as f32 * row_h);
+            // Highlights first, behind the glyphs. A match spanning lines
+            // contributes its remainder to the next line.
+            for &(start, end, is_current) in &line_marks[row] {
+                let prefix: String = line.chars().take(start).collect();
+                let piece: String = line.chars().skip(start).take(end - start).collect();
+                let x = pos.x + line_width(ui, &prefix, &mono);
+                let w = line_width(ui, &piece, &mono);
+                let fill = if is_current { current_fill } else { other_fill };
+                painter.rect_filled(
+                    egui::Rect::from_min_size(egui::Pos2::new(x, pos.y), egui::vec2(w, row_h)),
+                    2.0,
+                    fill,
+                );
+            }
             if line.is_empty() {
                 continue; // the row is still reserved by `height`
             }
             let galley = ui.fonts_mut(|f| f.layout_no_wrap(line.to_string(), mono.clone(), color));
-            let pos = egui::Pos2::new(rect.left() + pad, rect.top() + pad + row as f32 * row_h);
             painter.galley(pos, galley, color);
         }
     }
+}
+
+/// Highlight ranges for each code line: `(start, end, is_current)` in local
+/// chars. A range crossing a newline is clipped to each line and resumes on the
+/// next, so a cross-line match highlights the remainder per line.
+pub(crate) fn line_highlights(
+    text: &str,
+    ranges: &[(usize, usize)],
+    current: Option<usize>,
+) -> Vec<Vec<(usize, usize, bool)>> {
+    let mut out = Vec::new();
+    let mut line_start = 0usize;
+    for line in text.split('\n') {
+        let line_end = line_start + line.chars().count();
+        let mut local = Vec::new();
+        for (index, &(start, end)) in ranges.iter().enumerate() {
+            let start = start.max(line_start);
+            let end = end.min(line_end);
+            if start < end {
+                local.push((start - line_start, end - line_start, current == Some(index)));
+            }
+        }
+        out.push(local);
+        line_start = line_end + 1; // the newline itself
+    }
+    out
+}
+
+/// Width of `text` in the code font, for prefix/substring highlight offsets.
+fn line_width(ui: &egui::Ui, text: &str, mono: &egui::FontId) -> f32 {
+    ui.fonts_mut(|f| {
+        f.layout_no_wrap(text.to_string(), mono.clone(), egui::Color32::PLACEHOLDER)
+            .size()
+            .x
+    })
 }
 
 /// The laid-out lines of a code block: spaces and line breaks stay verbatim.
@@ -95,7 +141,7 @@ pub(crate) fn widest_line(lines: &[&str], measure: &dyn Fn(&str) -> f32) -> f32 
 #[cfg(test)]
 mod tests {
     mod layout {
-        use super::super::{block_height, code_lines, widest_line};
+        use super::super::{block_height, code_lines, line_highlights, widest_line};
 
         #[test]
         fn lines_preserve_leading_spaces_and_breaks() {
@@ -120,6 +166,27 @@ mod tests {
             let lines = ["fn x() {}", "", "        indented"];
             assert_eq!(widest_line(&lines, &measure), 160.0);
             assert_eq!(widest_line(&[], &measure), 0.0);
+        }
+
+        #[test]
+        fn cross_line_hit_is_split_per_line() {
+            // "ab\ncd": chars 1..4 covers `b`, the newline, and `c`.
+            let marks = line_highlights("ab\ncd", &[(1, 4), (3, 4)], Some(1));
+            assert_eq!(
+                marks,
+                vec![vec![(1, 2, false)], vec![(0, 1, false), (0, 1, true)]]
+            );
+            let marks = line_highlights("ab\ncd", &[(1, 4)], Some(0));
+            assert_eq!(marks, vec![vec![(1, 2, true)], vec![(0, 1, true)]]);
+        }
+
+        #[test]
+        fn no_ranges_means_no_marks() {
+            assert_eq!(line_highlights("", &[], None), vec![Vec::new()]);
+            assert_eq!(
+                line_highlights("a\nb", &[(9, 12)], None),
+                vec![vec![], vec![]]
+            );
         }
     }
 }

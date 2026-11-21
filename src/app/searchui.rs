@@ -36,10 +36,13 @@ impl SearchUi {
         self.tops.clear();
     }
 
-    /// Record one searchable block at the ui's current cursor position.
-    pub(crate) fn record(&mut self, ui: &egui::Ui, text: String) {
+    /// Record one searchable block at the ui's current cursor position. Returns
+    /// its block index for highlight lookup.
+    pub(crate) fn record(&mut self, ui: &egui::Ui, text: String) -> usize {
+        let index = self.texts.len();
         self.texts.push(text);
         self.tops.push(ui.cursor().min.y);
+        index
     }
 
     /// Convert this frame's screen positions into content positions:
@@ -58,6 +61,12 @@ impl SearchUi {
     /// Content y of block `index` in the last completed frame.
     pub(crate) fn block_y(&self, index: usize) -> Option<f32> {
         self.ys.get(index).copied()
+    }
+
+    /// Block-local highlight ranges and the current-hit index, if the current
+    /// hit belongs to `block`.
+    pub(crate) fn highlights(&self, block: usize) -> (Vec<(usize, usize)>, Option<usize>) {
+        self.state.block_highlights(block)
     }
 
     /// Open the command line with an empty buffer.
