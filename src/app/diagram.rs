@@ -9,8 +9,8 @@ use std::thread;
 use crate::mermaid::{parse_svg_size, Renderer, Theme};
 
 use super::geometry::{
-    bucket_for_scale, bucket_scale, clamp_pan, diagram_display_size, keep_bucket, popup_zoom_step,
-    raster_key, reanchor, zoom_anchored, RasterKey,
+    bucket_for_scale, bucket_scale, clamp_pan, diagram_display_size, keep_bucket, popup_fit_size,
+    popup_zoom_step, raster_key, reanchor, zoom_anchored, RasterKey,
 };
 use super::lock;
 use super::raster::{rasterize, Raster, RasterJob};
@@ -551,7 +551,17 @@ impl DiagramUi {
                 .unwrap_or((640.0, 320.0)),
             None => (640.0, 320.0),
         };
-        let (base_w, base_h) = diagram_display_size((iw, ih), column, self.zoom);
+        let screen = ctx.content_rect();
+        let margin = 24.0;
+        let avail =
+            (screen.size() - egui::vec2(2.0 * margin, 2.0 * margin)).max(egui::vec2(64.0, 64.0));
+        let pad = 10.0;
+        // Fixed frame: the panel is always the window minus the margin, not the
+        // image size, so the image can be dragged half a frame past every edge.
+        let view = (avail - egui::vec2(2.0 * pad, 2.0 * pad)).max(egui::vec2(1.0, 1.0));
+        // Popup zoom 1.0 fits the whole diagram inside `view`; the document
+        // column may now be wider than the popup, so it cannot be the only cap.
+        let (base_w, base_h) = popup_fit_size((iw, ih), self.zoom, column, view);
         let (dw, dh) = (base_w * zoom, base_h * zoom);
         let (draw, bucket) = match (&svg, &cached_error) {
             (Some(svg), _) => self.raster_for(ctx, &id, svg, raster_theme, (iw, ih), dw),
@@ -561,17 +571,10 @@ impl DiagramUi {
         // Keep both the popup's bucket and the inline diagram's (the document
         // is still laid out behind the overlay), each with one below.
         let ppp = ctx.pixels_per_point();
-        let inline_bucket = bucket_for_scale(base_w / iw, iw, ih, ppp);
+        let inline_w = diagram_display_size((iw, ih), column, self.zoom).0;
+        let inline_bucket = bucket_for_scale(inline_w / iw, iw, ih, ppp);
         self.prune_rasters(&id, raster_theme, &[bucket, inline_bucket]);
 
-        let screen = ctx.content_rect();
-        let margin = 24.0;
-        let avail =
-            (screen.size() - egui::vec2(2.0 * margin, 2.0 * margin)).max(egui::vec2(64.0, 64.0));
-        let pad = 10.0;
-        // Fixed frame: the panel is always the window minus the margin, not the
-        // image size, so the image can be dragged half a frame past every edge.
-        let view = (avail - egui::vec2(2.0 * pad, 2.0 * pad)).max(egui::vec2(1.0, 1.0));
         let panel = egui::Rect::from_center_size(screen.center(), avail);
         let view_rect = egui::Rect::from_min_size(panel.min + egui::vec2(pad, pad), view);
         let image = egui::vec2(dw, dh);

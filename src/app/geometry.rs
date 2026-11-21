@@ -11,12 +11,49 @@ pub(crate) type RasterKey = (String, &'static str, u16, i32);
 /// Width of the reading column. At or below 1x it fits the window: the window
 /// minus 64 px of margins, capped at 900 px scaled by zoom, floored at 0 so a
 /// tiny window never goes negative. Above 1x it magnifies instead: 900 px times
-/// zoom, which may exceed the window and pan sideways.
+/// zoom, which may exceed the window and pan sideways. Crossing 1x is therefore
+/// intentionally discontinuous: fit-to-window jumps to the magnified width.
 pub(crate) fn content_column(available: f32, zoom: f32) -> f32 {
     if zoom <= 1.0 {
         (available - 64.0).min(900.0 * zoom).max(0.0)
     } else {
         900.0 * zoom
+    }
+}
+
+/// Base size of a diagram in the popup at popup zoom 1.0, fitted to the popup
+/// viewport. The inline size (`intrinsic × doc_zoom`, capped to the column) is
+/// a starting point, never an upscale: the width is also capped to `view.x`,
+/// then the height to `view.y` while keeping the aspect ratio. A diagram that
+/// was cropped inline because the document column exceeds the popup viewport
+/// therefore opens whole.
+pub(crate) fn popup_fit_size(
+    intrinsic: (f32, f32),
+    doc_zoom: f32,
+    column: f32,
+    view: egui::Vec2,
+) -> (f32, f32) {
+    let (mut iw, mut ih) = intrinsic;
+    if !iw.is_finite() || !ih.is_finite() || iw <= 0.0 || ih <= 0.0 {
+        (iw, ih) = (640.0, 320.0);
+    }
+    let view = if view.is_finite() {
+        view.max(egui::vec2(1.0, 1.0))
+    } else {
+        egui::vec2(1.0, 1.0)
+    };
+    let width_cap = if column.is_finite() {
+        column.max(0.0)
+    } else {
+        view.x
+    };
+    let fit_w = (iw * doc_zoom).min(width_cap).min(view.x).max(0.0);
+    let fit_h = fit_w * ih / iw;
+    if fit_h > view.y {
+        let h = view.y;
+        (h * iw / ih, h)
+    } else {
+        (fit_w, fit_h)
     }
 }
 
@@ -275,6 +312,30 @@ mod tests {
             assert_eq!(content_column(600.0, 2.0), 1800.0);
             assert_eq!(content_column(40.0, 1.0), 0.0);
             assert_eq!(content_column(1800.0, 0.5), 450.0);
+            // The intentional discontinuity: fit-to-window at 1x, magnified at
+            // the first step above it.
+            assert_eq!(content_column(600.0, 1.1), 990.0);
+        }
+
+        #[test]
+        fn popup_fit_wide_diagram_inside_a_small_view() {
+            // Inline at doc zoom 2 is 2800 wide, column 1800, view only 600.
+            let (w, h) = popup_fit_size((1400.0, 300.0), 2.0, 1800.0, egui::vec2(600.0, 400.0));
+            assert_eq!(w, 600.0);
+            assert!((h - 600.0 * 300.0 / 1400.0).abs() < 0.01);
+            assert!(h <= 400.0);
+        }
+
+        #[test]
+        fn popup_fit_small_diagram_is_not_upscaled() {
+            let (w, h) = popup_fit_size((100.0, 50.0), 2.0, 1800.0, egui::vec2(600.0, 400.0));
+            assert_eq!((w, h), (200.0, 100.0));
+        }
+
+        #[test]
+        fn popup_fit_tall_diagram_is_height_limited() {
+            let (w, h) = popup_fit_size((300.0, 1000.0), 2.0, 1800.0, egui::vec2(600.0, 400.0));
+            assert_eq!((w, h), (120.0, 400.0));
         }
 
         #[test]
