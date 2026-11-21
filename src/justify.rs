@@ -1425,6 +1425,13 @@ fn paint_code_background(ui: &egui::Ui, painter: &egui::Painter, pos: Pos2, frag
     painter.rect_filled(bg, 2.0, ui.visuals().code_bg_color);
 }
 
+/// Schemes a document may hand to the OS opener. Everything else (javascript:,
+/// data:, file:, relative paths, bare anchors) stays inert text.
+pub(crate) fn link_is_safe(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
+}
+
 fn paint_frag(
     ui: &egui::Ui,
     painter: &egui::Painter,
@@ -1440,16 +1447,39 @@ fn paint_frag(
     if let RunKind::Link(url) = &frag.kind {
         let rect = Rect::from_min_size(pos, size);
         let id = Id::new(("mdpara-link", url, pos.x.to_bits(), pos.y.to_bits()));
+        let safe = link_is_safe(url);
         let response = ui.interact(rect, id, Sense::click());
-        if response.clicked() {
+        if safe && response.clicked() {
             ui.ctx().open_url(egui::OpenUrl::new_tab(url));
         }
-        let _ = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        // Show the destination so a homoglyph link cannot hide where it goes.
+        let response = response.on_hover_text(url);
+        if safe {
+            let _ = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    mod links {
+        use super::super::link_is_safe;
+
+        #[test]
+        fn only_web_and_mail_schemes_are_clickable() {
+            assert!(link_is_safe("https://example.com/x"));
+            assert!(link_is_safe("http://example.com"));
+            assert!(link_is_safe("mailto:a@b.c"));
+            assert!(link_is_safe("HTTPS://EXAMPLE.COM"));
+            assert!(!link_is_safe("javascript:alert(1)"));
+            assert!(!link_is_safe("JavaScript:alert(1)"));
+            assert!(!link_is_safe("data:text/html,<script>"));
+            assert!(!link_is_safe("file:///etc/passwd"));
+            assert!(!link_is_safe("doc.md"));
+            assert!(!link_is_safe("#anchor"));
+        }
+    }
+
     mod parse {
         use super::super::*;
 
