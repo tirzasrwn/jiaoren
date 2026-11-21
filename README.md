@@ -76,6 +76,10 @@ To go back to the defaults, delete (or comment out) the
 | `yy` | copy the whole document as Markdown |
 | `q` / `esc` / `ctrl+c` | quit |
 
+Mouse: drag anywhere to pan the document in both axes (the wheel still
+scrolls, `gg` returns to the start). A plain click on a diagram opens the popup;
+dragging from the diagram pans the document instead.
+
 Every table also carries a small copy icon at its top-right (tooltip: “Copy
 table as CSV”); clicking it copies the table as CSV (header row first, Markdown
 stripped from cells, fields quoted when they contain commas, quotes or line
