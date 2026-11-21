@@ -1,6 +1,6 @@
-//! Fenced-code rendering for the `<mdcode>` html hook: verbatim monospace
-//! lines on a code-coloured background, left-aligned and never wrapped. A line
-//! wider than the reading column widens the block so `h`/`l` can pan to it.
+//! Fenced-code rendering for the `<mdcode>` html hook: verbatim monospace text
+//! on a code-coloured background, soft-wrapped to the reading column with a
+//! right-aligned line-number gutter. Continuation rows keep an empty gutter.
 
 use std::collections::HashMap;
 
@@ -73,6 +73,7 @@ impl CodeUi {
         let selection = search.selection_range(block);
         let row_h = ui.fonts_mut(|f| f.row_height(&mono));
         let pad = row_h * 0.5;
+        let top_pad = code_top_pad(row_h);
         let lines = code_lines(&spec.text);
         let spans = code_line_spans(&spec.text);
         let line_marks = line_highlights(&spec.text, &ranges, current);
@@ -86,10 +87,10 @@ impl CodeUi {
         let gutter = gutter_width(lines.len(), cell);
         // Leave the right padding inside the column so glyphs never spill past
         // the block's background.
-        let content = (self.column - gutter - pad).max(cell);
+        let content = content_width(self.column, gutter, pad, cell);
         let rows = layout_rows(&spec.text, content, &|s| line_width(ui, s, &mono));
         let width = self.column.max(gutter + cell);
-        let height = rows.len().max(1) as f32 * row_h + pad * 2.0;
+        let height = rows.len().max(1) as f32 * row_h + top_pad + pad;
         let (_, rect) = ui.allocate_space(egui::vec2(width, height));
         search.set_height(block, height);
         search.set_rect(block, rect);
@@ -102,7 +103,7 @@ impl CodeUi {
         for (row_index, row) in rows.iter().enumerate() {
             let source = lines.get(row.line).copied().unwrap_or("");
             let text: String = source.chars().skip(row.start).take(row.len).collect();
-            let pos = egui::Pos2::new(text_left, rect.top() + pad + row_index as f32 * row_h);
+            let pos = egui::Pos2::new(text_left, rect.top() + top_pad + row_index as f32 * row_h);
             // The number sits on the first visual row of its source line only;
             // wrapped continuations keep an empty gutter.
             if row.start == 0 {
@@ -213,6 +214,18 @@ pub(crate) fn layout_rows(text: &str, max_width: f32, measure: &dyn Fn(&str) -> 
     rows
 }
 
+/// Wrap width left for code text inside `column`: the gutter and a pad on each
+/// side are reserved, never less than one cell.
+pub(crate) fn content_width(column: f32, gutter: f32, pad: f32, cell: f32) -> f32 {
+    (column - gutter - 2.0 * pad).max(cell)
+}
+
+/// Top padding: at least enough to clear the 14 px copy icon at the block's
+/// top-right, which would otherwise sit on the first visual row.
+pub(crate) fn code_top_pad(row_height: f32) -> f32 {
+    (row_height * 0.5).max(18.0)
+}
+
 /// Width of the line-number gutter: as many cells as digits in the largest
 /// line number, plus one cell of gap.
 pub(crate) fn gutter_width(line_count: usize, cell: f32) -> f32 {
@@ -302,8 +315,8 @@ pub(crate) fn code_lines(text: &str) -> Vec<&str> {
 mod tests {
     mod layout {
         use super::super::{
-            clip_marks, code_line_spans, code_lines, gutter_width, layout_rows, line_highlights,
-            wrap_line, Row,
+            clip_marks, code_line_spans, code_lines, code_top_pad, content_width, gutter_width,
+            layout_rows, line_highlights, wrap_line, Row,
         };
 
         #[test]
@@ -395,6 +408,19 @@ mod tests {
             ];
             // Midpoint of the second row: char 3, not char 1.
             assert_eq!(hit_test(&spans, egui::pos2(10.0, 15.0)), Some(3));
+        }
+
+        #[test]
+        fn content_width_keeps_both_pads() {
+            assert_eq!(content_width(1000.0, 20.0, 8.0, 9.0), 964.0);
+            // Never narrower than one cell, even when the column is tiny.
+            assert_eq!(content_width(30.0, 30.0, 8.0, 9.0), 9.0);
+        }
+
+        #[test]
+        fn top_pad_clears_the_copy_icon() {
+            assert!(code_top_pad(17.0) >= 16.0);
+            assert_eq!(code_top_pad(40.0), 20.0);
         }
 
         #[test]

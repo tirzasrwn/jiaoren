@@ -99,8 +99,10 @@ scrolls, `gg` returns to the start). Dragging across text selects it; a plain
 click clears the selection. A plain click on a diagram or local image opens the
 zoom popup; dragging from it pans the document instead.
 
-Hovering a table row tints the whole row (all columns) with the theme's
-`surface1`, and the header row with `surface2`, so long rows are easy to trace.
+Hovering a table row tints the whole row (all columns), so long rows are easy
+to trace. Data rows use the theme's `surface1`; the header uses `surface2` in
+the dark theme and `surface1` in the light theme, which keeps the text at AA
+contrast.
 
 Every table also carries a small copy icon at its top-right (tooltip: “Copy
 table as CSV”); clicking it copies the table as CSV (header row first, Markdown

@@ -22,8 +22,10 @@ pub(crate) struct TableUi {
     widths: HashMap<String, (i32, i32, i32, Vec<f32>)>,
     /// Set when a table's `copy csv` button was clicked this frame.
     copied: bool,
-    /// Row under the pointer per table id, from the previous frame's rects.
-    hover: HashMap<String, usize>,
+    /// Row under the pointer per table id and occurrence, from the previous
+    /// frame's rects. Identical tables share an id, so the occurrence is part
+    /// of the key or they would fight over one entry.
+    hover: RowHover,
 }
 
 impl TableUi {
@@ -34,7 +36,7 @@ impl TableUi {
             occurrences: HashMap::new(),
             widths: HashMap::new(),
             copied: false,
-            hover: HashMap::new(),
+            hover: RowHover::default(),
         }
     }
 
@@ -49,7 +51,7 @@ impl TableUi {
         self.occurrences.clear();
         self.widths.clear();
         self.copied = false;
-        self.hover.clear();
+        self.hover = RowHover::default();
     }
 
     /// Take the "a table was copied" flag for the frame, if the button fired.
@@ -99,7 +101,8 @@ impl TableUi {
             // the header reads as one bar instead of per-cell chips; data rows
             // alternate from the first one. The row under the pointer uses the
             // hover fill, applied from the previous frame's row rects.
-            let hovered = self.hover.get(id).copied();
+            let hovered = self.hover.get(id, occurrence);
+            let spacing_y = ui.spacing().item_spacing.y;
             let mut row_rects: Vec<egui::Rect> = Vec::new();
             egui::Grid::new(grid_id)
                 .with_row_color(move |row, _style| match hovered {
@@ -140,9 +143,12 @@ impl TableUi {
                         }
                     }
                     let bounds = ui.min_rect();
-                    row_rects.push(egui::Rect::from_min_max(
-                        egui::pos2(bounds.left(), row_top),
-                        egui::pos2(bounds.right(), bounds.bottom()),
+                    row_rects.push(hover_rect(
+                        egui::Rect::from_min_max(
+                            egui::pos2(bounds.left(), row_top),
+                            egui::pos2(bounds.right(), bounds.bottom()),
+                        ),
+                        spacing_y,
                     ));
                     ui.end_row();
                     for row in &spec.rows {
@@ -176,9 +182,12 @@ impl TableUi {
                             }
                         }
                         let bounds = ui.min_rect();
-                        row_rects.push(egui::Rect::from_min_max(
-                            egui::pos2(bounds.left(), row_top),
-                            egui::pos2(bounds.right(), bounds.bottom()),
+                        row_rects.push(hover_rect(
+                            egui::Rect::from_min_max(
+                                egui::pos2(bounds.left(), row_top),
+                                egui::pos2(bounds.right(), bounds.bottom()),
+                            ),
+                            spacing_y,
                         ));
                         ui.end_row();
                     }
@@ -187,14 +196,10 @@ impl TableUi {
                 .ctx()
                 .pointer_hover_pos()
                 .and_then(|pos| hovered_row(&row_rects, pos));
-            if self.hover.get(id).copied() != next {
+            if self.hover.get(id, occurrence) != next {
                 match next {
-                    Some(row) => {
-                        self.hover.insert(id.to_string(), row);
-                    }
-                    None => {
-                        self.hover.remove(id);
-                    }
+                    Some(row) => self.hover.set(id, occurrence, row),
+                    None => self.hover.clear(id, occurrence),
                 }
                 ui.ctx().request_repaint();
             }
@@ -282,8 +287,10 @@ fn row_fill(dark: bool, row_index: usize) -> Option<egui::Color32> {
     }
 }
 
-/// Hover fill for a table row: `surface2` for the header, `surface1` for data
-/// rows, both Catppuccin roles from the active theme.
+/// Hover fill for a table row. Data rows use `surface1`. The header uses
+/// `surface1` in the light theme too: Latte's `surface2` would drop the body
+/// text to 3.69:1, below AA, while `surface1` stays at 6.04:1. In Macchiato the
+/// header normally is `surface1`, so hover uses `surface2` to stay visible.
 pub(crate) fn row_fill_hover(dark: bool, row_index: usize) -> egui::Color32 {
     let theme = if dark {
         crate::mermaid::Theme::Dark
@@ -291,11 +298,37 @@ pub(crate) fn row_fill_hover(dark: bool, row_index: usize) -> egui::Color32 {
         crate::mermaid::Theme::Light
     };
     let p = crate::theme::palette(theme);
-    if row_index == 0 {
+    if row_index == 0 && dark {
         p.surface2.into()
     } else {
         p.surface1.into()
     }
+}
+
+/// Hover state per table id and occurrence.
+#[derive(Default)]
+pub(crate) struct RowHover {
+    rows: HashMap<(String, usize), usize>,
+}
+
+impl RowHover {
+    pub(crate) fn get(&self, id: &str, occurrence: usize) -> Option<usize> {
+        self.rows.get(&(id.to_string(), occurrence)).copied()
+    }
+
+    pub(crate) fn set(&mut self, id: &str, occurrence: usize, row: usize) {
+        self.rows.insert((id.to_string(), occurrence), row);
+    }
+
+    pub(crate) fn clear(&mut self, id: &str, occurrence: usize) {
+        self.rows.remove(&(id.to_string(), occurrence));
+    }
+}
+
+/// Grow a row rect by half the inter-row spacing on each side, so the pointer
+/// never crosses a dead band between two highlighted rows.
+pub(crate) fn hover_rect(rect: egui::Rect, spacing_y: f32) -> egui::Rect {
+    rect.expand2(egui::vec2(0.0, spacing_y * 0.5))
 }
 
 /// Index of the first row rect containing `pos`.
@@ -535,6 +568,7 @@ fn render_cell(
 mod tests {
     mod table {
         use super::super::cell_needs_library_fallback;
+        use super::super::hover_rect;
         use super::super::hovered_row;
         use super::super::row_fill;
         use super::super::row_fill_hover;
@@ -542,6 +576,7 @@ mod tests {
         use super::super::table_pad;
         use super::super::table_to_csv;
         use super::super::visible_text;
+        use super::super::RowHover;
         use crate::doc::TableSpec;
 
         fn spec(header: &[&str], rows: &[&[&str]]) -> TableSpec {
@@ -644,10 +679,30 @@ mod tests {
         #[test]
         fn hover_fill_uses_surface2_header_and_surface1_rows() {
             let hex = |c: egui::Color32| crate::theme::Rgb(c.r(), c.g(), c.b()).to_hex();
-            assert_eq!(hex(row_fill_hover(false, 0)), "#acb0be");
+            assert_eq!(hex(row_fill_hover(false, 0)), "#bcc0cc");
             assert_eq!(hex(row_fill_hover(false, 1)), "#bcc0cc");
             assert_eq!(hex(row_fill_hover(true, 0)), "#5b6078");
             assert_eq!(hex(row_fill_hover(true, 2)), "#494d64");
+        }
+
+        #[test]
+        fn hover_keys_distinguish_identical_tables() {
+            let mut hover = RowHover::default();
+            hover.set("same", 0, 1);
+            assert_eq!(hover.get("same", 0), Some(1));
+            assert_eq!(hover.get("same", 1), None);
+            hover.set("same", 1, 3);
+            hover.clear("same", 0);
+            assert_eq!(hover.get("same", 1), Some(3));
+            assert_eq!(hover.get("same", 0), None);
+        }
+
+        #[test]
+        fn hover_rect_covers_the_inter_row_band() {
+            let row = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 20.0));
+            let grown = hover_rect(row, 6.0);
+            assert!(grown.contains(egui::pos2(5.0, 22.0)));
+            assert!(!grown.contains(egui::pos2(5.0, 24.0)));
         }
 
         #[test]
