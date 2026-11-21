@@ -633,9 +633,13 @@ struct RecordedCursor {
 }
 
 impl RecordedCursor {
-    /// Append a code run literally and return its start.
+    /// Append a code run literally and return its start. An empty span (``)
+    /// changes nothing, not even whether the previous char was a space.
     fn code(&mut self, text: &str) -> usize {
         let start = self.len;
+        if text.is_empty() {
+            return start;
+        }
         self.len += text.chars().count();
         self.ends_space = text.ends_with(' ');
         start
@@ -666,6 +670,10 @@ fn fragment_plan(runs: &[Run]) -> Vec<PlanFragment> {
     let mut open = false;
     for (run_index, run) in runs.iter().enumerate() {
         if matches!(run.kind, RunKind::Code) {
+            if run.text.is_empty() {
+                // An empty code span paints nothing and owns no word.
+                continue;
+            }
             let offset = cursor.code(&run.text);
             plan.push(PlanFragment {
                 run: run_index,
@@ -710,6 +718,21 @@ fn fragment_plan(runs: &[Run]) -> Vec<PlanFragment> {
         }
     }
     plan
+}
+
+/// Paint-level word grouping: each entry is `(gap_before, fragment texts)`.
+/// Mirrors `build_words`: a fragment with `gap_before` starts a new word, the
+/// rest glue into the current one.
+#[cfg(test)]
+fn word_plan(runs: &[Run]) -> Vec<(bool, Vec<String>)> {
+    let mut words: Vec<(bool, Vec<String>)> = Vec::new();
+    for fragment in fragment_plan(runs) {
+        match words.last_mut() {
+            Some((_, texts)) if !fragment.gap_before => texts.push(fragment.text),
+            _ => words.push((fragment.gap_before, vec![fragment.text])),
+        }
+    }
+    words
 }
 
 /// Lay out one text fragment and append it to the current word, opening a new
@@ -1403,12 +1426,13 @@ mod tests {
     }
 
     mod fragment_offsets {
-        use super::super::{fragment_plan, parse_inline, search_text};
+        use super::super::{fragment_plan, parse_inline, search_text, word_plan};
 
         #[test]
         fn every_fragment_offset_matches_its_text_in_the_model() {
             for source in [
                 "a  b",
+                "a `` b",
                 "`x ` y",
                 "**b**  t",
                 "[t](u)  z",
@@ -1419,7 +1443,6 @@ mod tests {
                 let mut after = 0usize;
                 for fragment in fragment_plan(&parse_inline(source)) {
                     let text: Vec<char> = fragment.text.chars().collect();
-                    assert!(!text.is_empty());
                     let last = model.len().saturating_sub(text.len());
                     let found = (after..=last).find(|&i| model[i..i + text.len()] == text[..]);
                     assert_eq!(
@@ -1432,6 +1455,19 @@ mod tests {
                     after = fragment.offset + text.len();
                 }
             }
+        }
+
+        #[test]
+        fn empty_code_span_adds_no_word_or_gap() {
+            let plain = word_plan(&parse_inline("a  b"));
+            let empty_code = word_plan(&parse_inline("a `` b"));
+            assert_eq!(plain, empty_code);
+            assert_eq!(
+                plain,
+                vec![(true, vec!["a".to_string()]), (true, vec!["b".to_string()]),]
+            );
+            // Same words means the same wrap input: no extra space or line.
+            assert_eq!(fragment_plan(&parse_inline("a `` b")).len(), 2);
         }
     }
 
