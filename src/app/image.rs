@@ -42,6 +42,33 @@ const MAX_IMAGE_RGBA_BYTES: u64 = 256 * 1024 * 1024;
 /// exactly +25%, so use `>=` to keep that step sharp.
 const TEXTURE_GROWTH: f32 = 1.25;
 
+/// Whether this frame asked to close the popup, returning the Ctrl flag.
+/// `Esc`, `q` and `Ctrl+C` close; `Esc` must never fall through and quit the
+/// document. The matched keys are consumed so the close press cannot reach the
+/// document in the same frame.
+fn popup_close_keys(ctx: &egui::Context) -> Option<bool> {
+    let (esc, quit_key, ctrl_c) = ctx.input(|i| {
+        (
+            i.key_pressed(egui::Key::Escape),
+            i.key_pressed(egui::Key::Q) && !i.modifiers.any(),
+            (i.key_pressed(egui::Key::C) && (i.modifiers.command || i.modifiers.ctrl))
+                || i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
+        )
+    });
+    if !(esc || quit_key || ctrl_c) {
+        return None;
+    }
+    ctx.input_mut(|i| {
+        i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+        i.consume_key(egui::Modifiers::NONE, egui::Key::Q);
+        i.consume_key(egui::Modifiers::COMMAND, egui::Key::C);
+        i.consume_key(egui::Modifiers::CTRL, egui::Key::C);
+        // winit turns Ctrl+C into `Copy` and never emits a `Key::C`.
+        i.events.retain(|e| !matches!(e, egui::Event::Copy));
+    });
+    Some(ctrl_c)
+}
+
 /// An open click-to-zoom overlay: which image, how far zoomed in, and how far
 /// panned (image top-left relative to the view, redrawn every frame).
 pub(crate) struct PopupState {
@@ -112,6 +139,13 @@ pub(crate) struct ImageUi {
     /// Set when `popup` was opened this frame, so the opening click is not also
     /// read as a click on the dimmed background that would close it again.
     popup_fresh: bool,
+    /// Input time when the overlay last closed. Document keys ignore quit input
+    /// for a short window after this, so a held `q`/`Ctrl+C` cannot close the
+    /// overlay and then immediately quit the app on its next repeat.
+    pub(crate) popup_closed_at: Option<f64>,
+    /// Whether the overlay closed on `Ctrl+C`. Extends the guard above while
+    /// that same Ctrl press is still held (X autorepeat starts after ~660 ms).
+    pub(crate) popup_closed_with_ctrl: bool,
 }
 
 impl ImageUi {
@@ -131,6 +165,8 @@ impl ImageUi {
             zoom: 1.0,
             popup: None,
             popup_fresh: false,
+            popup_closed_at: None,
+            popup_closed_with_ctrl: false,
         }
     }
 
@@ -163,6 +199,15 @@ impl ImageUi {
     pub(crate) fn close_popup(&mut self) {
         self.popup = None;
         self.popup_fresh = false;
+    }
+
+    /// Close the overlay and record the close time so the app's quit guard can
+    /// suppress a held `q`/`Esc`/`Ctrl+C` after the popup is gone.
+    fn note_popup_closed(&mut self, ctx: &egui::Context, ctrl_c: bool) {
+        self.popup = None;
+        self.popup_fresh = false;
+        self.popup_closed_at = Some(ctx.input(|i| i.time));
+        self.popup_closed_with_ctrl = ctrl_c;
     }
 
     /// Drain finished decodes, upload their textures and spawn queued work.
@@ -304,60 +349,47 @@ impl ImageUi {
     /// Draw the zoom overlay for the clicked image. Mirrors the diagram popup
     /// (the geometry helpers are shared, the drawing is local): `Esc`, `q` and
     /// `Ctrl+C` close, wheel/`+`/`-` zoom, `h`/`l`/`j`/`k` and mouse drag pan,
-    /// and a click on the dimmed background closes. Returns `Some(ctrl_c)` when
-    /// the overlay closed this frame, so the app can keep the closing press from
-    /// also quitting.
-    pub(crate) fn draw_popup(&mut self, ctx: &egui::Context, column: f32) -> Option<bool> {
+    /// and a click on the dimmed background closes. Close keys are consumed for
+    /// the frame and recorded so the app suppresses a held key's repeat.
+    pub(crate) fn draw_popup(&mut self, ctx: &egui::Context, column: f32) {
         let fresh = std::mem::take(&mut self.popup_fresh);
-        let popup = self.popup.as_ref()?;
+        let popup = match self.popup.as_ref() {
+            Some(p) => p,
+            None => return,
+        };
         let (id, mut zoom, mut pan) = (popup.id.clone(), popup.zoom, popup.pan);
         let spec = match self.images.get(&id) {
             Some(s) => s.clone(),
             None => {
-                self.popup = None;
-                return Some(false);
+                self.note_popup_closed(ctx, false);
+                return;
             }
         };
-        let (esc, quit_key, ctrl_c, plus, minus, wheel_up, wheel_down, h, l, j, k) =
-            ctx.input(|i| {
-                // Read wheel notches, not `smooth_scroll_delta`: the smoothed
-                // value spans many frames and would multiply one notch into
-                // many steps.
-                let (mut up, mut down) = (false, false);
-                for event in &i.events {
-                    if let egui::Event::MouseWheel { delta, .. } = event {
-                        up |= delta.y > 0.0;
-                        down |= delta.y < 0.0;
-                    }
-                }
-                (
-                    i.key_pressed(egui::Key::Escape),
-                    i.key_pressed(egui::Key::Q) && !i.modifiers.any(),
-                    (i.key_pressed(egui::Key::C) && (i.modifiers.command || i.modifiers.ctrl))
-                        || i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
-                    i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals),
-                    i.key_pressed(egui::Key::Minus),
-                    up,
-                    down,
-                    i.key_pressed(egui::Key::H),
-                    i.key_pressed(egui::Key::L),
-                    i.key_pressed(egui::Key::J),
-                    i.key_pressed(egui::Key::K),
-                )
-            });
-        if esc || quit_key || ctrl_c {
-            self.popup = None;
-            // Keep the same press from reaching the document next frame.
-            ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
-                i.consume_key(egui::Modifiers::NONE, egui::Key::Q);
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::C);
-                i.consume_key(egui::Modifiers::CTRL, egui::Key::C);
-                // winit turns Ctrl+C into `Copy` and never emits a `Key::C`.
-                i.events.retain(|e| !matches!(e, egui::Event::Copy));
-            });
-            return Some(ctrl_c);
+        if let Some(ctrl_c) = popup_close_keys(ctx) {
+            self.note_popup_closed(ctx, ctrl_c);
+            return;
         }
+        let (plus, minus, wheel_up, wheel_down, h, l, j, k) = ctx.input(|i| {
+            // Read wheel notches, not `smooth_scroll_delta`: the smoothed value
+            // spans many frames and would multiply one notch into many steps.
+            let (mut up, mut down) = (false, false);
+            for event in &i.events {
+                if let egui::Event::MouseWheel { delta, .. } = event {
+                    up |= delta.y > 0.0;
+                    down |= delta.y < 0.0;
+                }
+            }
+            (
+                i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals),
+                i.key_pressed(egui::Key::Minus),
+                up,
+                down,
+                i.key_pressed(egui::Key::H),
+                i.key_pressed(egui::Key::L),
+                i.key_pressed(egui::Key::J),
+                i.key_pressed(egui::Key::K),
+            )
+        });
         let steps = i32::from(plus || wheel_up) - i32::from(minus || wheel_down);
         let zoom_before = zoom;
         zoom = popup_zoom_step(zoom, steps);
@@ -477,10 +509,8 @@ impl ImageUi {
             .input(|i| i.pointer.interact_pos())
             .is_some_and(|pos| panel.contains(pos));
         if dimmed && !fresh && !inside_panel {
-            self.popup = None;
-            return Some(false);
+            self.note_popup_closed(ctx, false);
         }
-        None
     }
 
     /// The current intrinsic size, from the uploaded texture or decoded source.
@@ -770,10 +800,66 @@ fn image_limits() -> image::Limits {
 #[cfg(test)]
 mod tests {
     mod image {
+        use std::cell::Cell;
         use std::time::{Duration, UNIX_EPOCH};
 
         use super::super::*;
         use crate::app::geometry::diagram_display_size;
+
+        fn close_with(event: egui::Event) -> (Option<bool>, usize, bool) {
+            let ctx = egui::Context::default();
+            let closed = Cell::new(None);
+            let presses_left = Cell::new(usize::MAX);
+            let copy_left = Cell::new(false);
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![event],
+                    ..Default::default()
+                },
+                |ui| {
+                    closed.set(popup_close_keys(ui.ctx()));
+                    presses_left.set(ui.ctx().input(|i| {
+                        i.events
+                            .iter()
+                            .filter(|e| {
+                                matches!(
+                                    e,
+                                    egui::Event::Key { pressed: true, .. } | egui::Event::Copy
+                                )
+                            })
+                            .count()
+                    }));
+                    copy_left.set(
+                        ui.ctx()
+                            .input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy))),
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            (closed.get(), presses_left.get(), copy_left.get())
+        }
+
+        fn key(key: egui::Key) -> egui::Event {
+            egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }
+        }
+
+        #[test]
+        fn image_popup_consumes_its_close_keys() {
+            // A single `q` closes and is gone before the document sees it.
+            assert_eq!(close_with(key(egui::Key::Q)), (Some(false), 0, false));
+            // Esc is consumed inside the popup too, so it cannot quit.
+            assert_eq!(close_with(key(egui::Key::Escape)), (Some(false), 0, false));
+            // Ctrl+C arrives as `Copy` on Linux; it closes and is consumed.
+            assert_eq!(close_with(egui::Event::Copy), (Some(true), 0, false));
+            // Non-close keys leave the popup alone.
+            assert_eq!(close_with(key(egui::Key::J)), (None, 1, false));
+        }
 
         #[test]
         fn display_size_reuses_the_diagram_rule() {

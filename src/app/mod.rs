@@ -556,19 +556,29 @@ impl eframe::App for App {
         // document behind it must not scroll or react to `t`, `r`, `q`, `0`.
         let popup_open =
             self.diagrams.borrow().popup.is_some() || self.images.borrow().popup.is_some();
-        let mut popup_closed_at = self.diagrams.borrow().popup_closed_at;
+        let (mut popup_closed_at, popup_closed_with_ctrl) = {
+            let d = self.diagrams.borrow();
+            let i = self.images.borrow();
+            let closed = match (d.popup_closed_at, i.popup_closed_at) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            };
+            (closed, d.popup_closed_with_ctrl || i.popup_closed_with_ctrl)
+        };
         // Turn this frame's key presses into viewer actions.
         let now = Instant::now();
         let input_time = ui.input(|i| i.time);
         // X autorepeat starts after ~660 ms, outlasting the 0.30 s guard, so
-        // keep the guard alive while the Ctrl that closed the popup is held.
+        // keep the guard alive while the Ctrl that closed a popup is held.
         // After release the normal 0.30 s window applies.
-        if self.diagrams.borrow().popup_closed_with_ctrl {
+        if popup_closed_with_ctrl {
             if ui.input(|i| i.modifiers.ctrl || i.modifiers.command) {
                 self.diagrams.borrow_mut().popup_closed_at = Some(input_time);
+                self.images.borrow_mut().popup_closed_at = Some(input_time);
                 popup_closed_at = Some(input_time);
             } else {
                 self.diagrams.borrow_mut().popup_closed_with_ctrl = false;
+                self.images.borrow_mut().popup_closed_with_ctrl = false;
             }
         }
         let suppress_quit = quit_suppressed(input_time, popup_closed_at);
@@ -871,14 +881,7 @@ impl eframe::App for App {
             self.images.borrow_mut().close_popup();
         }
         self.diagrams.borrow_mut().draw_popup(ui.ctx(), column);
-        let image_closed = self.images.borrow_mut().draw_popup(ui.ctx(), column);
-        if let Some(ctrl) = image_closed {
-            // Share the diagram's close guard: a held `q`/`Ctrl+C` that closed
-            // the image overlay must not also quit the app on its next repeat.
-            let mut d = self.diagrams.borrow_mut();
-            d.popup_closed_at = Some(input_time);
-            d.popup_closed_with_ctrl = ctrl;
-        }
+        self.images.borrow_mut().draw_popup(ui.ctx(), column);
         if self.tables.borrow_mut().take_copied() {
             self.set_status("copied CSV");
         }
