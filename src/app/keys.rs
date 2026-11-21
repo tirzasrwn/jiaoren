@@ -47,10 +47,32 @@ pub enum Action {
     SearchNext,
     /// Jump to the previous search match, wrapping.
     SearchPrev,
-    /// Close the window, or clear the active search first (handled by the app).
-    Escape,
+    /// Clear the active search, cancel the prompt, or quit when neither applies.
+    CancelOrQuit,
     /// Close the window.
     Quit,
+}
+
+/// Result of Esc/Ctrl+C, which share one cancel-then-quit ladder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CancelAction {
+    /// Close the `/` prompt and discard its buffer.
+    CancelPrompt,
+    /// Clear the committed pattern, hits and highlights.
+    ClearSearch,
+    /// Close the window.
+    Quit,
+}
+
+/// Route Esc/Ctrl+C: prompt first, then an active search, then quit.
+pub fn cancel_action(prompt_open: bool, search_active: bool) -> CancelAction {
+    if prompt_open {
+        CancelAction::CancelPrompt
+    } else if search_active {
+        CancelAction::ClearSearch
+    } else {
+        CancelAction::Quit
+    }
 }
 
 /// How long a first `g` waits for a second one.
@@ -91,10 +113,10 @@ pub fn apply_key(
         Key::Num0 => Some(Action::ResetZoom),
         Key::T => Some(Action::ToggleTheme),
         Key::R => Some(Action::Reload),
-        Key::C if modifiers.command || modifiers.ctrl => Some(Action::Quit),
+        Key::C if modifiers.command || modifiers.ctrl => Some(Action::CancelOrQuit),
         Key::Q => Some(Action::Quit),
-        // Escape clears an active search before it quits; the app decides which.
-        Key::Escape => Some(Action::Escape),
+        // Esc and Ctrl+C share the cancel prompt → clear search → quit ladder.
+        Key::Escape => Some(Action::CancelOrQuit),
         Key::Slash if modifiers.is_none() => Some(Action::SearchOpen),
         Key::N if modifiers.matches_exact(Modifiers::SHIFT) => Some(Action::SearchPrev),
         Key::N if modifiers.matches_exact(Modifiers::NONE) => Some(Action::SearchNext),
@@ -379,18 +401,26 @@ mod tests {
         }
 
         #[test]
-        fn ctrl_c_quits_but_plain_c_does_nothing() {
+        fn ctrl_c_cancels_or_quits_but_plain_c_does_nothing() {
             let mut s = KeyState::default();
             let now = std::time::Instant::now();
             assert_eq!(
                 apply_key(&mut s, Key::C, Modifiers::COMMAND, now),
-                Some(Action::Quit)
+                Some(Action::CancelOrQuit)
             );
             assert_eq!(
                 apply_key(&mut s, Key::C, Modifiers::CTRL, now),
-                Some(Action::Quit)
+                Some(Action::CancelOrQuit)
             );
             assert_eq!(apply_key(&mut s, Key::C, Modifiers::NONE, now), None);
+        }
+
+        #[test]
+        fn cancel_action_is_prompt_then_search_then_quit() {
+            assert_eq!(cancel_action(true, false), CancelAction::CancelPrompt);
+            assert_eq!(cancel_action(true, true), CancelAction::CancelPrompt);
+            assert_eq!(cancel_action(false, true), CancelAction::ClearSearch);
+            assert_eq!(cancel_action(false, false), CancelAction::Quit);
         }
 
         #[test]
@@ -453,12 +483,12 @@ mod tests {
         }
 
         #[test]
-        fn escape_is_not_a_quit_action() {
+        fn escape_is_not_a_direct_quit_action() {
             let mut s = KeyState::default();
             let now = std::time::Instant::now();
             assert_eq!(
                 apply_key(&mut s, Key::Escape, Modifiers::NONE, now),
-                Some(Action::Escape)
+                Some(Action::CancelOrQuit)
             );
             assert_eq!(
                 apply_key(&mut s, Key::Q, Modifiers::NONE, now),

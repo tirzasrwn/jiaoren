@@ -213,6 +213,23 @@ pub(crate) fn home_scroll(
     }
 }
 
+/// Scroll offset that centres a search hit's block: `block_top +
+/// block_height/2 - viewport_height/2`, clamped at the top of the content. A
+/// block taller than the viewport instead aligns its top with a small margin so
+/// its centre is not pushed off-screen. The scroll area clamps the result to
+/// the content range, including the overscroll pads.
+pub(crate) fn jump_scroll_top(block_top: f32, block_height: f32, viewport_height: f32) -> f32 {
+    const MARGIN: f32 = 8.0;
+    let viewport = viewport_height.max(0.0);
+    let height = block_height.max(0.0);
+    let target = if height > viewport {
+        block_top - MARGIN
+    } else {
+        block_top + height * 0.5 - viewport * 0.5
+    };
+    target.max(0.0)
+}
+
 /// The offset that shows a freshly opened document: the overscroll pad on both
 /// axes. `None` before the first layout has measured the viewport.
 pub(crate) fn home_target(pad: Option<egui::Vec2>) -> egui::Vec2 {
@@ -465,6 +482,25 @@ mod tests {
             assert_eq!(home_target(Some(pad)), pad);
             // Before the first layout there is no pad yet.
             assert_eq!(home_target(None), egui::Vec2::ZERO);
+        }
+
+        #[test]
+        fn jump_centres_a_short_block_and_clamps_at_the_top() {
+            // block centre 350, viewport centre 400 → scroll 350+100-400 = 50.
+            assert_eq!(jump_scroll_top(350.0, 200.0, 800.0), 50.0);
+            // Near the top the target is negative and clamps to 0.
+            assert_eq!(jump_scroll_top(100.0, 200.0, 800.0), 0.0);
+            // Already higher than a half viewport: still clamped, never negative.
+            assert_eq!(jump_scroll_top(399.0, 2.0, 800.0), 0.0);
+        }
+
+        #[test]
+        fn tall_blocks_align_their_top_with_a_margin() {
+            // 900 > 800: top - 8 rather than a centre that would be off-screen.
+            assert_eq!(jump_scroll_top(500.0, 900.0, 800.0), 492.0);
+            assert_eq!(jump_scroll_top(4.0, 900.0, 800.0), 0.0);
+            // Exactly viewport-sized blocks still centre.
+            assert_eq!(jump_scroll_top(400.0, 800.0, 800.0), 400.0);
         }
 
         #[test]

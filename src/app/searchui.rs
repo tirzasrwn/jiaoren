@@ -17,6 +17,10 @@ pub(crate) struct SearchUi {
     tops: Vec<f32>,
     /// Content-space top of each block, computed after the layout.
     ys: Vec<f32>,
+    /// Screen-space height recorded while drawing this frame.
+    heights: Vec<f32>,
+    /// Content-space block heights from the last completed frame.
+    hs: Vec<f32>,
 }
 
 impl SearchUi {
@@ -27,6 +31,8 @@ impl SearchUi {
             texts: Vec::new(),
             tops: Vec::new(),
             ys: Vec::new(),
+            heights: Vec::new(),
+            hs: Vec::new(),
         }
     }
 
@@ -34,6 +40,7 @@ impl SearchUi {
     pub(crate) fn begin_frame(&mut self) {
         self.texts.clear();
         self.tops.clear();
+        self.heights.clear();
     }
 
     /// Record one searchable block at the ui's current cursor position. Returns
@@ -42,7 +49,15 @@ impl SearchUi {
         let index = self.texts.len();
         self.texts.push(text);
         self.tops.push(ui.cursor().min.y);
+        self.heights.push(0.0);
         index
+    }
+
+    /// Set a block height measured by its painter (code blocks, table cells).
+    pub(crate) fn set_height(&mut self, index: usize, height: f32) {
+        if let Some(slot) = self.heights.get_mut(index) {
+            *slot = height.max(0.0);
+        }
     }
 
     /// Convert this frame's screen positions into content positions:
@@ -51,6 +66,8 @@ impl SearchUi {
         self.ys.clear();
         self.ys
             .extend(self.tops.iter().map(|top| offset_y + top - viewport_top));
+        self.hs.clear();
+        self.hs.extend_from_slice(&self.heights);
     }
 
     /// Block texts of the last completed frame, in document order.
@@ -61,6 +78,11 @@ impl SearchUi {
     /// Content y of block `index` in the last completed frame.
     pub(crate) fn block_y(&self, index: usize) -> Option<f32> {
         self.ys.get(index).copied()
+    }
+
+    /// Height of block `index` in the last completed frame.
+    pub(crate) fn block_height(&self, index: usize) -> Option<f32> {
+        self.hs.get(index).copied()
     }
 
     /// Block-local highlight ranges and the current-hit index, if the current
@@ -100,10 +122,14 @@ mod tests {
             let mut s = SearchUi::new();
             s.texts = vec!["first".to_string(), "second".to_string()];
             s.tops = vec![100.0, 250.0];
+            s.heights = vec![32.0, 10.0];
             s.finish_frame(40.0, 20.0);
             assert_eq!(s.block_y(0), Some(120.0));
             assert_eq!(s.block_y(1), Some(270.0));
             assert_eq!(s.block_y(2), None);
+            assert_eq!(s.block_height(0), Some(32.0));
+            assert_eq!(s.block_height(1), Some(10.0));
+            assert_eq!(s.block_height(2), None);
         }
 
         #[test]

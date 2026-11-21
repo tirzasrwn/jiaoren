@@ -100,13 +100,14 @@ impl TableUi {
                         // One block per cell, row-major; the row top is enough
                         // to jump to it. Cells routed to the library are not
                         // searchable, so they are not recorded.
-                        let (ranges, current) = if cell_needs_library_fallback(cell) {
-                            (Vec::new(), None)
+                        let (ranges, current, block) = if cell_needs_library_fallback(cell) {
+                            (Vec::new(), None, None)
                         } else {
                             let block = search.record(ui, crate::justify::search_text(cell));
-                            search.highlights(block)
+                            let (ranges, current) = search.highlights(block);
+                            (ranges, current, Some(block))
                         };
-                        render_cell(
+                        let height = render_cell(
                             ui,
                             cell_width(&widths, i),
                             cell,
@@ -114,18 +115,22 @@ impl TableUi {
                             &ranges,
                             current,
                         );
+                        if let Some(block) = block {
+                            search.set_height(block, height);
+                        }
                     }
                     ui.end_row();
                     for row in &spec.rows {
                         for i in 0..ncols {
                             let cell = row.get(i).map_or("", String::as_str);
-                            let (ranges, current) = if cell_needs_library_fallback(cell) {
-                                (Vec::new(), None)
+                            let (ranges, current, block) = if cell_needs_library_fallback(cell) {
+                                (Vec::new(), None, None)
                             } else {
                                 let block = search.record(ui, crate::justify::search_text(cell));
-                                search.highlights(block)
+                                let (ranges, current) = search.highlights(block);
+                                (ranges, current, Some(block))
                             };
-                            render_cell(
+                            let height = render_cell(
                                 ui,
                                 cell_width(&widths, i),
                                 cell,
@@ -133,6 +138,9 @@ impl TableUi {
                                 &ranges,
                                 current,
                             );
+                            if let Some(block) = block {
+                                search.set_height(block, height);
+                            }
                         }
                         ui.end_row();
                     }
@@ -447,7 +455,7 @@ fn render_cell(
     cache: &mut CommonMarkCache,
     highlights: &[(usize, usize)],
     current: Option<usize>,
-) {
+) -> f32 {
     // A vertical scope reports the real content height back to the grid; a
     // zero-height `allocate_ui_with_layout` would collapse every row to 0 and
     // let wrapped text paint over the next row.
@@ -455,13 +463,13 @@ fn render_cell(
         ui.set_width(w);
         if cell_needs_library_fallback(cell_md) {
             CommonMarkViewer::new().show(ui, cache, cell_md);
-            return;
+            return ui.min_rect().height();
         }
         let runs = crate::justify::parse_inline(cell_md);
         if runs.is_empty() {
             // Keep an all-blank row from collapsing to zero height.
             ui.add_space(ui.spacing().interact_size.y);
-            return;
+            return ui.min_rect().height();
         }
         crate::justify::draw_left(
             ui,
@@ -471,8 +479,9 @@ fn render_cell(
                 ranges: highlights,
                 current,
             },
-        );
-    });
+        )
+    })
+    .inner
 }
 
 #[cfg(test)]

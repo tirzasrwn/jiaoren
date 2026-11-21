@@ -29,10 +29,12 @@ mod table;
 
 use code::CodeUi;
 use diagram::DiagramUi;
-use geometry::{bottom_pad, content_column, home_scroll, home_target, overscroll_pad};
+use geometry::{
+    bottom_pad, content_column, home_scroll, home_target, jump_scroll_top, overscroll_pad,
+};
 use heading::HeadingUi;
 use image::ImageUi;
-use keys::{apply_key, quit_suppressed, Action, KeyState};
+use keys::{apply_key, cancel_action, quit_suppressed, Action, CancelAction, KeyState};
 use list::ListUi;
 use placeholder::{parse, Placeholder};
 use searchui::SearchUi;
@@ -144,7 +146,7 @@ impl ParagraphUi {
         let block = search.record(ui, crate::justify::search_text(&source));
         let (ranges, current) = search.highlights(block);
         let runs = crate::justify::parse_inline(&source);
-        crate::justify::draw(
+        let height = crate::justify::draw(
             ui,
             &runs,
             self.column,
@@ -153,6 +155,7 @@ impl ParagraphUi {
                 current,
             },
         );
+        search.set_height(block, height);
     }
 }
 
@@ -217,9 +220,10 @@ pub(crate) struct App {
     html_fn: HtmlFn,
     scroll_y: f32,
     scroll_x: f32,
-    /// Content y the next layout must scroll to (a confirmed or stepped search
-    /// hit). Applied once after `home_scroll`, before the scroll area runs.
-    jump_to: Option<f32>,
+    /// Block index the next layout must centre in the viewport (a confirmed or
+    /// stepped search hit). Applied once after `home_scroll`, before the scroll
+    /// area runs.
+    jump_to: Option<usize>,
     /// Edge slack from the last layout, `None` until the first layout. `gg` and
     /// `a` target it before this frame's layout has run; `Some` also tells the
     /// home/resize helper whether the view is still at the reading origin.
@@ -473,11 +477,28 @@ impl App {
         // Recorded block texts in document order from the previous frame.
         let texts = s.texts().to_vec();
         s.state.set_pattern(&texts, &pattern);
-        let target = s.state.current_block().and_then(|b| s.block_y(b));
+        let target = s.state.current_block();
         self.jump_to = target;
         // The prompt was drawn before the keys this frame; repaint so the
         // status line replaces it even when there is nothing to jump to.
         ctx.request_repaint();
+    }
+
+    /// Route Esc/Ctrl+C: cancel the prompt, clear a committed search, or quit.
+    fn cancel_search(&mut self, ctx: &egui::Context) {
+        let prompt_open = self.search.borrow().is_open();
+        let search_active = self.search.borrow().state.pattern.is_some();
+        match cancel_action(prompt_open, search_active) {
+            CancelAction::CancelPrompt => {
+                self.search.borrow_mut().cancel();
+                ctx.request_repaint();
+            }
+            CancelAction::ClearSearch => {
+                self.search.borrow_mut().state.clear();
+                ctx.request_repaint();
+            }
+            CancelAction::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+        }
     }
 
     /// Step to the next (`dir > 0`) or previous match and jump to its block.
@@ -491,7 +512,7 @@ impl App {
         } else {
             s.state.prev();
         }
-        let target = s.state.current_block().and_then(|b| s.block_y(b));
+        let target = s.state.current_block();
         self.jump_to = target;
         if target.is_some() {
             ctx.request_repaint();
@@ -595,6 +616,7 @@ impl eframe::App for App {
             // While the command line owns the keyboard, document keys are
             // suppressed: `q`, `t`, `r`, `0`, `/`, … reach the TextEdit.
             let mut keys: Vec<(egui::Key, egui::Modifiers)> = Vec::new();
+            let mut copy = false;
             ui.input(|i| {
                 for ev in &i.events {
                     if let egui::Event::Key {
@@ -605,19 +627,29 @@ impl eframe::App for App {
                     } = ev
                     {
                         keys.push((*key, *modifiers));
+                    } else if matches!(ev, egui::Event::Copy) {
+                        copy = true;
                     }
                 }
             });
             let ctx = ui.ctx().clone();
+            // A single Ctrl+C may arrive as Copy and as Key::C; only the first
+            // cancel in this frame may act, so a prompt cancel never also
+            // clears the committed pattern behind it.
+            let mut cancelled = false;
             for (key, modifiers) in keys {
                 match key {
                     // Enter first, so a following `n` in the same batch steps.
                     egui::Key::Enter if self.search.borrow().is_open() => {
                         self.confirm_search(&ctx);
                     }
-                    egui::Key::Escape if self.search.borrow().is_open() => {
-                        self.search.borrow_mut().cancel();
-                        ctx.request_repaint();
+                    egui::Key::Escape if !cancelled => {
+                        self.cancel_search(&ctx);
+                        cancelled = true;
+                    }
+                    egui::Key::C if !cancelled && (modifiers.ctrl || modifiers.command) => {
+                        self.cancel_search(&ctx);
+                        cancelled = true;
                     }
                     // A character key typed before Enter stays text; only a
                     // key after the prompt closed can step.
@@ -636,6 +668,9 @@ impl eframe::App for App {
                     _ => {}
                 }
             }
+            if copy && !cancelled {
+                self.cancel_search(&ctx);
+            }
         } else if !popup_open {
             // Once `/` opens the prompt in this batch, later keys are text for
             // the prompt, not viewer actions (`q`, `t`, `n`, …).
@@ -653,9 +688,12 @@ impl eframe::App for App {
                         ..
                     } = ev
                     {
-                        // A held `q`/`Esc` keeps repeating after it closed the
-                        // popup; only a fresh press may quit.
-                        if *repeat && matches!(*key, egui::Key::Q | egui::Key::Escape) {
+                        // A held `q`/`Esc`/`Ctrl+C` keeps repeating after it
+                        // acted; only a fresh press may quit.
+                        if *repeat
+                            && (matches!(*key, egui::Key::Q | egui::Key::Escape)
+                                || (*key == egui::Key::C && (modifiers.command || modifiers.ctrl)))
+                        {
                             continue;
                         }
                         // The next repeat of the Ctrl+C that closed the popup
@@ -672,13 +710,20 @@ impl eframe::App for App {
                         }
                     } else if !suppress_quit && matches!(ev, egui::Event::Copy) {
                         // winit reports Ctrl+C as `Copy` rather than `Key::C`.
-                        acts.push(Action::Quit);
+                        acts.push(Action::CancelOrQuit);
                     }
                 }
             });
         }
         let page_h = ui.available_height();
+        let mut cancel_done = false;
         for act in acts {
+            if act == Action::CancelOrQuit {
+                if cancel_done {
+                    continue;
+                }
+                cancel_done = true;
+            }
             match act {
                 Action::ScrollLines(f) => self.scroll_y = (self.scroll_y + f * 40.0).max(0.0),
                 Action::ScrollPages(f) => self.scroll_y = (self.scroll_y + f * page_h).max(0.0),
@@ -731,15 +776,8 @@ impl eframe::App for App {
                 }
                 Action::SearchNext => self.step_search(1, ui.ctx()),
                 Action::SearchPrev => self.step_search(-1, ui.ctx()),
-                // Esc clears an active search before it quits.
-                Action::Escape => {
-                    let mut s = self.search.borrow_mut();
-                    let had_search = s.state.pattern.is_some();
-                    s.state.clear();
-                    if !had_search {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                }
+                // Esc/Ctrl+C: prompt, then active search, then quit.
+                Action::CancelOrQuit => self.cancel_search(ui.ctx()),
                 Action::Quit => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
             }
         }
@@ -793,9 +831,15 @@ impl eframe::App for App {
             self.scroll_y = home.y;
             self.pad = Some(pad);
             // A confirmed or stepped search hit wins over home/resize anchoring.
-            // The horizontal home pad keeps the block's left edge visible.
-            if let Some(y) = self.jump_to.take() {
-                self.scroll_y = y.max(0.0);
+            // Centre its block; the scroll area clamps to the content range
+            // (including the overscroll pads). The horizontal home pad keeps
+            // the block's left edge visible.
+            if let Some(block) = self.jump_to.take() {
+                let search = self.search.borrow();
+                if let Some(top) = search.block_y(block) {
+                    let height = search.block_height(block).unwrap_or(0.0);
+                    self.scroll_y = jump_scroll_top(top, height, viewport_h);
+                }
                 self.scroll_x = pad.x;
             }
             let scroll_y = self.scroll_y;

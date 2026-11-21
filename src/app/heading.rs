@@ -69,8 +69,10 @@ impl HeadingUi {
                 // `#` still owns a heading row, not just the gaps.
                 let row_h = ui.fonts_mut(|f| f.row_height(&font));
                 ui.allocate_space(egui::vec2(column, row_h));
+                search.set_height(block, row_h);
             } else {
-                justify::draw_with(ui, &runs, column, font, color, false, highlights);
+                let height = justify::draw_with(ui, &runs, column, font, color, false, highlights);
+                search.set_height(block, height);
             }
             if spec.space_after {
                 ui.add_space(after);

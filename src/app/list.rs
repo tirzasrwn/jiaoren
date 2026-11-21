@@ -64,7 +64,8 @@ impl ListUi {
                 };
                 let runs = justify::parse_inline(&item.text);
                 let indent = justify::list_indent(item.depth, space);
-                justify::draw_indented(ui, &runs, column, indent, marker, highlights);
+                let height = justify::draw_indented(ui, &runs, column, indent, marker, highlights);
+                search.set_height(block, height);
             }
             ui.add_space(pad);
         });

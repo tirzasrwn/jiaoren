@@ -899,8 +899,8 @@ pub(crate) fn local_ranges(
 /// Paint `runs` as a fully justified paragraph in a `column`-wide slot starting
 /// at the current cursor. Every line but the last (and any line without a
 /// stretchable gap) is spread so its right edge lands on `cursor.left() + column`.
-pub fn draw(ui: &mut egui::Ui, runs: &[Run], column: f32, highlights: MatchHighlight<'_>) {
-    paint(ui, runs, column, true, highlights);
+pub fn draw(ui: &mut egui::Ui, runs: &[Run], column: f32, highlights: MatchHighlight<'_>) -> f32 {
+    paint(ui, runs, column, true, highlights)
 }
 
 /// Justified variant with a hanging indent: the marker sits at `indent` and the
@@ -913,7 +913,7 @@ pub fn draw_indented(
     indent: f32,
     marker: Marker,
     highlights: MatchHighlight<'_>,
-) {
+) -> f32 {
     let column = column.max(0.0);
     let space = space_width(ui);
     let galley = layout(ui, &marker.label(), &marker_format(ui));
@@ -921,7 +921,7 @@ pub fn draw_indented(
     let offset = indent + marker_width + space;
     let text_width = (column - offset).max(0.0);
     if text_width <= 0.0 {
-        return;
+        return 0.0;
     }
     paint_at(
         ui,
@@ -932,13 +932,18 @@ pub fn draw_indented(
         Some((indent, galley)),
         None,
         highlights,
-    );
+    )
 }
 
 /// Left-aligned variant of [`draw`]: same wrapping, splitting and painting, but
 /// gaps never stretch and rows hug the left edge. Used by table cells.
-pub fn draw_left(ui: &mut egui::Ui, runs: &[Run], column: f32, highlights: MatchHighlight<'_>) {
-    paint(ui, runs, column, false, highlights);
+pub fn draw_left(
+    ui: &mut egui::Ui,
+    runs: &[Run],
+    column: f32,
+    highlights: MatchHighlight<'_>,
+) -> f32 {
+    paint(ui, runs, column, false, highlights)
 }
 
 /// Paint `runs` with an explicit body font and text colour. `justify` selects
@@ -952,7 +957,7 @@ pub fn draw_with(
     color: Color32,
     justify: bool,
     highlights: MatchHighlight<'_>,
-) {
+) -> f32 {
     paint_at(
         ui,
         runs,
@@ -962,7 +967,7 @@ pub fn draw_with(
         None,
         Some((font, color)),
         highlights,
-    );
+    )
 }
 
 fn paint(
@@ -971,8 +976,8 @@ fn paint(
     column: f32,
     justify: bool,
     highlights: MatchHighlight<'_>,
-) {
-    paint_at(ui, runs, column, justify, 0.0, None, None, highlights);
+) -> f32 {
+    paint_at(ui, runs, column, justify, 0.0, None, None, highlights)
 }
 
 pub(crate) fn body_font(ui: &egui::Ui) -> FontId {
@@ -1019,10 +1024,10 @@ fn paint_at(
     marker: Option<(f32, Arc<Galley>)>,
     face: Option<(FontId, Color32)>,
     highlights: MatchHighlight<'_>,
-) {
+) -> f32 {
     let column = column.max(0.0);
     if column <= 0.0 {
-        return;
+        return 0.0;
     }
     let body = face
         .as_ref()
@@ -1040,8 +1045,9 @@ fn paint_at(
                 galley,
                 ui.visuals().text_color(),
             );
+            return row_h;
         }
-        return;
+        return 0.0;
     }
     let widths: Vec<f32> = words.iter().map(|w| w.width).collect();
     let gaps: Vec<f32> = words
@@ -1109,6 +1115,7 @@ fn paint_at(
             }
         }
     }
+    used_height
 }
 
 /// A line borders a split token when it holds any piece of one (head or
