@@ -37,6 +37,29 @@ pub(crate) fn capped_scale(w: f32, h: f32, scale: f32) -> f32 {
     }
 }
 
+/// Some SVGs (Mermaid C4/class links) use `xlink:href` without declaring the
+/// `xlink` namespace, which `usvg` rejects. Declare it on the root `<svg>`.
+fn ensure_xlink_namespace(bytes: Vec<u8>) -> Vec<u8> {
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Vec::new();
+    };
+    if !text.contains("xlink:") || text.contains("xmlns:xlink") {
+        return text.into_bytes();
+    }
+    let Some(start) = text.find("<svg") else {
+        return text.into_bytes();
+    };
+    let Some(offset) = text[start..].find('>') else {
+        return text.into_bytes();
+    };
+    let at = start + offset;
+    let mut out = String::with_capacity(text.len() + 44);
+    out.push_str(&text[..at]);
+    out.push_str(" xmlns:xlink=\"http://www.w3.org/1999/xlink\"");
+    out.push_str(&text[at..]);
+    out.into_bytes()
+}
+
 /// `usvg` options built once with system fonts loaded; without them `<text>`
 /// labels vanish from every diagram.
 fn svg_options() -> &'static resvg::usvg::Options<'static> {
@@ -56,7 +79,7 @@ pub(crate) fn rasterize(
     h: f32,
     scale: f32,
 ) -> Result<egui::ColorImage, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("read svg: {e}"))?;
+    let bytes = ensure_xlink_namespace(std::fs::read(path).map_err(|e| format!("read svg: {e}"))?);
     let tree = resvg::usvg::Tree::from_data(&bytes, svg_options())
         .map_err(|e| format!("parse svg: {e}"))?;
     let scale = capped_scale(w, h, scale);
@@ -79,6 +102,21 @@ pub(crate) fn rasterize(
 mod tests {
     mod raster {
         use super::super::rasterize;
+
+        #[test]
+        fn undeclared_xlink_namespace_is_added() {
+            // Mermaid emits `xlink:href` for C4/class links but some SVGs omit
+            // the namespace declaration; usvg rejects that outright.
+            let p = std::env::temp_dir().join(format!("jiaoren-xlink-{}.svg", std::process::id()));
+            std::fs::write(
+                &p,
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 5"><use xlink:href="#r"/></svg>"##,
+            )
+            .unwrap();
+            let img = rasterize(&p, 10.0, 5.0, 1.0);
+            assert!(img.is_ok(), "xlink svg must parse: {img:?}");
+            let _ = std::fs::remove_file(&p);
+        }
 
         #[test]
         fn huge_svg_is_capped_below_the_texture_limit() {
