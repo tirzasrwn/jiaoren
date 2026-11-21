@@ -593,7 +593,8 @@ impl DiagramUi {
                 .input(|i| i.pointer.hover_pos())
                 .filter(|pos| viewport.contains(*pos))
                 .map_or(view_size * 0.5, |pos| pos - viewport.min);
-            pan = zoom_anchored(pan, anchor, zoom_before, zoom);
+            let old_size = egui::vec2(base_w * zoom_before, base_h * zoom_before);
+            pan = zoom_anchored(pan, anchor, old_size, egui::vec2(dw, dh), view_size);
             pan = clamp_pan(pan, egui::vec2(dw, dh), view_size);
         }
         let (dimmed, offset) = egui::Area::new(egui::Id::new("mdview-diagram-popup"))
