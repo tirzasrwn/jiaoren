@@ -337,7 +337,10 @@ impl App {
             )
             .interactable(false)
             .show(ctx, |ui| {
-                ui.label(egui::RichText::new(message).color(color));
+                ui.add(
+                    egui::Label::new(egui::RichText::new(message).color(color))
+                        .wrap_mode(egui::TextWrapMode::Extend),
+                );
             });
         ctx.request_repaint_after(remaining);
     }
