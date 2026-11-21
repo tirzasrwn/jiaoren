@@ -900,6 +900,27 @@ pub(crate) fn selection_color(ui: &egui::Ui) -> Color32 {
     Color32::from_rgba_unmultiplied(r, g, b, 0x40)
 }
 
+/// Merge selection intervals by line: one `(line, left, right)` per line,
+/// spanning inter-word gaps. Input intervals on the same line may be disjoint;
+/// lines keep separate rects. Used by the painter so a selection looks
+/// continuous instead of one chip per word.
+pub(crate) fn merge_selection_spans(spans: &[(usize, f32, f32)]) -> Vec<(usize, f32, f32)> {
+    let mut out: Vec<(usize, f32, f32)> = Vec::new();
+    for &(line, left, right) in spans {
+        if left >= right {
+            continue;
+        }
+        match out.last_mut() {
+            Some((last_line, last_left, last_right)) if *last_line == line => {
+                *last_left = last_left.min(left);
+                *last_right = last_right.max(right);
+            }
+            _ => out.push((line, left, right)),
+        }
+    }
+    out
+}
+
 /// Intersection of `ranges` with the char span `[start, start + text.chars())`,
 /// returned as local char offsets within `text` plus the global range index.
 /// Range ends are exclusive.
@@ -1141,27 +1162,60 @@ fn paint_at(
 
         let mut x = left;
         let y = top + row as f32 * row_h;
+        let mut placements: Vec<(&Frag, f32)> = Vec::new();
         for (k, &wi) in line.iter().enumerate() {
             if k > 0 {
                 let gap = gaps[wi];
                 x += if gap > 0.0 { gap + grow } else { 0.0 };
             }
-            let word = &words[wi];
-            for frag in &word.frags {
-                let pos = Pos2::new(x, y);
-                paint_frag(ui, &painter, pos, frag, highlights);
-                let len = frag.text.chars().count();
-                if len > 0 {
-                    chars.push(CharSpan {
-                        start: frag.offset,
-                        len,
-                        rect: Rect::from_min_size(pos, egui::vec2(frag.width, row_h)),
-                    });
-                }
-                if matches!(frag.kind, RunKind::Link(_)) {
-                    interactives.push(Rect::from_min_size(pos, egui::vec2(frag.width, row_h)));
-                }
+            for frag in &words[wi].frags {
+                placements.push((frag, x));
                 x += frag.width;
+            }
+        }
+        if let Some((sel_start, sel_end)) = highlights.selection {
+            let mut parts: Vec<(usize, f32, f32)> = Vec::new();
+            for (frag, frag_x) in &placements {
+                let frag_start = frag.offset;
+                let frag_end = frag_start + frag.text.chars().count();
+                let start = sel_start.max(frag_start);
+                let end = sel_end.min(frag_end);
+                if start >= end {
+                    continue;
+                }
+                let prefix: String = frag.text.chars().take(start - frag_start).collect();
+                let piece: String = frag
+                    .text
+                    .chars()
+                    .skip(start - frag_start)
+                    .take(end - start)
+                    .collect();
+                let prefix_w = layout(ui, &prefix, &frag.format).size().x;
+                let piece_w = layout(ui, &piece, &frag.format).size().x;
+                parts.push((row, frag_x + prefix_w, frag_x + prefix_w + piece_w));
+            }
+            // One rect per line: gaps between words are covered by the span.
+            for (_, lo, hi) in merge_selection_spans(&parts) {
+                painter.rect_filled(
+                    Rect::from_min_size(Pos2::new(lo, y), egui::vec2(hi - lo, row_h)),
+                    2.0,
+                    selection_color(ui),
+                );
+            }
+        }
+        for (frag, frag_x) in placements {
+            let pos = Pos2::new(frag_x, y);
+            paint_frag(ui, &painter, pos, frag, highlights);
+            let len = frag.text.chars().count();
+            if len > 0 {
+                chars.push(CharSpan {
+                    start: frag.offset,
+                    len,
+                    rect: Rect::from_min_size(pos, egui::vec2(frag.width, row_h)),
+                });
+            }
+            if matches!(frag.kind, RunKind::Link(_)) {
+                interactives.push(Rect::from_min_size(pos, egui::vec2(frag.width, row_h)));
             }
         }
     }
@@ -1301,13 +1355,8 @@ fn paint_frag(
         let bg = Rect::from_min_size(pos, size).expand2(egui::vec2(1.0, 0.0));
         painter.rect_filled(bg, 2.0, ui.visuals().code_bg_color);
     }
-    // Selection first, then search hits, both below the glyphs.
-    if let Some((start, end)) = highlights.selection {
-        for (start, end, _) in local_ranges(frag.offset, &frag.text, &[(start, end)]) {
-            paint_char_range(ui, painter, pos, frag, start, end, selection_color(ui));
-        }
-    }
-    // Above the code background, below the glyphs.
+    // Above the code background, below the glyphs. Selection is painted once
+    // per line by the caller so inter-word gaps are continuous.
     paint_highlights(ui, painter, pos, frag, highlights);
     painter.galley(pos, frag.galley.clone(), frag.color);
 
@@ -1485,7 +1534,29 @@ mod tests {
     }
 
     mod highlights {
-        use super::super::local_ranges;
+        use super::super::{local_ranges, merge_selection_spans};
+
+        #[test]
+        fn gaps_on_one_line_merge_into_one_rect() {
+            assert_eq!(
+                merge_selection_spans(&[(0, 10.0, 20.0), (0, 30.0, 40.0)]),
+                vec![(0, 10.0, 40.0)]
+            );
+        }
+
+        #[test]
+        fn separate_lines_keep_separate_rects() {
+            assert_eq!(
+                merge_selection_spans(&[(0, 10.0, 20.0), (1, 5.0, 15.0)]),
+                vec![(0, 10.0, 20.0), (1, 5.0, 15.0)]
+            );
+        }
+
+        #[test]
+        fn no_selection_has_no_rects() {
+            assert!(merge_selection_spans(&[]).is_empty());
+            assert!(merge_selection_spans(&[(0, 5.0, 5.0)]).is_empty());
+        }
 
         #[test]
         fn maps_block_ranges_to_fragment_offsets() {
