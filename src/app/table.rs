@@ -121,6 +121,7 @@ impl TableUi {
                         );
                         if let Some(block) = block {
                             search.set_height(block, painted.height);
+                            search.set_rect(block, painted.rect);
                             search.set_char_map(block, painted.chars);
                             for rect in painted.interactives {
                                 search.add_control(rect);
@@ -150,6 +151,7 @@ impl TableUi {
                             );
                             if let Some(block) = block {
                                 search.set_height(block, painted.height);
+                                search.set_rect(block, painted.rect);
                                 search.set_char_map(block, painted.chars);
                                 for rect in painted.interactives {
                                     search.add_control(rect);
@@ -441,6 +443,7 @@ fn render_cell(
             CommonMarkViewer::new().show(ui, cache, cell_md);
             return crate::justify::PaintedBlock {
                 height: ui.min_rect().height(),
+                rect: ui.min_rect(),
                 chars: Vec::new(),
                 interactives: Vec::new(),
             };
@@ -451,6 +454,7 @@ fn render_cell(
             ui.add_space(ui.spacing().interact_size.y);
             return crate::justify::PaintedBlock {
                 height: ui.min_rect().height(),
+                rect: ui.min_rect(),
                 chars: Vec::new(),
                 interactives: Vec::new(),
             };

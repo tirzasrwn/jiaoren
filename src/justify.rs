@@ -857,14 +857,26 @@ pub struct CharSpan {
     pub rect: Rect,
 }
 
-/// Result of painting one block: its used height and the char map for
-/// selection hit testing.
-#[derive(Clone, Debug, Default)]
+/// Result of painting one block: its used height, screen rect and the char map
+/// for selection hit testing.
+#[derive(Clone, Debug)]
 pub struct PaintedBlock {
     pub height: f32,
+    pub rect: Rect,
     pub chars: Vec<CharSpan>,
     /// Link rects: pressing these must not start a text selection.
     pub interactives: Vec<Rect>,
+}
+
+impl Default for PaintedBlock {
+    fn default() -> Self {
+        PaintedBlock {
+            height: 0.0,
+            rect: Rect::ZERO,
+            chars: Vec::new(),
+            interactives: Vec::new(),
+        }
+    }
 }
 
 /// Highlight ranges for one block, as char ranges into its recorded search
@@ -1124,6 +1136,7 @@ fn paint_at(
             );
             return PaintedBlock {
                 height: row_h,
+                rect,
                 chars: Vec::new(),
                 interactives: Vec::new(),
             };
@@ -1271,6 +1284,7 @@ fn paint_at(
     }
     PaintedBlock {
         height: used_height,
+        rect,
         chars,
         interactives,
     }

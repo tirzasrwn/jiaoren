@@ -87,6 +87,7 @@ impl CodeUi {
         let height = block_height(lines.len(), row_h) + pad * 2.0;
         let (_, rect) = ui.allocate_space(egui::vec2(width, height));
         search.set_height(block, height);
+        search.set_rect(block, rect);
         let painter = ui.painter().clone();
         painter.rect_filled(rect, 2.0, ui.visuals().code_bg_color);
         let color = ui.visuals().text_color();

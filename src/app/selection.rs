@@ -84,6 +84,21 @@ impl SelectionState {
     }
 }
 
+/// Cursor for the document area, in priority order: link/copy control, text
+/// (I-beam, including during a selection drag), active pan, then the grab
+/// affordance.
+pub fn cursor_for(over_control: bool, over_text: bool, panning: bool) -> egui::CursorIcon {
+    if over_control {
+        egui::CursorIcon::PointingHand
+    } else if over_text {
+        egui::CursorIcon::Text
+    } else if panning {
+        egui::CursorIcon::Grabbing
+    } else {
+        egui::CursorIcon::Grab
+    }
+}
+
 /// Substring by chars.
 fn slice(text: &str, start: usize, end: usize) -> String {
     text.chars()
@@ -262,7 +277,6 @@ mod tests {
         use super::super::hit_test;
         use crate::justify::CharSpan;
         use egui::{Pos2, Rect};
-
         fn span(start: usize, len: usize, x: f32, y: f32, w: f32, h: f32) -> CharSpan {
             CharSpan {
                 start,
@@ -304,6 +318,20 @@ mod tests {
         #[test]
         fn empty_map_has_no_hit() {
             assert_eq!(hit_test(&[], Pos2::new(0.0, 0.0)), None);
+        }
+    }
+
+    mod cursor {
+        use super::super::cursor_for;
+        use egui::CursorIcon;
+
+        #[test]
+        fn control_then_text_then_pan_then_grab() {
+            assert_eq!(cursor_for(true, true, true), CursorIcon::PointingHand);
+            assert_eq!(cursor_for(false, true, true), CursorIcon::Text);
+            assert_eq!(cursor_for(false, true, false), CursorIcon::Text);
+            assert_eq!(cursor_for(false, false, true), CursorIcon::Grabbing);
+            assert_eq!(cursor_for(false, false, false), CursorIcon::Grab);
         }
     }
 }

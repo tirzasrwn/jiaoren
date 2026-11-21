@@ -40,7 +40,7 @@ use keys::{apply_key, cancel_action, quit_suppressed, Action, CancelAction, Copy
 use list::ListUi;
 use placeholder::{parse, Placeholder};
 use searchui::SearchUi;
-use selection::selected_text;
+use selection::{cursor_for, selected_text};
 use table::TableUi;
 
 /// Re-export of [`crate::doc::read_doc`] for the app's reload path.
@@ -161,6 +161,7 @@ impl ParagraphUi {
             },
         );
         search.set_height(block, painted.height);
+        search.set_rect(block, painted.rect);
         search.set_char_map(block, painted.chars);
         for rect in painted.interactives {
             search.add_control(rect);
@@ -1066,6 +1067,23 @@ impl eframe::App for App {
         // frame shows the confirmed status instead of drawing both at once.
         if !prompt_drawn {
             self.draw_status(ui.ctx());
+        }
+        // Final cursor wins over the scroll area's Grab: controls first, text
+        // second, pan feedback third.
+        if !popup_open && !prompt_open {
+            if let Some(pos) = ui.ctx().pointer_hover_pos() {
+                let (over_control, over_text, selecting) = {
+                    let s = self.search.borrow();
+                    (
+                        s.pointer_on_control(pos),
+                        s.pointer_over_text(pos),
+                        s.selection.dragging,
+                    )
+                };
+                let panning = ui.input(|i| i.pointer.primary_down()) && !selecting && !over_control;
+                let cursor = cursor_for(over_control, over_text, panning);
+                ui.ctx().output_mut(|o| o.cursor_icon = cursor);
+            }
         }
     }
 }

@@ -28,6 +28,8 @@ pub(crate) struct SearchUi {
     hs: Vec<f32>,
     /// Char maps (fragment rects in screen space) from the last completed frame.
     maps: Vec<Vec<CharSpan>>,
+    /// Painted block rects from the last completed frame, for the text cursor.
+    rects: Vec<egui::Rect>,
     /// Link/copy-control rects from the last completed frame. Presses here must
     /// not start a text selection.
     controls: Vec<egui::Rect>,
@@ -45,6 +47,7 @@ impl SearchUi {
             heights: Vec::new(),
             hs: Vec::new(),
             maps: Vec::new(),
+            rects: Vec::new(),
             controls: Vec::new(),
         }
     }
@@ -55,6 +58,7 @@ impl SearchUi {
         self.tops.clear();
         self.heights.clear();
         self.maps.clear();
+        self.rects.clear();
         self.controls.clear();
     }
 
@@ -66,6 +70,7 @@ impl SearchUi {
         self.tops.push(ui.cursor().min.y);
         self.heights.push(0.0);
         self.maps.push(Vec::new());
+        self.rects.push(egui::Rect::ZERO);
         index
     }
 
@@ -74,6 +79,18 @@ impl SearchUi {
         if let Some(slot) = self.maps.get_mut(index) {
             *slot = chars;
         }
+    }
+
+    /// Store a block's painted rect for cursor hover tests.
+    pub(crate) fn set_rect(&mut self, index: usize, rect: egui::Rect) {
+        if let Some(slot) = self.rects.get_mut(index) {
+            *slot = rect;
+        }
+    }
+
+    /// True when `pos` is over painted text (any block rect).
+    pub(crate) fn pointer_over_text(&self, pos: egui::Pos2) -> bool {
+        self.rects.iter().any(|rect| rect.contains(pos))
     }
 
     /// Register a link/control rect that owns the press instead of selection.
