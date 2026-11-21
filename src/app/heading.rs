@@ -44,12 +44,11 @@ impl HeadingUi {
         let color = ui.visuals().strong_text_color();
         let runs = justify::parse_inline(&spec.text);
         let row_h = ui.text_style_height(&egui::TextStyle::Body);
-        // The removed `<mdspace>` block was one empty body row above and below,
-        // but a heading's own trailing spacing sat on top of it. These fractions
-        // of a body row reproduce the measured gaps (~22 px above, ~56 px
-        // below) with the placeholder no longer carrying its own block.
+        // Vertical breathing room in body rows. The gap above stays at one row
+        // (it matches the old `<mdspace>` spacing); the gap below is tightened
+        // so a heading does not float away from the body that belongs to it.
         let before = row_h;
-        let after = row_h * 1.8;
+        let after = row_h * 1.2;
         // The html hook runs in a wrapping left-to-right layout, where a bare
         // `add_space` would advance horizontally; the vertical wrapper makes the
         // gaps above and below real vertical space.
