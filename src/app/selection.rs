@@ -84,12 +84,16 @@ impl SelectionState {
     }
 }
 
-/// Cursor for the document area, in priority order: link/copy control, text
-/// (I-beam, including during a selection drag), active pan, then the grab
-/// affordance.
-pub fn cursor_for(over_control: bool, over_text: bool, panning: bool) -> egui::CursorIcon {
-    if over_control {
-        egui::CursorIcon::PointingHand
+/// Cursor for the document area, in priority order: a control's own cursor
+/// (copy icons use the arrow, links a pointing hand), text (I-beam, including
+/// during a selection drag), active pan, then the grab affordance.
+pub fn cursor_for(
+    control: Option<egui::CursorIcon>,
+    over_text: bool,
+    panning: bool,
+) -> egui::CursorIcon {
+    if let Some(cursor) = control {
+        cursor
     } else if over_text {
         egui::CursorIcon::Text
     } else if panning {
@@ -327,11 +331,18 @@ mod tests {
 
         #[test]
         fn control_then_text_then_pan_then_grab() {
-            assert_eq!(cursor_for(true, true, true), CursorIcon::PointingHand);
-            assert_eq!(cursor_for(false, true, true), CursorIcon::Text);
-            assert_eq!(cursor_for(false, true, false), CursorIcon::Text);
-            assert_eq!(cursor_for(false, false, true), CursorIcon::Grabbing);
-            assert_eq!(cursor_for(false, false, false), CursorIcon::Grab);
+            assert_eq!(
+                cursor_for(Some(CursorIcon::Default), true, true),
+                CursorIcon::Default
+            );
+            assert_eq!(
+                cursor_for(Some(CursorIcon::PointingHand), true, true),
+                CursorIcon::PointingHand
+            );
+            assert_eq!(cursor_for(None, true, true), CursorIcon::Text);
+            assert_eq!(cursor_for(None, true, false), CursorIcon::Text);
+            assert_eq!(cursor_for(None, false, true), CursorIcon::Grabbing);
+            assert_eq!(cursor_for(None, false, false), CursorIcon::Grab);
         }
     }
 }

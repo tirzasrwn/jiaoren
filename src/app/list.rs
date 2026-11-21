@@ -70,7 +70,7 @@ impl ListUi {
                 search.set_rect(block, painted.rect);
                 search.set_char_map(block, painted.chars);
                 for rect in painted.interactives {
-                    search.add_control(rect);
+                    search.add_control(rect, egui::CursorIcon::PointingHand);
                 }
             }
             ui.add_space(pad);

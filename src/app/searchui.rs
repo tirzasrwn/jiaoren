@@ -30,9 +30,9 @@ pub(crate) struct SearchUi {
     maps: Vec<Vec<CharSpan>>,
     /// Painted block rects from the last completed frame, for the text cursor.
     rects: Vec<egui::Rect>,
-    /// Link/copy-control rects from the last completed frame. Presses here must
-    /// not start a text selection.
-    controls: Vec<egui::Rect>,
+    /// Link/copy-control rects and their intended cursor from the last
+    /// completed frame. Presses here must not start a text selection.
+    controls: Vec<(egui::Rect, egui::CursorIcon)>,
 }
 
 impl SearchUi {
@@ -94,15 +94,24 @@ impl SearchUi {
     }
 
     /// Register a link/control rect that owns the press instead of selection.
-    pub(crate) fn add_control(&mut self, rect: egui::Rect) {
-        self.controls.push(rect);
+    pub(crate) fn add_control(&mut self, rect: egui::Rect, cursor: egui::CursorIcon) {
+        self.controls.push((rect, cursor));
     }
 
     /// True when `pos` is on a link or copy button painted last frame.
     pub(crate) fn pointer_on_control(&self, pos: egui::Pos2) -> bool {
         self.controls
             .iter()
-            .any(|rect| rect.expand(1.0).contains(pos))
+            .any(|(rect, _)| rect.expand(1.0).contains(pos))
+    }
+
+    /// The cursor requested by a control under `pos`, if any.
+    pub(crate) fn control_cursor(&self, pos: egui::Pos2) -> Option<egui::CursorIcon> {
+        self.controls
+            .iter()
+            .rev()
+            .find(|(rect, _)| rect.expand(1.0).contains(pos))
+            .map(|(_, cursor)| *cursor)
     }
 
     /// Selected char range in `block`, if any.

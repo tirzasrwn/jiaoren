@@ -85,7 +85,7 @@ impl TableUi {
             ui.add_space(table_pad(body_row_height));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let (clicked, rect) = super::widgets::copy_button(ui, "Copy table as CSV");
-                search.add_control(rect);
+                search.add_control(rect, egui::CursorIcon::Default);
                 if clicked {
                     ui.ctx().copy_text(table_to_csv(&spec));
                     self.copied = true;
@@ -124,7 +124,7 @@ impl TableUi {
                             search.set_rect(block, painted.rect);
                             search.set_char_map(block, painted.chars);
                             for rect in painted.interactives {
-                                search.add_control(rect);
+                                search.add_control(rect, egui::CursorIcon::PointingHand);
                             }
                         }
                     }
@@ -154,7 +154,7 @@ impl TableUi {
                                 search.set_rect(block, painted.rect);
                                 search.set_char_map(block, painted.chars);
                                 for rect in painted.interactives {
-                                    search.add_control(rect);
+                                    search.add_control(rect, egui::CursorIcon::PointingHand);
                                 }
                             }
                         }

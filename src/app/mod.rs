@@ -164,7 +164,7 @@ impl ParagraphUi {
         search.set_rect(block, painted.rect);
         search.set_char_map(block, painted.chars);
         for rect in painted.interactives {
-            search.add_control(rect);
+            search.add_control(rect, egui::CursorIcon::PointingHand);
         }
     }
 }
@@ -1072,16 +1072,17 @@ impl eframe::App for App {
         // second, pan feedback third.
         if !popup_open && !prompt_open {
             if let Some(pos) = ui.ctx().pointer_hover_pos() {
-                let (over_control, over_text, selecting) = {
+                let (control, over_text, selecting) = {
                     let s = self.search.borrow();
                     (
-                        s.pointer_on_control(pos),
+                        s.control_cursor(pos),
                         s.pointer_over_text(pos),
                         s.selection.dragging,
                     )
                 };
-                let panning = ui.input(|i| i.pointer.primary_down()) && !selecting && !over_control;
-                let cursor = cursor_for(over_control, over_text, panning);
+                let panning =
+                    ui.input(|i| i.pointer.primary_down()) && !selecting && control.is_none();
+                let cursor = cursor_for(control, over_text, panning);
                 ui.ctx().output_mut(|o| o.cursor_icon = cursor);
             }
         }

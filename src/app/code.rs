@@ -148,7 +148,7 @@ impl CodeUi {
             "Copy code",
             backdrop,
         );
-        search.add_control(control);
+        search.add_control(control, egui::CursorIcon::Default);
         if clicked {
             ui.ctx().copy_text(spec.text.clone());
             self.copied = true;
