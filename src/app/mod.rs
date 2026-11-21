@@ -205,8 +205,8 @@ fn status_area(ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 /// Plain bottom-left `/query` line: monospace, on the same solid chip as the
-/// status so it stays legible over the document, with the ASCII bar cursor and
-/// the query tail shown when the line is longer than the window.
+/// status so it stays legible over the document, with a blinking block cursor
+/// at the end and the query tail shown when the line is longer than the window.
 fn prompt_area(ctx: &egui::Context, text: String) {
     let screen = ctx.content_rect();
     egui::Area::new(egui::Id::new("jiaoren-search-line"))
@@ -239,32 +239,58 @@ fn prompt_area(ctx: &egui::Context, text: String) {
                         "{prefix}{}",
                         tail_within(body, max_width - measure(prefix), &measure)
                     );
-                    let width = measure(&shown);
+                    // A block cursor after the query, blinking like a terminal.
+                    let cell = measure("M");
+                    let line = ui.add(
+                        egui::Label::new(egui::RichText::new(shown).monospace().color(color))
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                    );
+                    let caret = egui::Rect::from_min_size(
+                        egui::Pos2::new(line.rect.right(), line.rect.top()),
+                        egui::vec2(cell, line.rect.height()),
+                    );
+                    let time = ctx.input(|i| i.time);
+                    if cursor_visible(time) {
+                        ui.painter().rect_filled(caret, 0.0, color);
+                    }
+                    // Wake up at the next blink boundary; egui is otherwise idle.
+                    let next = cursor_blink_remaining(time);
+                    ctx.request_repaint_after(Duration::from_secs_f64(next));
+                    // Ask the integration to route IME commits here while the
+                    // command line is open; preedit is deliberately ignored.
                     let bottom = screen.bottom() - 8.0;
                     let ime_rect = egui::Rect::from_min_size(
                         egui::Pos2::new(screen.left() + 8.0, bottom - 24.0),
                         egui::vec2(max_width, 24.0),
                     );
-                    let cursor_rect = egui::Rect::from_min_size(
-                        egui::Pos2::new(screen.left() + 12.0 + width, bottom - 20.0),
-                        egui::vec2(1.0, 20.0),
-                    );
-                    // Ask the integration to route IME commits here while the
-                    // command line is open; preedit is deliberately ignored.
                     ctx.output_mut(|o| {
                         o.ime = Some(egui::output::IMEOutput {
                             purpose: egui::IMEPurpose::Normal,
                             rect: ime_rect,
-                            cursor_rect,
+                            cursor_rect: caret,
                             should_interrupt_composition: false,
                         });
                     });
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(shown).monospace().color(color))
-                            .wrap_mode(egui::TextWrapMode::Extend),
-                    );
                 });
         });
+}
+
+/// Half-period of the command-line block cursor blink, in seconds.
+const CURSOR_BLINK: f64 = 0.53;
+
+/// Whether the block cursor is lit: on for the first half-period, then off.
+fn cursor_visible(time: f64) -> bool {
+    ((time / CURSOR_BLINK) as u64).is_multiple_of(2)
+}
+
+/// Seconds until the cursor next flips, clamped so a repaint is always asked
+/// for (a stale or zero time must not busy-loop).
+fn cursor_blink_remaining(time: f64) -> f64 {
+    let next = (time / CURSOR_BLINK)
+        .floor()
+        .mul_add(CURSOR_BLINK, CURSOR_BLINK)
+        - time;
+    next.clamp(0.01, CURSOR_BLINK)
 }
 
 /// Longest suffix of `text` that fits `max_width`, cut on a char boundary.
@@ -636,7 +662,7 @@ impl App {
     /// padding keeps text clear of it.
     fn draw_status(&mut self, ctx: &egui::Context) {
         if self.search.borrow().is_open() {
-            let line = format!("/{}|", self.search.borrow().query());
+            let line = format!("/{}", self.search.borrow().query());
             prompt_area(ctx, line);
             return;
         }
@@ -1210,7 +1236,8 @@ impl eframe::App for App {
 mod tests {
     mod search_batch {
         use super::super::{
-            read_search_batch, sanitize_paste, tail_within, truncate_word_tail, SearchEdit,
+            cursor_blink_remaining, cursor_visible, read_search_batch, sanitize_paste, tail_within,
+            truncate_word_tail, SearchEdit,
         };
         use egui::{Event, Key, Modifiers};
 
@@ -1252,6 +1279,24 @@ mod tests {
             // Multi-byte scalars: trimming by bytes would split a char.
             assert_eq!(tail_within("ééé３", 1.0, &chars), "３");
             assert_eq!(tail_within("", 0.0, &chars), "");
+        }
+
+        #[test]
+        fn block_cursor_blinks_every_half_period() {
+            assert!(cursor_visible(0.0));
+            assert!(cursor_visible(0.52));
+            assert!(!cursor_visible(0.53));
+            assert!(!cursor_visible(1.0));
+            assert!(cursor_visible(1.06));
+            assert!(cursor_visible(2.12));
+            // The repaint delay always lands on the next flip, never zero.
+            let at = 0.7;
+            let wait = cursor_blink_remaining(at);
+            assert!((wait - 0.36).abs() < 0.01);
+            assert!(!cursor_visible(at), "cursor is off before the flip");
+            assert!(cursor_visible(at + wait), "lit again at the boundary");
+            assert!(cursor_blink_remaining(0.0) > 0.0);
+            assert!(cursor_blink_remaining(f64::MAX) > 0.0);
         }
 
         #[test]
