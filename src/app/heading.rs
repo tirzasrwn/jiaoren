@@ -56,7 +56,13 @@ impl HeadingUi {
             if spec.space_before {
                 ui.add_space(before);
             }
-            justify::draw_with(ui, &runs, column, font, color, false);
+            if runs.is_empty() {
+                // `#` still owns a heading row, not just the gaps.
+                let row_h = ui.fonts_mut(|f| f.row_height(&font));
+                ui.allocate_space(egui::vec2(column, row_h));
+            } else {
+                justify::draw_with(ui, &runs, column, font, color, false);
+            }
             if spec.space_after {
                 ui.add_space(after);
             }

@@ -186,9 +186,9 @@ pub fn image_id(src: &str, alt: &str) -> String {
     hex.as_str()[..16].to_string()
 }
 
-/// Stable 16-hex-character id for a heading's level and text.
-pub fn heading_id(level: u8, text: &str) -> String {
-    let canon = format!("{level}\u{1f}{text}");
+/// Stable 16-hex-character id for a heading's level, text and occurrence.
+pub fn heading_id(level: u8, text: &str, occurrence: usize) -> String {
+    let canon = format!("{level}\u{1f}{text}\u{1f}{occurrence}");
     let hex = blake3::hash(canon.as_bytes()).to_hex();
     hex.as_str()[..16].to_string()
 }
@@ -307,13 +307,45 @@ fn setext_level(line: &str) -> Option<u8> {
     }
 }
 
-/// Open a fence only at 0–3 spaces of indent (4+ is an indented code block).
+/// Open a fence only at 0–3 columns of indent (4+ is an indented code block).
+/// A tab counts as the next 4-column stop.
 fn fence_open(line: &str) -> Option<(char, usize, &str)> {
     let t = line.trim_end_matches(['\r', '\n']);
-    if t.len() - t.trim_start_matches(' ').len() > 3 {
+    if indent_columns(t) > 3 {
         return None;
     }
-    open_fence(t.trim_start())
+    open_fence(t.trim_start_matches([' ', '\t']))
+}
+
+/// Visual columns of the leading spaces and tabs (tab = next 4-column stop).
+fn indent_columns(s: &str) -> usize {
+    let mut col = 0;
+    for c in s.chars() {
+        match c {
+            ' ' => col += 1,
+            '\t' => col = (col / 4 + 1) * 4,
+            _ => break,
+        }
+    }
+    col
+}
+
+/// Normalize `\r\n` and lone `\r` to `\n`, exactly once, so stored text has
+/// clean line offsets.
+fn normalize_newlines(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            out.push('\n');
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Drop the single trailing newline of a code block body (and a CR before it).
@@ -371,6 +403,9 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
     let mut images = HashMap::new();
     let mut headings = HashMap::new();
     let mut code = HashMap::new();
+    // Occurrence counter: identical headings still get distinct ids, so each
+    // keeps its own start/EOF gap flags in the map.
+    let mut heading_seq = 0usize;
     // (fence char, run length, info string, verbatim open line)
     let mut open: Option<(char, usize, String, String)> = None;
     let mut body = String::new();
@@ -487,12 +522,15 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         };
                         if let Some(end) = setext_end {
                             let level = setext_level(lines[end - 1]).unwrap_or(1);
-                            let text = lines[i..end - 1]
-                                .iter()
-                                .map(|l| l.trim())
-                                .collect::<Vec<_>>()
-                                .join(" ");
-                            let id = heading_id(level, &text);
+                            let text = normalize_newlines(
+                                &lines[i..end - 1]
+                                    .iter()
+                                    .map(|l| l.trim())
+                                    .collect::<Vec<_>>()
+                                    .join(" "),
+                            );
+                            let id = heading_id(level, &text, heading_seq);
+                            heading_seq += 1;
                             headings.insert(
                                 id.clone(),
                                 HeadingSpec {
@@ -543,12 +581,14 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         continue;
                     }
                     if let Some((level, text)) = atx_heading(line) {
-                        let id = heading_id(level, text);
+                        let text = normalize_newlines(text);
+                        let id = heading_id(level, &text, heading_seq);
+                        heading_seq += 1;
                         headings.insert(
                             id.clone(),
                             HeadingSpec {
                                 level,
-                                text: text.to_string(),
+                                text,
                                 id: id.clone(),
                                 space_before: !out.trim().is_empty(),
                                 space_after: has_content_after(&lines, i + 1),
@@ -563,7 +603,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                 }
             },
             Some((ch, len, info, oline)) => {
-                if is_close(t, ch, len) {
+                if is_close(line, ch, len) {
                     if info.split_whitespace().next() == Some("mermaid") {
                         let id = diagram_id(&body);
                         diagrams.insert(id.clone(), body.trim().to_string());
@@ -572,7 +612,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         out.push_str(&format!("<mermaid id=\"{id}\">\n\n"));
                     } else {
                         let lang = info.split_whitespace().next().unwrap_or("").to_string();
-                        let text = strip_one_newline(&body).to_string();
+                        let text = normalize_newlines(strip_one_newline(&body));
                         let id = code_id(&lang, &text);
                         code.insert(id.clone(), CodeSpec { text, lang });
                         push_placeholder(&mut out, "mdcode", &id);
@@ -690,8 +730,17 @@ fn open_fence(t: &str) -> Option<(char, usize, &str)> {
     Some((ch, len, &t[len..]))
 }
 
-fn is_close(t: &str, ch: char, open_len: usize) -> bool {
-    t.chars().all(|c| c == ch) && t.chars().count() >= open_len
+/// A closing fence: same char, run at least as long as the opener, at most 3
+/// columns of indent, and nothing after the run but whitespace. The raw line is
+/// checked so an indented `    ``` inside a block does not end it early.
+fn is_close(line: &str, ch: char, open_len: usize) -> bool {
+    let t = line.trim_end_matches(['\r', '\n']);
+    if indent_columns(t) > 3 {
+        return false;
+    }
+    let body = t.trim_start_matches([' ', '\t']);
+    let run = body.chars().take_while(|&c| c == ch).count();
+    run >= open_len && body[run..].trim().is_empty()
 }
 
 /// HTML elements CommonMark treats as inline. A line starting with one of
@@ -1038,6 +1087,39 @@ mod tests {
         fn crlf_code_fence_strips_the_trailing_newline() {
             let p = prepare("```\r\nx\r\n```\r\n", Path::new("/d"));
             assert_eq!(p.code.values().next().unwrap().text, "x");
+        }
+
+        #[test]
+        fn closing_fence_must_be_bare_and_mostly_unindented() {
+            // A `    ``` line inside the block is content, not the close: the
+            // tail must not leak out as a paragraph.
+            let p = prepare("```\n    ```\nrest\n```\n", Path::new("/d"));
+            assert_eq!(p.code.len(), 1);
+            let text = &p.code.values().next().unwrap().text;
+            assert_eq!(text, "    ```\nrest");
+            assert!(!p.markdown.contains("rest"));
+        }
+
+        #[test]
+        fn closing_fence_with_trailing_text_does_not_close() {
+            let p = prepare("```\ncode\n```x\n```\n", Path::new("/d"));
+            assert_eq!(p.code.values().next().unwrap().text, "code\n```x");
+        }
+
+        #[test]
+        fn tab_indented_fence_stays_on_the_library_path() {
+            let p = prepare("\t```\n\tcode\n\t```\n", Path::new("/d"));
+            assert!(p.code.is_empty());
+            assert!(p.markdown.contains("\t```"));
+            assert!(p.markdown.contains("\tcode"));
+        }
+
+        #[test]
+        fn crlf_code_blocks_normalize_interior_newlines() {
+            let p = prepare("```\r\n    a\r\n\r\nb\r\n```\r\n", Path::new("/d"));
+            let text = &p.code.values().next().unwrap().text;
+            assert_eq!(text, "    a\n\nb");
+            assert!(!text.contains('\r'));
         }
 
         #[test]
@@ -1783,10 +1865,58 @@ mod tests {
 
         #[test]
         fn heading_id_is_stable_and_content_sensitive() {
-            assert_eq!(heading_id(1, "x"), heading_id(1, "x"));
-            assert_ne!(heading_id(1, "x"), heading_id(2, "x"));
-            assert_ne!(heading_id(1, "x"), heading_id(1, "y"));
-            assert_eq!(heading_id(1, "x").len(), 16);
+            assert_eq!(heading_id(1, "x", 0), heading_id(1, "x", 0));
+            assert_ne!(heading_id(1, "x", 0), heading_id(2, "x", 0));
+            assert_ne!(heading_id(1, "x", 0), heading_id(1, "y", 0));
+            assert_ne!(heading_id(1, "x", 0), heading_id(1, "x", 1));
+            assert_eq!(heading_id(1, "x", 0).len(), 16);
+        }
+
+        /// Heading ids in placeholder order (the map itself is unordered).
+        fn ids_in_order(markdown: &str) -> Vec<String> {
+            let mut ids = Vec::new();
+            let mut rest = markdown;
+            while let Some(k) = rest.find("<mdheading id=\"") {
+                rest = &rest[k + "<mdheading id=\"".len()..];
+                let end = rest.find('"').unwrap();
+                ids.push(rest[..end].to_string());
+            }
+            ids
+        }
+
+        #[test]
+        fn repeated_heading_at_start_keeps_both_gap_flags() {
+            let p = prepare("# A\n\nbody\n\n# A", Path::new("/d"));
+            assert_eq!(p.headings.len(), 2, "{:?}", p.headings);
+            let ids = ids_in_order(&p.markdown);
+            assert_eq!(ids.len(), 2);
+            assert_ne!(ids[0], ids[1]);
+            let first = &p.headings[&ids[0]];
+            let second = &p.headings[&ids[1]];
+            // Document start: no top gap. The second occurrence is not the
+            // first's overwritten record.
+            assert!(!first.space_before);
+            assert!(first.space_after);
+            assert!(second.space_before);
+            assert!(!second.space_after);
+        }
+
+        #[test]
+        fn repeated_heading_keeps_first_space_after() {
+            let p = prepare("body\n\n# A\n\n# A", Path::new("/d"));
+            let ids = ids_in_order(&p.markdown);
+            assert_eq!(ids.len(), 2);
+            assert_ne!(ids[0], ids[1]);
+            assert!(p.headings[&ids[0]].space_after);
+            assert!(!p.headings[&ids[1]].space_after);
+        }
+
+        #[test]
+        fn crlf_heading_text_has_no_carriage_returns() {
+            let p = prepare("Title\r\n===\r\n", Path::new("/d"));
+            let h = only(&p);
+            assert_eq!(h.text, "Title");
+            assert!(!h.text.contains('\r'));
         }
     }
 

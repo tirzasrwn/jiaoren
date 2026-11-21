@@ -191,8 +191,9 @@ document cannot exfiltrate data or load remote resources during rendering.
 
 ## Known limitations
 
-- Wide tables and long code lines wrap instead of getting a horizontal
-  scrollbar. Use `+` to zoom in when a wrapped line is hard to read.
+- Wide tables wrap instead of getting a horizontal scrollbar. Long code lines
+  do not wrap: they overflow the reading column and pan with `h`/`l` (or the
+  mouse); use `+` to zoom in when the text is hard to read.
 - Body paragraphs are justified by a built-in layout: bold/italic/code/strike/
   links are supported, but a paragraph containing an inline image (one that is
   not alone in its paragraph) or raw HTML falls
