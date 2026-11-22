@@ -33,13 +33,13 @@ Installs the binary `jr` to `~/.cargo/bin/jr`. No sudo needed.
 ```bash
 jr [--dark] file.md
 jr --clean-cache          # cached diagram renders + mermaid.js
-jr --clean-cache --all    # also the managed Chromium (~132 MB)
+jr --clean-cache --all    # also Chromium and cached fonts (~132 MB)
 ```
 
 - `--dark` — start with the dark theme.
 - `--clean-cache` — delete cached diagram renders and the downloaded
-  `mermaid.min.js`, then exit. The managed Chromium is kept; add `--all` to
-  remove it too. The downloaded font cache is always kept (it is an asset, not
+  `mermaid.min.js`, then exit. The managed Chromium and cached fonts are kept;
+  add `--all` to remove them too. The downloaded font cache is always kept (it is an asset, not
   a derived render). Startup prunes renders from older Mermaid/Chromium
   versions and font versions other than the pinned one, and is safe while
   other `jr` instances are running.

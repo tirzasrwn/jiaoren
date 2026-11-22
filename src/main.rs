@@ -45,7 +45,7 @@ Usage: jr [OPTIONS] <FILE>
 Options:
       --dark         start with the dark theme
       --clean-cache  delete cached diagram renders and exit
-      --all          with --clean-cache, also delete the managed Chromium
+      --all          with --clean-cache, also delete Chromium and cached fonts
   -h, --help         print this help and exit
   -V, --version      print version information and exit
 
@@ -126,9 +126,8 @@ fn main() -> anyhow::Result<()> {
                 Ok((bytes, files)) => {
                     println!("removed {files} cache entries ({} MB)", bytes / 1_000_000);
                     if !all {
-                        println!("kept the managed Chromium; add --all to remove it too");
+                        println!("kept Chromium and fonts; add --all to remove them too");
                     }
-                    println!("kept the downloaded fonts");
                 }
                 Err(e) => {
                     eprintln!("clean cache: {e}");

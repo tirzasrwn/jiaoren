@@ -102,7 +102,7 @@ fn clean_cache_dir(dir: &Path, all: bool) -> std::io::Result<(u64, usize)> {
     let mut files = 0usize;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name == "fonts" || (!all && name == "chromium") {
+        if !all && (name == "chromium" || name == "fonts") {
             continue;
         }
         let path = entry.path();
@@ -831,7 +831,7 @@ mod tests {
         }
 
         #[test]
-        fn clean_cache_keeps_chromium_unless_all_is_set() {
+        fn clean_cache_keeps_browser_and_fonts_unless_all_is_set() {
             let base = std::env::temp_dir().join(format!(
                 "jiaoren-clean-{}-{}",
                 std::process::id(),
@@ -855,9 +855,9 @@ mod tests {
             assert!(base.join("fonts").join("3.4.0").join("face.ttf").exists());
             assert!(!base.join("abc.svg").exists());
             let (bytes, files) = clean_cache_dir(&base, true).unwrap();
-            assert_eq!((bytes, files), (10, 1));
+            assert_eq!((bytes, files), (14, 2));
             assert!(!base.join("chromium").exists());
-            assert!(base.join("fonts").join("3.4.0").join("face.ttf").exists());
+            assert!(!base.join("fonts").exists());
             let _ = fs::remove_dir_all(&base);
         }
 
