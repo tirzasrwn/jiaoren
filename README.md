@@ -6,7 +6,7 @@ fences drawn as real diagrams.
 
 Keyboard-first, almost no chrome, live-reloads when the file changes on disk.
 
-![Opening examples/demo.md: justified prose with inline code and links, dragging a phrase and `y` copying the selection, a vim-style `/` live search that highlights matches as you type with Ctrl+W erasing a word, Enter and `n` jumping between matches, hovering a table row, clicking the table icon to copy CSV, searching for the diagram and opening it in the zoomable popup, the wrapped code block with line numbers, and the Catppuccin dark theme](docs/assets/demo.gif)
+![Opening examples/demo.md: justified prose with inline code and links, dragging a phrase and `y` copying the selection, a vim-style `/` live search that highlights matches as you type with Ctrl+W erasing a word, Enter and `n` jumping between matches (spaces inside the query are highlighted), hovering a table row, clicking the table icon to copy CSV, searching for the diagram and opening it in the zoomable popup, the wrapped code block with line numbers, and the Catppuccin dark theme](docs/assets/demo.gif)
 
 ## Why "jiaoren"?
 
@@ -94,8 +94,8 @@ Enter commits. Search indexes the text `justify` paints: soft-wrapped source
 lines join with one space, emphasis markup is dropped, link labels and code text
 are kept, and code blocks are literal. Library-routed blocks are not searchable — blockquotes, and
 paragraphs or table cells containing inline images or raw HTML. Inline-image
-syntax in list items and headings matches its literal `!alt`. A hit made only of
-a space gap between words is not painted, so it has no highlight. Patterns are
+syntax in list items and headings matches its literal `!alt`. Spaces inside a match are part of the user's query, so the painted
+highlight covers the gap between words too. Patterns are
 smartcase — any uppercase character makes the search case-sensitive. Every hit
 is highlighted in place, with a stronger fill for the current one; `n`/`N` wrap
 around and scroll the current hit's block into view.
