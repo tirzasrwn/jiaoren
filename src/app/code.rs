@@ -107,13 +107,20 @@ impl CodeUi {
             if content.contains(pos) {
                 let rel = (pos.y - (rect.top() + top_pad)).max(0.0);
                 let hovered_row = (rel / row_h).floor() as usize;
-                if hovered_row < rows.len() {
+                if let Some(row) = rows.get(hovered_row) {
+                    // A wrapped source line owns several visual rows; the hover
+                    // covers every row that belongs to the same source line.
+                    let first = rows.iter().position(|r| r.line == row.line).unwrap_or(0);
+                    let last = rows
+                        .iter()
+                        .rposition(|r| r.line == row.line)
+                        .unwrap_or(first);
                     let row_rect = egui::Rect::from_min_size(
                         egui::Pos2::new(
                             content.left(),
-                            rect.top() + top_pad + hovered_row as f32 * row_h,
+                            rect.top() + top_pad + first as f32 * row_h,
                         ),
-                        egui::vec2(content.width(), row_h),
+                        egui::vec2(content.width(), (last + 1 - first) as f32 * row_h),
                     );
                     painter.rect_filled(row_rect, 0.0, ui.visuals().widgets.hovered.weak_bg_fill);
                 }
