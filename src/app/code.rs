@@ -100,6 +100,25 @@ impl CodeUi {
         let painter = ui.painter().clone();
         let content = egui::Rect::from_min_size(rect.min, egui::vec2(width, content_height));
         painter.rect_filled(content, 2.0, ui.visuals().code_bg_color);
+        // Like a table row: only the visual code line under the pointer gets the
+        // theme's hover fill, painted above the block background and below the
+        // glyphs/selection.
+        if let Some(pos) = ui.ctx().pointer_hover_pos() {
+            if content.contains(pos) {
+                let rel = (pos.y - (rect.top() + top_pad)).max(0.0);
+                let hovered_row = (rel / row_h).floor() as usize;
+                if hovered_row < rows.len() {
+                    let row_rect = egui::Rect::from_min_size(
+                        egui::Pos2::new(
+                            content.left(),
+                            rect.top() + top_pad + hovered_row as f32 * row_h,
+                        ),
+                        egui::vec2(content.width(), row_h),
+                    );
+                    painter.rect_filled(row_rect, 0.0, ui.visuals().widgets.hovered.weak_bg_fill);
+                }
+            }
+        }
         let color = ui.visuals().text_color();
         let number_color = ui.visuals().weak_text_color();
         let text_left = rect.left() + pad + gutter;
