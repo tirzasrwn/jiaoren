@@ -59,6 +59,7 @@ impl HeadingUi {
             // Record at the heading's text top, after the gap above, so a jump
             // does not leave a blank band.
             let block = search.record(ui, justify::search_text(&spec.text));
+            search.record_anchor(&crate::doc::slug(&spec.text), block);
             let (ranges, current) = search.highlights(block);
             let highlights = justify::MatchHighlight {
                 ranges: &ranges,

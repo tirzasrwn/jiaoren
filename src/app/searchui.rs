@@ -35,6 +35,8 @@ pub(crate) struct SearchUi {
     /// Link/copy-control rects and their intended cursor from the last
     /// completed frame. Presses here must not start a text selection.
     controls: Vec<(egui::Rect, egui::CursorIcon)>,
+    /// Heading anchors painted this frame: slug → block index.
+    anchors: std::collections::HashMap<String, usize>,
 }
 
 impl SearchUi {
@@ -52,6 +54,7 @@ impl SearchUi {
             maps: Vec::new(),
             rects: Vec::new(),
             controls: Vec::new(),
+            anchors: std::collections::HashMap::new(),
         }
     }
 
@@ -63,6 +66,7 @@ impl SearchUi {
         self.maps.clear();
         self.rects.clear();
         self.controls.clear();
+        self.anchors.clear();
     }
 
     /// Record one searchable block at the ui's current cursor position. Returns
@@ -94,6 +98,16 @@ impl SearchUi {
     /// True when `pos` is over painted text (any block rect).
     pub(crate) fn pointer_over_text(&self, pos: egui::Pos2) -> bool {
         self.rects.iter().any(|rect| rect.contains(pos))
+    }
+
+    /// Record a heading's anchor slug so `#slug` links can jump to it.
+    pub(crate) fn record_anchor(&mut self, slug: &str, block: usize) {
+        self.anchors.entry(slug.to_string()).or_insert(block);
+    }
+
+    /// Block for an anchor slug painted last frame.
+    pub(crate) fn anchor_block(&self, slug: &str) -> Option<usize> {
+        self.anchors.get(slug).copied()
     }
 
     /// Register a link/control rect that owns the press instead of selection.
@@ -274,6 +288,16 @@ mod tests {
             assert_eq!(s.block_height(0), Some(32.0));
             assert_eq!(s.block_height(1), Some(10.0));
             assert_eq!(s.block_height(2), None);
+        }
+
+        #[test]
+        fn anchors_live_for_one_frame() {
+            let mut s = SearchUi::new();
+            s.record_anchor("intro", 4);
+            assert_eq!(s.anchor_block("intro"), Some(4));
+            assert_eq!(s.anchor_block("missing"), None);
+            s.begin_frame();
+            assert_eq!(s.anchor_block("intro"), None);
         }
 
         #[test]

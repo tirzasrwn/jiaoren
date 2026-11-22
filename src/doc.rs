@@ -187,6 +187,20 @@ pub fn image_id(src: &str, alt: &str) -> String {
 }
 
 /// Stable 16-hex-character id for a heading's level, text and occurrence.
+/// GitHub-style anchor slug: lowercase, spaces to `-`, keep letters, digits,
+/// `-` and `_`; everything else is dropped.
+pub fn slug(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars().flat_map(char::to_lowercase) {
+        match c {
+            ' ' => out.push('-'),
+            c if c.is_alphanumeric() || c == '-' || c == '_' => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
 pub fn heading_id(level: u8, text: &str, occurrence: usize) -> String {
     let canon = format!("{level}\u{1f}{text}\u{1f}{occurrence}");
     let hex = blake3::hash(canon.as_bytes()).to_hex();
@@ -422,8 +436,13 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
     let mut open: Option<(char, usize, String, String)> = None;
     let mut body = String::new();
     let lines: Vec<&str> = md.split_inclusive('\n').collect();
+    let (refs, ref_lines) = collect_reference_definitions(&lines);
     let mut i = 0usize;
     while i < lines.len() {
+        if ref_lines.contains(&i) {
+            i += 1;
+            continue;
+        }
         let line = lines[i];
         let t = line.trim();
         match open.take() {
@@ -453,6 +472,18 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                     // library sees it. A table nested in a blockquote leaves
                     // egui_commonmark's table flag set, and the next event makes
                     // it swallow the rest of the document (audit T-CM-061).
+                    // A Mermaid fence inside a quote: extract it so the library
+                    // does not render it as a code block (audit T-MM-081).
+                    if let Some((block_end, body)) = quote_mermaid_block(&lines, i) {
+                        let id = diagram_id(&body);
+                        diagrams.insert(id.clone(), body.trim().to_string());
+                        if !out.is_empty() && !out.ends_with("\n\n") {
+                            out.push('\n');
+                        }
+                        out.push_str(&format!("<mermaid id=\"{id}\">\n\n"));
+                        i = block_end;
+                        continue;
+                    }
                     if let Some((block_end, table_start, table_end, mut spec)) =
                         quote_table_split(&lines, i)
                     {
@@ -500,11 +531,14 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                             // Cells are ordinary Markdown: give them the same
                             // relative-image rewrite every other line gets.
                             for c in &mut spec.header {
-                                *c = rewrite_images(&clean_text(c), doc_dir);
+                                *c = rewrite_images(&expand_links(&clean_text(c), &refs), doc_dir);
                             }
                             for row in &mut spec.rows {
                                 for c in row {
-                                    *c = rewrite_images(&clean_text(c), doc_dir);
+                                    *c = rewrite_images(
+                                        &expand_links(&clean_text(c), &refs),
+                                        doc_dir,
+                                    );
                                 }
                             }
                             let id = table_id(&spec);
@@ -567,13 +601,16 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         };
                         if let Some(end) = setext_end {
                             let level = setext_level(lines[end - 1]).unwrap_or(1);
-                            let text = clean_text(&normalize_newlines(
-                                &lines[i..end - 1]
-                                    .iter()
-                                    .map(|l| l.trim())
-                                    .collect::<Vec<_>>()
-                                    .join(" "),
-                            ));
+                            let text = expand_links(
+                                &clean_text(&normalize_newlines(
+                                    &lines[i..end - 1]
+                                        .iter()
+                                        .map(|l| l.trim())
+                                        .collect::<Vec<_>>()
+                                        .join(" "),
+                                )),
+                                &refs,
+                            );
                             let id = heading_id(level, &text, heading_seq);
                             heading_seq += 1;
                             headings.insert(
@@ -591,12 +628,15 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                             continue;
                         }
                         // CRLF safe: each line is trimmed at its end, then joined.
-                        let joined = clean_text(
-                            &lines[i..j]
-                                .iter()
-                                .map(|l| strip_hanging_indent(l.trim_end()))
-                                .collect::<Vec<_>>()
-                                .join("\n"),
+                        let joined = expand_links(
+                            &clean_text(
+                                &lines[i..j]
+                                    .iter()
+                                    .map(|l| strip_hanging_indent(l.trim_end()))
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
+                            ),
+                            &refs,
                         );
                         // A paragraph that is only one local image becomes a
                         // placeholder, like a mermaid fence. Inline images,
@@ -628,7 +668,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         continue;
                     }
                     if let Some((level, text)) = atx_heading(line) {
-                        let text = clean_text(&normalize_newlines(text));
+                        let text = expand_links(&clean_text(&normalize_newlines(text)), &refs);
                         let id = heading_id(level, &text, heading_seq);
                         heading_seq += 1;
                         headings.insert(
@@ -707,6 +747,38 @@ fn push_verbatim_block(out: &mut String, lines: &[&str]) {
     if !out.ends_with("\n\n") {
         out.push('\n');
     }
+}
+
+/// A blockquote that is exactly one mermaid fence. Returns the block end and
+/// the diagram source; mixed quote content stays on the library path.
+fn quote_mermaid_block(lines: &[&str], start: usize) -> Option<(usize, String)> {
+    let mut end = start;
+    let mut body = Vec::new();
+    while end < lines.len() {
+        let Some(rest) = strip_quote(lines[end]) else {
+            break;
+        };
+        body.push(rest);
+        end += 1;
+    }
+    if body.len() < 3 {
+        return None;
+    }
+    let (ch, len, info) = open_fence(body[0])?;
+    if info.split_whitespace().next() != Some("mermaid") {
+        return None;
+    }
+    if !is_close(body[body.len() - 1], ch, len) {
+        return None;
+    }
+    if body[1..body.len() - 1]
+        .iter()
+        .any(|l| l.trim_start().starts_with(">"))
+    {
+        return None;
+    }
+    let source = body[1..body.len() - 1].join("\n");
+    Some((end, source))
 }
 
 fn strip_quote(line: &str) -> Option<&str> {
@@ -1057,6 +1129,177 @@ fn link_inner(s: &str) -> Option<(&str, usize)> {
 /// True when `line` is one standalone image paragraph, allowing CommonMark's
 /// up-to-three-space paragraph indent. A leading tab is four columns, and four
 /// or more columns stay indented code.
+/// Collect `[id]: url "title"` definitions, returning the map and the line
+/// indices that must not be rendered. Fences are skipped.
+fn collect_reference_definitions(
+    lines: &[&str],
+) -> (
+    std::collections::HashMap<String, String>,
+    std::collections::HashSet<usize>,
+) {
+    let mut defs = std::collections::HashMap::new();
+    let mut taken = std::collections::HashSet::new();
+    let mut open: Option<(char, usize)> = None;
+    for (i, line) in lines.iter().enumerate() {
+        if let Some((ch, len)) = open {
+            if is_close(line, ch, len) {
+                open = None;
+            }
+            continue;
+        }
+        if let Some((ch, len, _)) = fence_open(line) {
+            open = Some((ch, len));
+            continue;
+        }
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix('[') else {
+            continue;
+        };
+        let Some(end) = rest.find("]:") else {
+            continue;
+        };
+        let id = normalize_ref(&rest[..end]);
+        let target = rest[end + 2..].trim();
+        let url = image_target(target).unwrap_or("");
+        if id.is_empty() || url.is_empty() {
+            continue;
+        }
+        defs.entry(id).or_insert_with(|| url.to_string());
+        taken.insert(i);
+    }
+    (defs, taken)
+}
+
+fn normalize_ref(id: &str) -> String {
+    id.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Resolve reference links/images and linkify bare URLs and emails. Code spans
+/// and existing inline links are left alone.
+fn expand_links(md: &str, refs: &std::collections::HashMap<String, String>) -> String {
+    let mut out = String::with_capacity(md.len());
+    let mut i = 0;
+    while i < md.len() {
+        let rest = &md[i..];
+        let c = rest.chars().next().unwrap();
+        if c == '`' {
+            if let Some(end) = rest[1..].find('`') {
+                out.push_str(&rest[..end + 2]);
+                i += end + 2;
+            } else {
+                out.push_str(rest);
+                break;
+            }
+            continue;
+        }
+        if c == '!' && rest[1..].starts_with('[') {
+            if let Some((text, url, used)) = reference_or_inline(rest, refs, true) {
+                out.push_str(&text);
+                i += used;
+                let _ = url;
+                continue;
+            }
+        }
+        if c == '[' {
+            if let Some((text, _url, used)) = reference_or_inline(rest, refs, false) {
+                out.push_str(&text);
+                i += used;
+                continue;
+            }
+        }
+        if let Some((len, url)) = autolink_at(rest) {
+            let text = &rest[..len];
+            out.push_str(&format!("[{text}]({url})"));
+            i += len;
+            continue;
+        }
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// `![alt][ref]`, `[text][ref]`, `[text][]`, `[ref]` or inline `[text](url)`.
+/// Returns the replacement Markdown and the bytes consumed.
+fn reference_or_inline(
+    s: &str,
+    refs: &std::collections::HashMap<String, String>,
+    image: bool,
+) -> Option<(String, String, usize)> {
+    let bang = usize::from(image);
+    let rest = s.get(bang..)?;
+    let label_end = rest.find(']')?;
+    let label = &rest[1..label_end];
+    let after = &rest[label_end + 1..];
+    if let Some(inner) = after.strip_prefix('(') {
+        let (_, end) = link_inner(inner)?;
+        let used = bang + label_end + 1 + 1 + end;
+        return Some((s[..used].to_string(), String::new(), used));
+    }
+    let (id, used_after) = if let Some(rest2) = after.strip_prefix('[') {
+        let end = rest2.find(']')?;
+        let id = if rest2[..end].is_empty() {
+            label.to_string()
+        } else {
+            rest2[..end].to_string()
+        };
+        (id, end + 2)
+    } else {
+        (label.to_string(), 0)
+    };
+    let url = refs.get(&normalize_ref(&id))?.clone();
+    let text = if image {
+        format!("![{label}]({url})")
+    } else {
+        format!("[{label}]({url})")
+    };
+    Some((text, url, bang + label_end + 1 + used_after))
+}
+
+/// A bare `http(s)://`, `www.` or email at the start of `s`: length and target.
+fn autolink_at(s: &str) -> Option<(usize, String)> {
+    let scheme = ["https://", "http://", "www."]
+        .into_iter()
+        .find(|p| s.starts_with(p));
+    if let Some(prefix) = scheme {
+        let end = s
+            .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"'))
+            .unwrap_or(s.len());
+        let mut text = &s[..end];
+        while text
+            .chars()
+            .last()
+            .is_some_and(|c| matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']'))
+        {
+            text = &text[..text.len() - 1];
+        }
+        if text.len() <= prefix.len() {
+            return None;
+        }
+        let url = if prefix == "www." {
+            format!("https://{text}")
+        } else {
+            text.to_string()
+        };
+        return Some((text.len(), url));
+    }
+    // Bare email: word@word.tld
+    let end = s
+        .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"'))
+        .unwrap_or(s.len());
+    let word = &s[..end];
+    let at = word.find('@')?;
+    let (user, domain) = (&word[..at], &word[at + 1..]);
+    if user.is_empty() || !domain.contains('.') || domain.starts_with('.') || domain.ends_with('.')
+    {
+        return None;
+    }
+    Some((word.len(), format!("mailto:{word}")))
+}
+
 fn is_standalone_image_start(line: &str) -> bool {
     let t = line.trim_end_matches(['\r', '\n']);
     let body = t.trim_start_matches([' ', '\t']);
@@ -1195,6 +1438,18 @@ mod tests {
                 "content after the quote must survive: {:?}",
                 p.markdown
             );
+        }
+    }
+
+    mod anchors {
+        use super::super::slug;
+
+        #[test]
+        fn slugs_match_github_style() {
+            assert_eq!(slug("Hello, World!"), "hello-world");
+            assert_eq!(slug("C++ & Rust"), "c--rust");
+            assert_eq!(slug("snake_case and-dash"), "snake_case-and-dash");
+            assert_eq!(slug("日本語 Heading"), "日本語-heading");
         }
     }
 
@@ -2113,6 +2368,57 @@ mod tests {
             let h = only(&p);
             assert_eq!(h.text, "Title");
             assert!(!h.text.contains('\r'));
+        }
+    }
+
+    mod links {
+        use super::super::*;
+
+        #[test]
+        fn reference_links_resolve_and_definitions_disappear() {
+            let md = "[full][r], [r], [collapsed][] and `[r]`\n\n[r]: https://example.com \"t\"\n[collapsed]: https://example.com/c\n";
+            let p = prepare(md, Path::new("/d"));
+            let out = p.paragraphs.values().next().unwrap();
+            assert!(out.contains("[full](https://example.com)"), "{out}");
+            assert!(out.contains("[r](https://example.com)"), "{out}");
+            assert!(out.contains("[collapsed](https://example.com/c)"), "{out}");
+            assert!(out.contains("`[r]`"), "code span untouched: {out}");
+            assert!(!p.markdown.contains("[r]:"), "{:?}", p.markdown);
+        }
+
+        #[test]
+        fn mermaid_inside_a_blockquote_is_extracted() {
+            let md = "> ```mermaid\n> graph TD; A-->B;\n> ```\n\nafter\n";
+            let p = prepare(md, Path::new("/d"));
+            assert_eq!(p.diagrams.len(), 1, "{:?}", p.markdown);
+            assert!(p.diagrams.values().any(|s| s.contains("graph TD; A-->B;")));
+            assert!(!p.markdown.contains("```mermaid"));
+            assert!(p.markdown.contains("<mdpara"), "{:?}", p.markdown);
+        }
+
+        #[test]
+        fn reference_images_resolve() {
+            let md = "![alt][img]\n\n[img]: pic.png\n";
+            let p = prepare(md, Path::new("/d"));
+            let spec = p.images.values().next().expect("reference image extracted");
+            assert_eq!(spec.src, "/d/pic.png");
+            assert_eq!(spec.alt, "alt");
+        }
+
+        #[test]
+        fn bare_urls_and_emails_are_linkified() {
+            let md = "see https://x.test/p. and www.example.com, mail a@b.co now\n";
+            let p = prepare(md, Path::new("/d"));
+            let out = p.paragraphs.values().next().unwrap();
+            assert!(
+                out.contains("[https://x.test/p](https://x.test/p)"),
+                "{out}"
+            );
+            assert!(
+                out.contains("[www.example.com](https://www.example.com)"),
+                "{out}"
+            );
+            assert!(out.contains("[a@b.co](mailto:a@b.co)"), "{out}");
         }
     }
 

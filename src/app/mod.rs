@@ -838,6 +838,16 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // A link clicked last frame asked for a heading anchor.
+        if let Some(slug) = ui
+            .ctx()
+            .data_mut(|d| d.remove_temp::<String>(egui::Id::new("jiaoren-anchor")))
+        {
+            if let Some(block) = self.search.borrow().anchor_block(&slug) {
+                self.jump_to = Some(block);
+                ui.ctx().request_repaint();
+            }
+        }
         // Keep egui's window chrome and the mermaid renders on one theme.
         if self.applied_theme != Some(self.theme) {
             apply_theme(ui.ctx(), self.theme);

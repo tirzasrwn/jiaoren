@@ -1452,6 +1452,14 @@ fn paint_frag(
         if safe && response.clicked() {
             ui.ctx().open_url(egui::OpenUrl::new_tab(url));
         }
+        if url.starts_with('#') && response.clicked() {
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    egui::Id::new("jiaoren-anchor"),
+                    url.trim_start_matches('#').to_string(),
+                );
+            });
+        }
         // Show the destination so a homoglyph link cannot hide where it goes.
         let response = response.on_hover_text(url);
         if safe {
