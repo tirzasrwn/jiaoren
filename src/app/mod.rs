@@ -188,7 +188,7 @@ type HtmlFn = Box<dyn Fn(&mut egui::Ui, &str)>;
 /// A transient clipboard confirmation: one plain line, bottom-left, drawn over
 /// the window margin like zathura's status bar.
 struct Status {
-    message: &'static str,
+    message: String,
     until: Instant,
 }
 
@@ -739,10 +739,15 @@ impl App {
     }
 
     /// Show a clipboard confirmation for [`STATUS_DURATION`].
-    fn set_status(&mut self, message: &'static str) {
+    fn set_status(&mut self, message: impl Into<String>) {
+        self.set_status_for(message, STATUS_DURATION);
+    }
+
+    /// Status that stays up longer than the clipboard messages.
+    fn set_status_for(&mut self, message: impl Into<String>, duration: Duration) {
         self.status = Some(Status {
-            message,
-            until: Instant::now() + STATUS_DURATION,
+            message: message.into(),
+            until: Instant::now() + duration,
         });
     }
 
@@ -809,7 +814,7 @@ impl App {
             if remaining.is_zero() {
                 self.status = None;
             } else {
-                show_status(ctx, self.theme, status.message);
+                show_status(ctx, self.theme, &status.message);
                 ctx.request_repaint_after(remaining);
             }
         }
@@ -975,10 +980,14 @@ impl eframe::App for App {
                         }
                         done = true;
                     }
-                    Ok(crate::fonts::FontMsg::Done(Err(_))) => {
+                    Ok(crate::fonts::FontMsg::Done(Err(e))) => {
+                        eprintln!("font download failed: {e}");
                         self.font_progress = None;
                         done = true;
-                        self.set_status(font_failure_status());
+                        self.set_status_for(
+                            format!("font download failed: {e}; using the system font"),
+                            Duration::from_secs(8),
+                        );
                         ctx.request_repaint();
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
