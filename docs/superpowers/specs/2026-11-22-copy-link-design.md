@@ -13,8 +13,9 @@ existing bottom-left status chip.
 - Works wherever links are painted today (paragraphs, list items, table cells,
   quotes) because they all go through `justify::paint_frag`.
 - `#anchor` links keep jumping to the heading.
-- `javascript:`, `data:`, `file:` and relative paths stay inert: no copy, no
-  cursor change. The hover tooltip still shows the raw destination.
+- `javascript:`, `data:`, `file:` and relative paths stay inert: no copy and
+  no chip. Their cursor is the same pointing hand as before this feature; the
+  hover tooltip still shows the raw destination.
 
 ## How
 

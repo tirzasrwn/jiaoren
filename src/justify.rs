@@ -1550,7 +1550,7 @@ fn paint_code_background(ui: &egui::Ui, painter: &egui::Painter, pos: Pos2, frag
     painter.rect_filled(bg, 2.0, ui.visuals().code_bg_color);
 }
 
-/// Schemes a document may hand to the OS opener. Everything else (javascript:,
+/// Schemes a link may copy to the clipboard. Everything else (javascript:,
 /// data:, file:, relative paths, bare anchors) stays inert text.
 pub(crate) fn link_is_safe(url: &str) -> bool {
     let lower = url.trim().to_ascii_lowercase();
@@ -1613,6 +1613,13 @@ mod tests {
                 )
             });
             assert!(copied, "no CopyText command");
+            assert!(click_link(&ctx, "mailto:a@b.c"));
+            let mailed = ctx.output(|o| {
+                o.commands
+                    .iter()
+                    .any(|c| matches!(c, egui::OutputCommand::CopyText(t) if t == "mailto:a@b.c"))
+            });
+            assert!(mailed, "no mailto CopyText command");
             let flagged = ctx
                 .data_mut(|d| d.remove_temp::<()>(egui::Id::new(LINK_COPIED)))
                 .is_some();

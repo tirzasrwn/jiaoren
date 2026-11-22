@@ -1042,10 +1042,6 @@ impl eframe::App for App {
                 ui.ctx().request_repaint();
             }
         }
-        // A link clicked last frame copied its URL.
-        if take_link_copied(ui.ctx()) {
-            self.set_status("link copied");
-        }
         // Keep egui's window chrome and the mermaid renders on one theme.
         if self.applied_theme != Some(self.theme) {
             apply_theme(ui.ctx(), self.theme);
@@ -1414,6 +1410,11 @@ impl eframe::App for App {
         }
         if self.code.borrow_mut().take_copied() {
             self.set_status("copied code");
+        }
+        // A link click during this frame's document paint copied its URL; show
+        // the chip on the same frame instead of waiting for the next repaint.
+        if take_link_copied(ui.ctx()) {
+            self.set_status("link copied");
         }
         self.draw_status(ui.ctx());
         // Final cursor wins over the scroll area's Grab: controls first, text
