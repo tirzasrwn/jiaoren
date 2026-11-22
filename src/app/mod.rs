@@ -557,7 +557,14 @@ impl App {
                 let mut send = |pct| {
                     let _ = tx.send(crate::fonts::FontMsg::Progress(pct));
                 };
-                let result = crate::fonts::download_cached(&root, &mut send);
+                // One retry covers a dropped connection or a truncated body;
+                // curl itself already retries transient network errors.
+                let mut result = crate::fonts::download_cached(&root, &mut send);
+                if result.is_err() {
+                    std::thread::sleep(Duration::from_secs(1));
+                    send(0);
+                    result = crate::fonts::download_cached(&root, &mut send);
+                }
                 let _ = tx.send(crate::fonts::FontMsg::Done(result));
             });
             font_rx = Some(rx);
@@ -981,13 +988,20 @@ impl eframe::App for App {
                         done = true;
                     }
                     Ok(crate::fonts::FontMsg::Done(Err(e))) => {
-                        eprintln!("font download failed: {e}");
+                        // Another jr instance may have finished the cache while
+                        // this download failed; prefer that over a scary status.
+                        if let Some(defs) = crate::fonts::cached(&crate::mermaid::cache_root()) {
+                            ctx.set_fonts(defs);
+                            self.set_status("font ready");
+                        } else {
+                            eprintln!("font download failed: {e}");
+                            self.set_status_for(
+                                format!("font download failed: {e}; using the system font"),
+                                Duration::from_secs(8),
+                            );
+                        }
                         self.font_progress = None;
                         done = true;
-                        self.set_status_for(
-                            format!("font download failed: {e}; using the system font"),
-                            Duration::from_secs(8),
-                        );
                         ctx.request_repaint();
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
