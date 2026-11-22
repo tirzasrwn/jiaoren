@@ -231,6 +231,16 @@ fn status_area(ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui)) {
         });
 }
 
+/// One-line status chip in the bottom-left corner.
+fn show_status(ctx: &egui::Context, theme: Theme, text: &str) {
+    status_area(ctx, |ui| {
+        ui.add(
+            egui::Label::new(egui::RichText::new(text).color(status_color(theme)))
+                .wrap_mode(egui::TextWrapMode::Extend),
+        );
+    });
+}
+
 /// Plain bottom-left `/query` line: monospace, on the same solid chip as the
 /// status so it stays legible over the document, with a blinking block cursor
 /// at the end and the query tail shown when the line is longer than the window.
@@ -748,11 +758,16 @@ impl App {
             }
         }
         if let Some(result) = done {
+            let had_progress = self.download_status.is_some();
             self.download_rx = None;
             self.download_status = None;
             self.diagrams.borrow_mut().set_ready(true);
-            if let Err(msg) = result {
-                self.chromium_error = Some(msg);
+            match result {
+                Ok(()) if had_progress && self.font_rx.is_none() => {
+                    self.set_status("downloads ready");
+                }
+                Err(msg) => self.chromium_error = Some(msg),
+                Ok(()) => {}
             }
             ctx.request_repaint();
         }
@@ -771,50 +786,32 @@ impl App {
             prompt_area(ctx, line);
             return;
         }
+        if let Some(text) = self.search.borrow().state.status_text() {
+            show_status(ctx, self.theme, &text);
+            return;
+        }
+        // Active downloads beat transient clipboard/ready messages: the user
+        // should always see a running download's percentage.
+        if let Some(text) = &self.download_status {
+            let line = match self.font_progress {
+                Some(pct) => format!("{text} · {}", font_progress_text(pct)),
+                None => text.clone(),
+            };
+            show_status(ctx, self.theme, &line);
+            return;
+        }
+        if let Some(pct) = self.font_progress {
+            show_status(ctx, self.theme, &font_progress_text(pct));
+            return;
+        }
         if let Some(status) = &self.status {
             let remaining = status.until.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 self.status = None;
             } else {
-                let message = status.message;
-                status_area(ctx, |ui| {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(message).color(status_color(self.theme)),
-                        )
-                        .wrap_mode(egui::TextWrapMode::Extend),
-                    );
-                });
+                show_status(ctx, self.theme, status.message);
                 ctx.request_repaint_after(remaining);
-                return;
             }
-        }
-        if let Some(text) = self.search.borrow().state.status_text() {
-            status_area(ctx, |ui| {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(text).color(status_color(self.theme)))
-                        .wrap_mode(egui::TextWrapMode::Extend),
-                );
-            });
-            return;
-        }
-        if let Some(text) = &self.download_status {
-            status_area(ctx, |ui| {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(text).color(status_color(self.theme)))
-                        .wrap_mode(egui::TextWrapMode::Extend),
-                );
-            });
-            return;
-        }
-        if let Some(pct) = self.font_progress {
-            let text = font_progress_text(pct);
-            status_area(ctx, |ui| {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(text).color(status_color(self.theme)))
-                        .wrap_mode(egui::TextWrapMode::Extend),
-                );
-            });
         }
     }
 
@@ -970,7 +967,12 @@ impl eframe::App for App {
                         // `set_fonts` takes effect on the next pass; ask for it
                         // or the swap waits for the next input event.
                         ctx.request_repaint();
-                        self.font_progress = None;
+                        if self.font_progress.take().is_some() && self.download_rx.is_none() {
+                            // Fast downloads can finish before the first frame;
+                            // leave a visible confirmation once nothing else is
+                            // still downloading.
+                            self.set_status("font ready");
+                        }
                         done = true;
                     }
                     Ok(crate::fonts::FontMsg::Done(Err(_))) => {
