@@ -90,7 +90,7 @@ fn older_than(
 /// managed Chromium; otherwise the browser is kept so the next document does
 /// not need a 132 MB re-download. Returns `(bytes, files)` removed.
 pub fn clean_cache(all: bool) -> std::io::Result<(u64, usize)> {
-    clean_cache_dir(&dirs_cache().join("jiaoren"), all)
+    clean_cache_dir(&cache_root(), all)
 }
 
 fn clean_cache_dir(dir: &Path, all: bool) -> std::io::Result<(u64, usize)> {
@@ -198,7 +198,7 @@ fn clean_error(raw: &str) -> String {
 impl Renderer {
     /// Renderer using the user cache dir, with no Chromium discovered yet.
     pub fn new() -> Self {
-        let cache_dir = dirs_cache().join("jiaoren");
+        let cache_dir = cache_root();
         fs::create_dir_all(&cache_dir).ok();
         // Startup cleanup: renders and scripts from older Mermaid or Chromium
         // versions are never read again.
@@ -363,6 +363,11 @@ impl Renderer {
             Err(RenderError::MermaidJs("failed to download mermaid.min.js (network needed on first run only; set JIAOREN_MERMAID_JS to use an existing copy)".to_string()))
         }
     }
+}
+
+/// jiaoren's own cache directory (`<XDG_CACHE_HOME or ~/.cache>/jiaoren`).
+pub(crate) fn cache_root() -> PathBuf {
+    dirs_cache().join("jiaoren")
 }
 
 fn dirs_cache() -> PathBuf {
