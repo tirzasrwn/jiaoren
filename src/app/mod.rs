@@ -986,6 +986,7 @@ impl eframe::App for App {
                             self.set_status("font ready");
                         }
                         done = true;
+                        break;
                     }
                     Ok(crate::fonts::FontMsg::Done(Err(e))) => {
                         // Another jr instance may have finished the cache while
@@ -1003,6 +1004,7 @@ impl eframe::App for App {
                         self.font_progress = None;
                         done = true;
                         ctx.request_repaint();
+                        break;
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
