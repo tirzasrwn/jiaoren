@@ -144,14 +144,19 @@ impl ParagraphUi {
         // they are not searchable: skip recording rather than index text that is
         // not on screen.
         if paragraph_needs_library(&source) {
-            CommonMarkViewer::new().show(ui, &mut self.cache, &source);
+            let gap = crate::justify::block_gap(ui);
+            ui.vertical(|ui| {
+                CommonMarkViewer::new().show(ui, &mut self.cache, &source);
+                ui.add_space(gap);
+            });
             return;
         }
         let block = search.record(ui, crate::justify::search_text(&source));
         let (ranges, current) = search.highlights(block);
         let selection = search.selection_range(block);
         let runs = crate::justify::parse_inline(&source);
-        let painted = crate::justify::draw(
+        let gap = crate::justify::block_gap(ui);
+        let painted = crate::justify::draw_spaced(
             ui,
             &runs,
             self.column,
@@ -160,6 +165,7 @@ impl ParagraphUi {
                 current,
                 selection,
             },
+            gap,
         );
         search.set_height(block, painted.height);
         search.set_rect(block, painted.rect);

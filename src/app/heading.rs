@@ -47,7 +47,7 @@ impl HeadingUi {
         // Vertical breathing room in body rows. The gap above stays at one row
         // (it matches the old `<mdspace>` spacing); the gap below is tightened
         // so a heading does not float away from the body that belongs to it.
-        let before = row_h;
+        let before = row_h * 0.55;
         let after = row_h * 1.2;
         // The html hook runs in a wrapping left-to-right layout, where a bare
         // `add_space` would advance horizontally; the vertical wrapper makes the

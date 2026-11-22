@@ -90,12 +90,16 @@ impl CodeUi {
         let content = content_width(self.column, gutter, pad, cell);
         let rows = layout_rows(&spec.text, content, &|s| line_width(ui, s, &mono));
         let width = self.column.max(gutter + cell);
-        let height = rows.len().max(1) as f32 * row_h + top_pad + pad;
-        let (_, rect) = ui.allocate_space(egui::vec2(width, height));
-        search.set_height(block, height);
+        let content_height = rows.len().max(1) as f32 * row_h + top_pad + pad;
+        let gap = crate::justify::block_gap(ui);
+        // Reserve the inter-block gap inside the allocation; the background and
+        // the block's recorded height stay on the content area.
+        let (_, rect) = ui.allocate_space(egui::vec2(width, content_height + gap));
+        search.set_height(block, content_height);
         search.set_rect(block, rect);
         let painter = ui.painter().clone();
-        painter.rect_filled(rect, 2.0, ui.visuals().code_bg_color);
+        let content = egui::Rect::from_min_size(rect.min, egui::vec2(width, content_height));
+        painter.rect_filled(content, 2.0, ui.visuals().code_bg_color);
         let color = ui.visuals().text_color();
         let number_color = ui.visuals().weak_text_color();
         let text_left = rect.left() + pad + gutter;

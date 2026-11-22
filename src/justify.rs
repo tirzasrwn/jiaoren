@@ -1065,6 +1065,7 @@ pub(crate) fn local_ranges(
 /// Paint `runs` as a fully justified paragraph in a `column`-wide slot starting
 /// at the current cursor. Every line but the last (and any line without a
 /// stretchable gap) is spread so its right edge lands on `cursor.left() + column`.
+#[allow(dead_code)] // kept as the plain justify entry point; paragraphs use draw_spaced
 pub fn draw(
     ui: &mut egui::Ui,
     runs: &[Run],
@@ -1103,6 +1104,7 @@ pub fn draw_indented(
         Some((indent, galley)),
         None,
         highlights,
+        0.0,
     )
 }
 
@@ -1138,6 +1140,7 @@ pub fn draw_with(
         None,
         Some((font, color)),
         highlights,
+        0.0,
     )
 }
 
@@ -1148,7 +1151,24 @@ fn paint(
     justify: bool,
     highlights: MatchHighlight<'_>,
 ) -> PaintedBlock {
-    paint_at(ui, runs, column, justify, 0.0, None, None, highlights)
+    paint_at(ui, runs, column, justify, 0.0, None, None, highlights, 0.0)
+}
+
+/// Like [`draw`] but reserves `gap` points of blank space below the paragraph,
+/// so stacked blocks breathe. The painted/recorded rect excludes the gap.
+pub fn draw_spaced(
+    ui: &mut egui::Ui,
+    runs: &[Run],
+    column: f32,
+    highlights: MatchHighlight<'_>,
+    gap: f32,
+) -> PaintedBlock {
+    paint_at(ui, runs, column, true, 0.0, None, None, highlights, gap)
+}
+
+/// Vertical gap between top-level blocks (paragraphs, code, headings).
+pub(crate) fn block_gap(ui: &egui::Ui) -> f32 {
+    ui.text_style_height(&TextStyle::Body) * 0.7
 }
 
 pub(crate) fn body_font(ui: &egui::Ui) -> FontId {
@@ -1195,6 +1215,7 @@ fn paint_at(
     marker: Option<(f32, Arc<Galley>)>,
     face: Option<(FontId, Color32)>,
     highlights: MatchHighlight<'_>,
+    trailing_gap: f32,
 ) -> PaintedBlock {
     let column = column.max(0.0);
     if column <= 0.0 {
@@ -1252,7 +1273,9 @@ fn paint_at(
     } else {
         column
     };
-    let (_, rect) = ui.allocate_space(egui::vec2(offset + reserved, used_height));
+    let (_, allocated) =
+        ui.allocate_space(egui::vec2(offset + reserved, used_height + trailing_gap));
+    let rect = egui::Rect::from_min_size(allocated.min, egui::vec2(allocated.width(), used_height));
     let mut painter = ui.painter().clone();
     if !justify {
         let clip = egui::Rect::from_min_size(rect.min, egui::vec2(column, used_height));
