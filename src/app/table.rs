@@ -510,7 +510,9 @@ fn cell_width(widths: &[f32], i: usize) -> f32 {
 /// express them. Everything else (plain text, inline styles, code, links) goes
 /// through the token-splitting left-aligned painter so long paths wrap.
 fn cell_needs_library_fallback(md: &str) -> bool {
-    md.contains("![") || md.contains('<')
+    // A lone local image is drawn by our own cell renderer; mixed text+image
+    // cells still need the library.
+    md.contains('<') || (md.contains("![") && crate::doc::parse_standalone_image(md).is_none())
 }
 
 /// Render one cell, capped at `w` so text wraps and inline formatting (bold,
@@ -530,6 +532,19 @@ fn render_cell(
     // let wrapped text paint over the next row.
     ui.vertical(|ui| {
         ui.set_width(w);
+        if let Some((_alt, target)) = crate::doc::parse_standalone_image(cell_md) {
+            if target.starts_with("file://") {
+                let box_size = egui::vec2(w, (w * 0.6).clamp(40.0, 240.0));
+                let image = egui::Image::new(target.as_str()).fit_to_exact_size(box_size);
+                let response = ui.add(image);
+                return crate::justify::PaintedBlock {
+                    height: response.rect.height(),
+                    rect: response.rect,
+                    chars: Vec::new(),
+                    interactives: Vec::new(),
+                };
+            }
+        }
         if cell_needs_library_fallback(cell_md) {
             CommonMarkViewer::new().show(ui, cache, cell_md);
             return crate::justify::PaintedBlock {

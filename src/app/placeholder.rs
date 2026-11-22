@@ -8,6 +8,7 @@ pub(crate) enum Placeholder<'a> {
     List(&'a str),
     Table(&'a str),
     Paragraph(&'a str),
+    Quote(&'a str),
     Image(&'a str),
     Heading(&'a str),
     Code(&'a str),
@@ -21,6 +22,7 @@ pub(crate) fn parse(html: &str) -> Option<Placeholder<'_>> {
         .map(Placeholder::Paragraph)
         .or_else(|| parse_kind(html, "<mdtable").map(Placeholder::Table))
         .or_else(|| parse_kind(html, "<mdlist").map(Placeholder::List))
+        .or_else(|| parse_kind(html, "<mdquote").map(Placeholder::Quote))
         .or_else(|| parse_kind(html, "<mdheading").map(Placeholder::Heading))
         .or_else(|| parse_kind(html, "<mdcode").map(Placeholder::Code))
         .or_else(|| parse_kind(html, "<mdimg").map(Placeholder::Image))

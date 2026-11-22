@@ -23,6 +23,7 @@ mod image;
 mod keys;
 mod list;
 mod placeholder;
+mod quote;
 mod raster;
 mod searchui;
 mod selection;
@@ -449,6 +450,7 @@ pub(crate) struct App {
     tables: Rc<RefCell<TableUi>>,
     lists: Rc<RefCell<ListUi>>,
     paragraphs: Rc<RefCell<ParagraphUi>>,
+    quotes: Rc<RefCell<quote::QuoteUi>>,
     images: Rc<RefCell<ImageUi>>,
     headings: Rc<RefCell<HeadingUi>>,
     code: Rc<RefCell<CodeUi>>,
@@ -525,6 +527,7 @@ impl App {
         let tables = Rc::new(RefCell::new(TableUi::new(prepared.tables.clone())));
         let lists = Rc::new(RefCell::new(ListUi::new(prepared.lists.clone())));
         let paragraphs = Rc::new(RefCell::new(ParagraphUi::new(prepared.paragraphs.clone())));
+        let quotes = Rc::new(RefCell::new(quote::QuoteUi::new(prepared.quotes.clone())));
         let images = Rc::new(RefCell::new(ImageUi::new(prepared.images.clone())));
         let headings = Rc::new(RefCell::new(HeadingUi::new(prepared.headings.clone())));
         let code = Rc::new(RefCell::new(CodeUi::new(prepared.code.clone())));
@@ -534,6 +537,7 @@ impl App {
             let t = Rc::clone(&tables);
             let l = Rc::clone(&lists);
             let p = Rc::clone(&paragraphs);
+            let q = Rc::clone(&quotes);
             let i = Rc::clone(&images);
             let h = Rc::clone(&headings);
             let c = Rc::clone(&code);
@@ -542,6 +546,7 @@ impl App {
                 Some(Placeholder::Paragraph(id)) => {
                     p.borrow_mut().show(ui, id, &mut s.borrow_mut())
                 }
+                Some(Placeholder::Quote(id)) => q.borrow_mut().show(ui, id, &mut s.borrow_mut()),
                 Some(Placeholder::Table(id)) => t.borrow_mut().show(ui, id, &mut s.borrow_mut()),
                 Some(Placeholder::List(id)) => l.borrow_mut().show(ui, id, &mut s.borrow_mut()),
                 Some(Placeholder::Heading(id)) => h.borrow_mut().show(ui, id, &mut s.borrow_mut()),
@@ -590,6 +595,7 @@ impl App {
             tables,
             lists,
             paragraphs,
+            quotes,
             images,
             headings,
             code,
@@ -637,6 +643,7 @@ impl App {
         self.paragraphs
             .borrow_mut()
             .reset(self.prepared.paragraphs.clone());
+        self.quotes.borrow_mut().reset(self.prepared.quotes.clone());
         self.images.borrow_mut().reset(self.prepared.images.clone());
         self.headings
             .borrow_mut()
@@ -1160,6 +1167,7 @@ impl eframe::App for App {
                         self.tables.borrow_mut().begin_frame();
                         self.lists.borrow_mut().begin_frame(col);
                         self.paragraphs.borrow_mut().begin_frame(col);
+                        self.quotes.borrow_mut().begin_frame(col);
                         self.headings.borrow_mut().begin_frame(col);
                         self.code.borrow_mut().begin_frame(col);
                         self.diagrams.borrow_mut().begin_frame(col);

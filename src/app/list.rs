@@ -61,7 +61,7 @@ impl ListUi {
                     ListKind::Bullet if item.depth % 2 == 1 => Marker::Hollow,
                     ListKind::Bullet => Marker::Bullet,
                     ListKind::Ordered(n, delim) => Marker::Number(n, delim),
-                    ListKind::Task(done) => Marker::Task(done),
+                    ListKind::Task { done, ordered } => Marker::Task(done, ordered),
                 };
                 let runs = justify::parse_inline(&item.text);
                 let indent = justify::list_indent(item.depth, space);

@@ -48,6 +48,8 @@ pub struct Prepared {
     pub lists: HashMap<String, ListSpec>,
     /// Paragraph Markdown keyed by [`paragraph_id`].
     pub paragraphs: HashMap<String, String>,
+    /// Nested blockquotes keyed by their id.
+    pub quotes: HashMap<String, QuoteSpec>,
     /// Standalone local images keyed by [`image_id`].
     pub images: HashMap<String, ImageSpec>,
     /// Headings keyed by [`heading_id`].
@@ -91,6 +93,25 @@ pub struct ImageSpec {
     pub alt: String,
 }
 
+/// A blockquote block: each line with its nesting depth and inline Markdown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuoteSpec {
+    pub lines: Vec<(u8, String)>,
+}
+
+/// Stable id for a quote block.
+pub fn quote_id(spec: &QuoteSpec) -> String {
+    let mut canon = String::new();
+    for (depth, text) in &spec.lines {
+        canon.push(depth.to_string().chars().next().unwrap_or('0'));
+        canon.push('\u{1f}');
+        canon.push_str(text);
+        canon.push('\u{1e}');
+    }
+    let hex = blake3::hash(canon.as_bytes()).to_hex();
+    hex.as_str()[..16].to_string()
+}
+
 /// A top-level list block, parsed out of the Markdown before rendering.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListSpec {
@@ -116,8 +137,12 @@ pub enum ListKind {
     Bullet,
     /// Ordered marker: literal number and `.`/`)` delimiter from the source.
     Ordered(u64, char),
-    /// Task marker; `true` when the box is checked.
-    Task(bool),
+    /// Task marker: checkbox state plus the ordered number/delimiter that
+    /// opened it, when present.
+    Task {
+        done: bool,
+        ordered: Option<(u64, char)>,
+    },
 }
 
 /// A top-level GFM table, parsed out of the Markdown before rendering.
@@ -168,7 +193,13 @@ pub fn list_id(spec: &ListSpec) -> String {
                 canon.push_str(&number.to_string());
                 canon.push(delim);
             }
-            ListKind::Task(done) => canon.push(if done { 'x' } else { ' ' }),
+            ListKind::Task { done, ordered } => {
+                canon.push(if done { 'x' } else { ' ' });
+                if let Some((n, d)) = ordered {
+                    canon.push_str(&n.to_string());
+                    canon.push(d);
+                }
+            }
         }
         canon.push('\u{1f}');
         canon.push_str(item.text.trim_end());
@@ -414,6 +445,23 @@ fn is_paragraph_continuation(line: &str) -> bool {
 /// Drop the 1–3 space hanging indent CommonMark allows on paragraph
 /// continuation lines, so it never becomes a stray gap when the paragraph is
 /// re-wrapped by the justified painter.
+/// A paragraph line with trailing CR/LF removed. Two or more trailing spaces
+/// mean a hard break: they become a backslash before the join newline, which
+/// [`crate::justify::parse_inline`] turns into a forced break.
+fn paragraph_line(line: &str) -> String {
+    let t = line.trim_end_matches(['\r', '\n']);
+    let body = strip_hanging_indent(t);
+    // Trailing spaces on an image-only line are layout noise, not a break.
+    if parse_standalone_image(body.trim()).is_some() {
+        return body.trim().to_string();
+    }
+    if body.ends_with("  ") {
+        format!("{}\\", body.trim_end())
+    } else {
+        body.to_string()
+    }
+}
+
 fn strip_hanging_indent(line: &str) -> &str {
     let n = line.len() - line.trim_start_matches(' ').len();
     &line[n.min(3)..]
@@ -427,6 +475,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
     let mut tables = HashMap::new();
     let mut lists = HashMap::new();
     let mut paragraphs = HashMap::new();
+    let mut quotes = HashMap::new();
     let mut images = HashMap::new();
     let mut headings = HashMap::new();
     let mut code = HashMap::new();
@@ -562,6 +611,8 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                     // paragraph. Items the library must own (images, raw HTML)
                     // leave the whole block verbatim.
                     if let Some((j, spec)) = parse_list_block(&lines, i) {
+                        // Blocks we cannot nest (fenced code) go to the library,
+                        // which renders them inside the item properly.
                         let fallback = spec
                             .items
                             .iter()
@@ -633,7 +684,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                             &clean_text(
                                 &lines[i..j]
                                     .iter()
-                                    .map(|l| strip_hanging_indent(l.trim_end()))
+                                    .map(|l| paragraph_line(l))
                                     .collect::<Vec<_>>()
                                     .join("\n"),
                             ),
@@ -668,15 +719,20 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         i = j;
                         continue;
                     }
-                    // Lazy continuation of a quote: a following unindented line
-                    // stays inside it (audit T-CM-060).
+                    // Blockquote: one placeholder, nested depths kept so the
+                    // renderer can draw one bar per level. Lazy continuation
+                    // lines are folded into the last quoted line.
                     if strip_quote(line).is_some() {
                         let mut end = i;
-                        while end < lines.len() && strip_quote(lines[end]).is_some() {
+                        let mut spec = QuoteSpec { lines: Vec::new() };
+                        while end < lines.len() {
+                            let Some((depth, rest)) = quote_parts(lines[end]) else {
+                                break;
+                            };
+                            spec.lines
+                                .push((depth, expand_links(&clean_text(&rest), &refs)));
                             end += 1;
                         }
-                        let last_nonblank = end > i
-                            && strip_quote(lines[end - 1]).is_some_and(|s| !s.trim().is_empty());
                         let mut lazy_end = end;
                         while lazy_end < lines.len() {
                             let l = lines[lazy_end];
@@ -686,16 +742,28 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                             {
                                 break;
                             }
+                            if let Some(last) = spec.lines.last_mut() {
+                                if !last.1.is_empty() {
+                                    last.1.push(' ');
+                                }
+                                last.1.push_str(&expand_links(&clean_text(l.trim()), &refs));
+                            }
                             lazy_end += 1;
                         }
-                        if last_nonblank && lazy_end > end {
-                            for l in &lines[i..end] {
-                                out.push_str(l);
+                        // Complex quote content (fences, headings, lists,
+                        // tables) keeps the library path so those blocks keep
+                        // working; plain/nested text uses the quote renderer.
+                        let complex = spec.lines.iter().any(|(_, text)| {
+                            let t = text.trim();
+                            !t.is_empty() && (is_block_boundary(text) || text.contains('|'))
+                        });
+                        if !complex {
+                            let id = quote_id(&spec);
+                            quotes.insert(id.clone(), spec);
+                            if !out.is_empty() && !out.ends_with("\n\n") {
+                                out.push('\n');
                             }
-                            for l in &lines[end..lazy_end] {
-                                out.push_str("> ");
-                                out.push_str(l);
-                            }
+                            out.push_str(&format!("<mdquote id=\"{id}\">\n\n"));
                             i = lazy_end;
                             continue;
                         }
@@ -758,6 +826,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
         tables,
         lists,
         paragraphs,
+        quotes,
         images,
         headings,
         code,
@@ -812,6 +881,17 @@ fn quote_mermaid_block(lines: &[&str], start: usize) -> Option<(usize, String)> 
     }
     let source = body[1..body.len() - 1].join("\n");
     Some((end, source))
+}
+
+/// Depth and text of one quote line: counts leading `>` markers.
+fn quote_parts(line: &str) -> Option<(u8, String)> {
+    let mut text = line.trim_start();
+    let mut depth = 0u8;
+    while let Some(rest) = text.strip_prefix('>') {
+        depth = depth.saturating_add(1);
+        text = rest.strip_prefix(' ').unwrap_or(rest);
+    }
+    (depth > 0).then(|| (depth, text.trim_end().to_string()))
 }
 
 fn strip_quote(line: &str) -> Option<&str> {
@@ -1063,6 +1143,11 @@ fn parse_list_block(lines: &[&str], start: usize) -> Option<(usize, ListSpec)> {
             continue;
         }
         let indent = line.len() - line.trim_start_matches(' ').len();
+        // A fence inside an item becomes a top-level code block; the library
+        // cannot place a block inside a list item.
+        if indent >= 1 && fence_open(line).is_some() {
+            break;
+        }
         if indent >= 2 {
             if !cur.text.is_empty() {
                 cur.text.push(' ');
@@ -1118,7 +1203,13 @@ fn list_marker(line: &str) -> Option<(usize, ListKind, &str)> {
     }
     let rest = &s[end..];
     match task_suffix(rest) {
-        Some((done, text)) => Some((indent, ListKind::Task(done), text)),
+        Some((done, text)) => {
+            let ordered = match kind {
+                ListKind::Ordered(n, d) => Some((n, d)),
+                _ => None,
+            };
+            Some((indent, ListKind::Task { done, ordered }, text))
+        }
         None => Some((indent, kind, rest.trim_start())),
     }
 }
@@ -1367,7 +1458,7 @@ fn image_target(inner: &str) -> Option<&str> {
 /// Parse `source` as exactly one Markdown image, optionally wrapped in
 /// whitespace/newlines. Returns its alt text and link target with any
 /// `"title"` stripped; text outside the image makes this return `None`.
-fn parse_standalone_image(source: &str) -> Option<(String, String)> {
+pub(crate) fn parse_standalone_image(source: &str) -> Option<(String, String)> {
     let s = source.trim();
     let rest = s.strip_prefix("![")?;
     let mid = rest.find("](")?;
@@ -1509,6 +1600,18 @@ mod tests {
         }
     }
 
+    mod hard_break {
+        use super::super::prepare;
+        use std::path::Path;
+
+        #[test]
+        fn two_trailing_spaces_become_a_forced_break() {
+            let p = prepare("first line  \nsecond line\n", Path::new("/d"));
+            let out = p.paragraphs.values().next().unwrap();
+            assert!(out.contains("first line\\\nsecond line"), "{out:?}");
+        }
+    }
+
     mod quote_lazy {
         use super::super::prepare;
         use std::path::Path;
@@ -1516,7 +1619,9 @@ mod tests {
         #[test]
         fn unindented_line_stays_inside_a_quote() {
             let p = prepare("> quote line\nlazy line\n\nnext para\n", Path::new("/d"));
-            assert!(p.markdown.contains("> lazy line"), "{:?}", p.markdown);
+            let spec = p.quotes.values().next().expect("quote extracted");
+            assert_eq!(spec.lines[0].1, "quote line lazy line");
+            assert!(p.markdown.contains("<mdquote"), "{:?}", p.markdown);
             assert!(p.markdown.contains("<mdpara"), "{:?}", p.markdown);
         }
     }
@@ -1646,8 +1751,11 @@ mod tests {
             assert!(indented.code.is_empty());
             assert!(indented.markdown.contains("    ```"));
             let listed = prepare("- item\n  ```\n  code\n  ```\n", Path::new("/d"));
-            assert!(listed.code.is_empty());
+            // The fence becomes a top-level code block instead of collapsing
+            // into the item text; the item/list itself still extracts.
+            assert_eq!(listed.code.len(), 1);
             assert_eq!(listed.lists.len(), 1);
+            assert!(listed.markdown.contains("<mdcode"));
         }
 
         #[test]
@@ -1925,8 +2033,20 @@ mod tests {
             let all: Vec<_> = specs.iter().flat_map(|s| &s.items).collect();
             assert!(matches!(all[0].kind, ListKind::Ordered(3, '.')));
             assert!(matches!(all[1].kind, ListKind::Ordered(4, '.')));
-            assert_eq!(all[2].kind, ListKind::Task(true));
-            assert_eq!(all[3].kind, ListKind::Task(false));
+            assert_eq!(
+                all[2].kind,
+                ListKind::Task {
+                    done: true,
+                    ordered: None
+                }
+            );
+            assert_eq!(
+                all[3].kind,
+                ListKind::Task {
+                    done: false,
+                    ordered: None
+                }
+            );
         }
 
         #[test]
@@ -2024,9 +2144,21 @@ mod tests {
         fn task_suffix_accepts_one_to_four_spaces_or_tab() {
             let p = prepare("-  [x] a\n-\t[ ] b\n", Path::new("/d"));
             let spec = p.lists.values().next().unwrap();
-            assert_eq!(spec.items[0].kind, ListKind::Task(true));
+            assert_eq!(
+                spec.items[0].kind,
+                ListKind::Task {
+                    done: true,
+                    ordered: None
+                }
+            );
             assert_eq!(spec.items[0].text, "a");
-            assert_eq!(spec.items[1].kind, ListKind::Task(false));
+            assert_eq!(
+                spec.items[1].kind,
+                ListKind::Task {
+                    done: false,
+                    ordered: None
+                }
+            );
             assert_eq!(spec.items[1].text, "b");
         }
 
@@ -2038,13 +2170,38 @@ mod tests {
         }
 
         #[test]
+        fn ordered_task_item_keeps_its_number() {
+            let p = prepare("1. [x] done\n", Path::new("/d"));
+            let spec = p.lists.values().next().unwrap();
+            assert_eq!(
+                spec.items[0].kind,
+                ListKind::Task {
+                    done: true,
+                    ordered: Some((1, '.'))
+                }
+            );
+        }
+
+        #[test]
         fn nested_task_item_keeps_depth_and_state() {
             let p = prepare("- [ ] induk\n  - [x] anak\n", Path::new("/d"));
             let spec = p.lists.values().next().unwrap();
-            assert_eq!(spec.items[0].kind, ListKind::Task(false));
+            assert_eq!(
+                spec.items[0].kind,
+                ListKind::Task {
+                    done: false,
+                    ordered: None
+                }
+            );
             assert_eq!(
                 (spec.items[1].depth, spec.items[1].kind),
-                (1, ListKind::Task(true))
+                (
+                    1,
+                    ListKind::Task {
+                        done: true,
+                        ordered: None
+                    }
+                )
             );
         }
 

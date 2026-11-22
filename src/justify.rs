@@ -33,6 +33,8 @@ pub enum RunKind {
     Strike,
     /// Link text, carrying the target URL.
     Link(String),
+    /// A forced line break (`  ` + newline or `\\` + newline).
+    Break,
 }
 
 /// Parse the inline Markdown the viewer supports. Single left-to-right scan:
@@ -50,6 +52,15 @@ pub fn parse_inline(md: &str) -> Vec<Run> {
 
         if c == '\\' {
             if let Some(next) = rest[1..].chars().next() {
+                if next == '\n' {
+                    flush_text(&mut runs, &mut text);
+                    runs.push(Run {
+                        text: String::new(),
+                        kind: RunKind::Break,
+                    });
+                    i += 2;
+                    continue;
+                }
                 text.push(next);
                 i += 1 + next.len_utf8();
             } else {
@@ -383,7 +394,20 @@ fn combine(outer: &RunKind, inner: RunKind) -> RunKind {
 /// a lone over-wide word gets its own line and overflows instead of being cut.
 /// `gaps[i]` is the gap before word `i` (ignored at the start of a line), so
 /// pieces of one token can be glued together with a zero gap.
+#[cfg(test)]
 pub fn wrap_words(widths: &[f32], gaps: &[f32], column: f32) -> Vec<Vec<usize>> {
+    let breaks = vec![false; widths.len()];
+    wrap_words_with_breaks(widths, gaps, &breaks, column)
+}
+
+/// [`wrap_words`] with forced line breaks: a `true` entry closes the line after
+/// that (zero-width) word.
+pub(crate) fn wrap_words_with_breaks(
+    widths: &[f32],
+    gaps: &[f32],
+    breaks: &[bool],
+    column: f32,
+) -> Vec<Vec<usize>> {
     let mut lines: Vec<Vec<usize>> = Vec::new();
     let mut cur: Vec<usize> = Vec::new();
     let mut used = 0.0;
@@ -400,6 +424,10 @@ pub fn wrap_words(widths: &[f32], gaps: &[f32], column: f32) -> Vec<Vec<usize>> 
             lines.push(std::mem::take(&mut cur));
             used = w;
             cur.push(i);
+        }
+        if breaks.get(i).copied().unwrap_or(false) {
+            lines.push(std::mem::take(&mut cur));
+            used = 0.0;
         }
     }
     if !cur.is_empty() {
@@ -478,6 +506,8 @@ struct Word {
     glued: bool,
     /// Produced by splitting an over-wide token (head and continuations alike).
     split: bool,
+    /// A hard break marker: close the line after this zero-width word.
+    force_break: bool,
 }
 
 /// Visible text of inline Markdown exactly as the painter lays it out: run
@@ -489,10 +519,10 @@ struct Word {
 pub fn search_text(md: &str) -> String {
     let mut out = String::new();
     for run in parse_inline(md) {
-        if matches!(run.kind, RunKind::Code) {
-            out.push_str(&run.text);
-        } else {
-            push_collapsed(&mut out, &run.text);
+        match run.kind {
+            RunKind::Code => out.push_str(&run.text),
+            RunKind::Break => push_collapsed(&mut out, " "),
+            _ => push_collapsed(&mut out, &run.text),
         }
     }
     while out.ends_with(' ') {
@@ -589,6 +619,17 @@ fn build_words(ui: &egui::Ui, runs: &[Run], face: Option<&(FontId, Color32)>) ->
     let mut words: Vec<Word> = Vec::new();
     let mut open = false; // a word is being filled
     for frag in fragment_plan(runs) {
+        if frag.brk {
+            words.push(Word {
+                frags: Vec::new(),
+                width: 0.0,
+                glued: false,
+                split: false,
+                force_break: true,
+            });
+            open = false;
+            continue;
+        }
         if frag.gap_before {
             open = false;
         }
@@ -620,6 +661,8 @@ struct PlanFragment {
     offset: usize,
     /// The fragment starts a new word (whitespace precedes it).
     gap_before: bool,
+    /// A forced line break: no text, closes the current word line.
+    brk: bool,
 }
 
 /// Char cursor over the text model produced by [`search_text`]: whitespace in
@@ -669,6 +712,18 @@ fn fragment_plan(runs: &[Run]) -> Vec<PlanFragment> {
     let mut cursor = RecordedCursor::default();
     let mut open = false;
     for (run_index, run) in runs.iter().enumerate() {
+        if matches!(run.kind, RunKind::Break) {
+            cursor.space();
+            plan.push(PlanFragment {
+                run: run_index,
+                text: String::new(),
+                offset: cursor.len,
+                gap_before: true,
+                brk: true,
+            });
+            open = false;
+            continue;
+        }
         if matches!(run.kind, RunKind::Code) {
             if run.text.is_empty() {
                 // An empty code span paints nothing and owns no word.
@@ -680,6 +735,7 @@ fn fragment_plan(runs: &[Run]) -> Vec<PlanFragment> {
                 text: run.text.clone(),
                 offset,
                 gap_before: !open,
+                brk: false,
             });
             open = true;
             continue;
@@ -694,6 +750,7 @@ fn fragment_plan(runs: &[Run]) -> Vec<PlanFragment> {
                         text: std::mem::take(&mut buf),
                         offset: buf_start,
                         gap_before: !open,
+                        brk: false,
                     });
                 }
                 cursor.space();
@@ -713,6 +770,7 @@ fn fragment_plan(runs: &[Run]) -> Vec<PlanFragment> {
                 text: buf,
                 offset: buf_start,
                 gap_before: !open,
+                brk: false,
             });
             open = true;
         }
@@ -786,6 +844,8 @@ fn push_frag(
             Stroke::new(1.0, link_color),
             Stroke::NONE,
         ),
+        // Zero-width; build_words turns it into a forced line break.
+        RunKind::Break => (body.clone(), text_color, false, Stroke::NONE, Stroke::NONE),
     };
     let format = TextFormat {
         font_id: font,
@@ -803,6 +863,7 @@ fn push_frag(
             width: 0.0,
             glued: false,
             split: false,
+            force_break: false,
         });
         *open = true;
     }
@@ -837,8 +898,8 @@ pub enum Marker {
     Hollow,
     /// `{n}.` or `{n})`, an ordered item keeping its source number/delimiter.
     Number(u64, char),
-    /// `☑` or `☐`, a task box.
-    Task(bool),
+    /// `☑` or `☐`, a task box, prefixed by `n.`/`n)` when ordered.
+    Task(bool, Option<(u64, char)>),
 }
 
 impl Marker {
@@ -848,8 +909,17 @@ impl Marker {
             Marker::Bullet => "•".to_string(),
             Marker::Hollow => "○".to_string(),
             Marker::Number(n, delim) => format!("{n}{delim}"),
-            Marker::Task(true) => "☑".to_string(),
-            Marker::Task(false) => "☐".to_string(),
+            Marker::Task(true, ordered) | Marker::Task(false, ordered) => {
+                let boxed = if matches!(self, Marker::Task(true, _)) {
+                    "☑"
+                } else {
+                    "☐"
+                };
+                match ordered {
+                    Some((n, d)) => format!("{n}{d} {boxed}"),
+                    None => boxed.to_string(),
+                }
+            }
         }
     }
 }
@@ -1160,7 +1230,8 @@ fn paint_at(
         .iter()
         .map(|w| if w.glued { 0.0 } else { space })
         .collect();
-    let lines = wrap_words(&widths, &gaps, column);
+    let breaks: Vec<bool> = words.iter().map(|w| w.force_break).collect();
+    let lines = wrap_words_with_breaks(&widths, &gaps, &breaks, column);
     let natural_of = |line: &[usize]| {
         line.iter()
             .enumerate()
@@ -1371,6 +1442,7 @@ fn split_overwide(ui: &egui::Ui, words: Vec<Word>, column: f32) -> Vec<Word> {
                 width,
                 glued: true,
                 split: true,
+                force_break: false,
             });
         }
         out[first].glued = false;
@@ -1806,8 +1878,9 @@ mod tests {
             assert_eq!(Marker::Hollow.label(), "○");
             assert_eq!(Marker::Number(3, '.').label(), "3.");
             assert_eq!(Marker::Number(4, ')').label(), "4)");
-            assert_eq!(Marker::Task(true).label(), "☑");
-            assert_eq!(Marker::Task(false).label(), "☐");
+            assert_eq!(Marker::Task(true, None).label(), "☑");
+            assert_eq!(Marker::Task(false, None).label(), "☐");
+            assert_eq!(Marker::Task(true, Some((2, '.'))).label(), "2. ☑");
         }
 
         #[test]
@@ -1815,8 +1888,8 @@ mod tests {
             for label in [
                 Marker::Bullet.label(),
                 Marker::Hollow.label(),
-                Marker::Task(true).label(),
-                Marker::Task(false).label(),
+                Marker::Task(true, None).label(),
+                Marker::Task(false, None).label(),
             ] {
                 assert_eq!(label.chars().count(), 1, "{label}");
             }
@@ -1824,8 +1897,8 @@ mod tests {
             // U+25CB, U+2611, U+2610 all exist in FiraCode Nerd Font.
             assert_eq!(Marker::Bullet.label(), "\u{2022}");
             assert_eq!(Marker::Hollow.label(), "\u{25cb}");
-            assert_eq!(Marker::Task(true).label(), "\u{2611}");
-            assert_eq!(Marker::Task(false).label(), "\u{2610}");
+            assert_eq!(Marker::Task(true, None).label(), "\u{2611}");
+            assert_eq!(Marker::Task(false, None).label(), "\u{2610}");
         }
 
         #[test]
