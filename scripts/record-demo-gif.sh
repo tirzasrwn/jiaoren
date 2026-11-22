@@ -29,13 +29,18 @@ JR_PID=$!
 
 W=""
 for _ in $(seq 1 40); do
-  W=$(xdotool search --pid "$JR_PID" 2>/dev/null | tail -1 || true)
-  [ -z "$W" ] && W=$(xdotool search --name jiaoren 2>/dev/null | tail -1 || true)
+  for cand in $(xdotool search --pid "$JR_PID" 2>/dev/null || true) \
+              $(xdotool search --name '^jiaoren$' 2>/dev/null || true); do
+    if [ "$(xdotool getwindowname "$cand" 2>/dev/null)" = "jiaoren" ]; then
+      W=$cand
+      break
+    fi
+  done
   [ -n "$W" ] && break
   sleep 0.25
 done
-if [ -z "$W" ]; then
-  echo "jr window did not appear" >&2
+if [ -z "$W" ] || [ "$(xdotool getwindowname "$W")" != "jiaoren" ]; then
+  echo "jr window did not appear (or matched another window)" >&2
   kill "$JR_PID" 2>/dev/null || true
   exit 1
 fi
@@ -79,8 +84,21 @@ if [ "$focused" != "$W" ]; then
   kill "$JR_PID" 2>/dev/null || true
   exit 1
 fi
+xdotool windowraise "$W"
+xdotool windowactivate --sync "$W"
 sleep 0.8
 
+ensure_focus() {
+  xdotool windowraise "$W"
+  xdotool windowactivate --sync "$W" 2>/dev/null || true
+  active=$(xdotool getactivewindow 2>/dev/null || true)
+  if [ "$active" != "$W" ]; then
+    echo "focus moved away from jr (active=$active); aborting" >&2
+    kill "$REC" 2>/dev/null || true
+    kill "$JR_PID" 2>/dev/null || true
+    exit 1
+  fi
+}
 # Content coordinates (inside the 900x540 design) to absolute screen points.
 mx() {
   local ax ay
@@ -89,60 +107,107 @@ mx() {
   xdotool mousemove "$ax" "$ay"
 }
 
+rm -f "$OUT_MKV" /tmp/jiaoren-scaled.mkv
 pkill -x import 2>/dev/null || true
-ffmpeg -y -loglevel error \
-  -f x11grab -draw_mouse 0 -framerate "$FPS" -video_size "${GW}x${GH}" -i ":0.0+${GX},${GY}" \
-  -t "$DURATION" -c:v libx264 -qp 0 -pix_fmt yuv444p "$OUT_MKV" &
-REC=$!
-sleep 0.8
+REC=""
+for attempt in 1 2 3; do
+  rm -f "$OUT_MKV"
+  ffmpeg -y -loglevel error \
+    -f x11grab -draw_mouse 0 -framerate "$FPS" -video_size "${GW}x${GH}" -i ":0.0+${GX},${GY}" \
+    -t "$DURATION" -c:v libx264 -qp 0 -pix_fmt yuv444p "$OUT_MKV" &
+  REC=$!
+  sleep 0.6
+  if kill -0 "$REC" 2>/dev/null; then
+    break
+  fi
+  echo "x11grab attempt $attempt failed" >&2
+  sleep 0.5
+done
+if ! kill -0 "$REC" 2>/dev/null; then
+  echo "could not start x11grab" >&2
+  kill "$JR_PID" 2>/dev/null || true
+  exit 1
+fi
 
 # 1. select the intro phrase and copy it
+ensure_focus
 mx 72 112
+sleep 0.15
 xdotool mousedown 1
-for x in 140 210 280 350 420 455; do mx "$x" 112; sleep 0.08; done
+sleep 0.2
+for x in 140 210 280 350 420 455; do mx "$x" 112; sleep 0.1; done
 xdotool mouseup 1
-sleep 0.5
+sleep 0.6
 xdotool key --clearmodifiers y
 sleep 1.2
+if ! kill -0 "$JR_PID" 2>/dev/null; then
+  echo "jr exited during selection" >&2
+  exit 1
+fi
 xdotool key --clearmodifiers Escape
-sleep 0.3
+sleep 0.4
 
-# 2. search with a space, then a normal search with Ctrl+W
+# 2. search with a space, then a nested quote
+ensure_focus
 xdotool key --clearmodifiers slash
 sleep 0.3
 xdotool type --clearmodifiers --delay 80 "markdown viewer"
 sleep 0.9
 xdotool key Return
-sleep 0.7
+sleep 0.8
 xdotool key --clearmodifiers Escape
 sleep 0.3
 xdotool key --clearmodifiers slash
-sleep 0.3
-xdotool type --clearmodifiers --delay 80 "markdown vie"
-sleep 0.6
-xdotool key --clearmodifiers ctrl+w
+sleep 0.2
+xdotool type --clearmodifiers --delay 80 "Quote"
 sleep 0.4
-xdotool key --clearmodifiers BackSpace
-sleep 0.3
 xdotool key Return
-sleep 0.8
-xdotool key n
-sleep 1.0
-
-# 3. table: hover a row, then click the copy icon
-mx 300 242
 sleep 1.2
-mx 843 216
+xdotool key --clearmodifiers Escape
+sleep 0.3
+
+# 3. table: hover a row, then click the copy icon in the header
+ensure_focus
+xdotool key --clearmodifiers slash
+sleep 0.2
+xdotool type --clearmodifiers --delay 70 "Copy table"
+sleep 0.4
+xdotool key Return
+sleep 0.6
+mx 300 288
+sleep 1.0
+mx 845 247
 xdotool click 1
 sleep 1.2
 xdotool key --clearmodifiers Escape
 sleep 0.3
 
-# 4. bottom code block: hover one line
+# 4. diagram popup and zoom
+ensure_focus
+xdotool key --clearmodifiers slash
+sleep 0.2
+xdotool type --clearmodifiers --delay 70 "diagram"
+sleep 0.4
+xdotool key Return
+sleep 0.4
+xdotool key n
+sleep 0.9
+mx 430 395
+xdotool click 1
+sleep 0.8
+xdotool click 4; sleep 0.25; xdotool click 4; sleep 0.25; xdotool click 4
+sleep 1.2
+xdotool key --clearmodifiers q
+sleep 0.6
+
+# 5. bottom code block: hover a wrapped source line (both visual rows)
+ensure_focus
 xdotool key --clearmodifiers G
 sleep 1.0
-mx 400 215
-sleep 1.4
+mx 400 201
+sleep 1.5
+xdotool key --clearmodifiers t
+sleep 1.2
 
 kill -INT "$REC" 2>/dev/null || true
 wait "$REC" 2>/dev/null || true
