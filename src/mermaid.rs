@@ -332,9 +332,19 @@ impl Renderer {
 
     /// Download mermaid.js once, into `mermaid_js`, when it is missing.
     pub(crate) fn ensure_mermaid_js(&self) -> Result<(), RenderError> {
+        self.ensure_mermaid_js_with(&mut |_| {})
+    }
+
+    /// [`Self::ensure_mermaid_js`] with phase messages for the status line.
+    pub(crate) fn ensure_mermaid_js_with(
+        &self,
+        progress: &mut dyn FnMut(&str),
+    ) -> Result<(), RenderError> {
         if self.mermaid_js.exists() {
+            progress("mermaid: ready");
             return Ok(());
         }
+        progress(&format!("mermaid: downloading {MERMAID_VERSION}…"));
         let tmp = PathBuf::from(format!(
             "{}.{}.tmp",
             self.mermaid_js.display(),
@@ -358,6 +368,7 @@ impl Renderer {
         if status.success() {
             fs::rename(&tmp, &self.mermaid_js)
                 .map_err(|e| RenderError::MermaidJs(format!("rename mermaid js: {e}")))?;
+            progress("mermaid: ready");
             Ok(())
         } else {
             let _ = fs::remove_file(&tmp);
@@ -436,11 +447,21 @@ pub fn find_chromium(cache_dir: &Path) -> Option<PathBuf> {
 
 /// Return an existing Chromium, or download the pinned `chrome-headless-shell`
 /// into `cache_dir` (`~/.cache/jiaoren`) and return its path.
+#[allow(dead_code)] // kept for tests and non-app callers
 pub fn ensure_chromium(cache_dir: &Path) -> Result<PathBuf, String> {
+    ensure_chromium_with(cache_dir, &mut |_| {})
+}
+
+/// [`ensure_chromium`] with phase messages for the app's download status line.
+pub fn ensure_chromium_with(
+    cache_dir: &Path,
+    progress: &mut dyn FnMut(&str),
+) -> Result<PathBuf, String> {
     if let Some(p) = find_chromium(cache_dir) {
+        progress("chromium: ready");
         return Ok(p);
     }
-    install_chromium(cache_dir)
+    install_chromium_with(cache_dir, progress)
 }
 
 /// Take an exclusive lock covering detect → validate → rename. Blocking: a
@@ -512,10 +533,19 @@ fn validate_binary(path: &Path) -> Result<(), String> {
     }
 }
 
+#[allow(dead_code)] // kept for tests and non-app callers
 fn install_chromium(cache_dir: &Path) -> Result<PathBuf, String> {
+    install_chromium_with(cache_dir, &mut |_| {})
+}
+
+fn install_chromium_with(
+    cache_dir: &Path,
+    progress: &mut dyn FnMut(&str),
+) -> Result<PathBuf, String> {
     let _lock = acquire_install_lock(cache_dir)?;
     // Another instance may have installed while we waited for the lock.
     if let Some(p) = find_chromium(cache_dir) {
+        progress("chromium: ready");
         return Ok(p);
     }
     let version_dir = cache_dir.join("chromium").join(MANAGED_VERSION);
@@ -547,9 +577,11 @@ fn install_chromium(cache_dir: &Path) -> Result<PathBuf, String> {
     };
 
     fs::create_dir_all(&tmp_dir).map_err(|e| format!("create {}: {e}", tmp_dir.display()))?;
-    eprintln!("installing chrome-headless-shell {MANAGED_VERSION} (132 MB)…");
+    progress(&format!(
+        "chromium: downloading {MANAGED_VERSION} (132 MB)…"
+    ));
     let status = Command::new("curl")
-        .arg("-fL")
+        .arg("-fsSL")
         .arg("--proto")
         .arg("=https")
         .arg("--proto-redir")
@@ -564,6 +596,7 @@ fn install_chromium(cache_dir: &Path) -> Result<PathBuf, String> {
     if !status.success() {
         return Err(fail("download", format!("curl exited {status}")));
     }
+    progress("chromium: verifying archive…");
     let status = Command::new("unzip")
         .arg("-t")
         .arg(&zip)
@@ -572,6 +605,7 @@ fn install_chromium(cache_dir: &Path) -> Result<PathBuf, String> {
     if !status.success() {
         return Err(fail("archive test", format!("unzip -t exited {status}")));
     }
+    progress("chromium: extracting…");
     let status = Command::new("unzip")
         .arg("-q")
         .arg("-o")
@@ -590,12 +624,13 @@ fn install_chromium(cache_dir: &Path) -> Result<PathBuf, String> {
     }
     // Validate inside the temp dir: only a working binary gets published, so a
     // killed process leaves either no final dir or a fully validated one.
+    progress("chromium: checking binary…");
     validate_binary(&tmp_bin).map_err(|e| fail("binary check", e))?;
     if let Err(e) = fs::rename(tmp_dir.join("chrome-headless-shell-linux64"), &final_dir) {
         return Err(fail("rename into place", e.to_string()));
     }
     let _ = fs::remove_dir_all(&tmp_dir);
-    eprintln!("installed chrome-headless-shell at {}", final_bin.display());
+    progress("chromium: installed");
     Ok(final_bin)
 }
 

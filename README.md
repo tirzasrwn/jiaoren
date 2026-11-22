@@ -214,16 +214,24 @@ line naming the path.
 
 ## Cache
 
-Rendered diagrams are cached as SVG under `~/.cache/jiaoren/` (keyed by diagram
-content and theme), so reopening a document is instant and diagrams stay sharp
-at any zoom level. `mermaid.min.js` is downloaded there on first run, not
-bundled. Clear it with:
+Everything managed lives under `~/.cache/jiaoren/`: versioned FiraCode faces,
+chromium, `mermaid-<version>.min.js`, and the diagram SVGs (keyed by diagram
+content, theme and render version). Reopening a document is instant and
+diagrams stay sharp at any zoom.
+
+First-run downloads (fonts, Chromium, mermaid.js) run in the background while
+the window is already usable; their phase is shown in the bottom-left status
+line, the same place as font progress. Diagram blocks show a short
+"preparing diagrams…" box until the browser is ready.
+
+Clear the cache from the CLI:
 
 ```bash
-rm -rf ~/.cache/jiaoren
+jr --clean-cache          # diagram renders + mermaid.js
+jr --clean-cache --all    # also the managed Chromium
 ```
 
-The directory and `mermaid.min.js` are recreated on the next run.
+Startup also prunes renders and scripts from older Mermaid/Chromium versions.
 
 ## Trust boundary
 

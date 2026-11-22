@@ -13,7 +13,7 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use notify::{RecursiveMode, Watcher};
 
 use crate::doc::{prepare, Prepared};
-use crate::mermaid::{ensure_chromium, Renderer, Theme};
+use crate::mermaid::{ensure_chromium_with, Renderer, Theme};
 
 mod code;
 mod diagram;
@@ -100,6 +100,12 @@ fn same_file(event: &Path, doc: &Path) -> bool {
 /// painted glyphs are not the recorded run text.
 pub(crate) fn paragraph_needs_library(source: &str) -> bool {
     source.contains("![") || source.contains('<')
+}
+
+/// First-run download progress shown in the status line.
+enum DownloadMsg {
+    Status(String),
+    Done(Result<(), String>),
 }
 
 /// Shared, interior-mutable state backing the `<mdpara>` render path. Body
@@ -510,6 +516,10 @@ pub(crate) struct App {
     font_rx: Option<mpsc::Receiver<crate::fonts::FontMsg>>,
     /// Downloaded percentage while `font_rx` is live.
     font_progress: Option<u8>,
+    /// First-run Chromium/mermaid download, polled once per frame.
+    download_rx: Option<mpsc::Receiver<DownloadMsg>>,
+    /// Current download phase text while `download_rx` is live.
+    download_status: Option<String>,
 }
 
 impl App {
@@ -543,21 +553,33 @@ impl App {
             font_rx = Some(rx);
         }
         apply_theme(ctx, theme);
-        let mut renderer = Renderer::new();
-        // First-run downloads happen here, once, on the UI thread, before any
-        // render worker can spawn: concurrent workers must never race on the
-        // shared temp file.
-        let mut chromium_error = None;
-        match ensure_chromium(&renderer.cache_dir) {
-            Ok(path) => {
-                renderer.chromium = Some(path);
-                let _ = renderer.ensure_mermaid_js();
-            }
-            Err(msg) => {
-                renderer.chromium = None;
-                chromium_error = Some(msg);
-            }
-        }
+        let renderer = Renderer::new();
+        // First-run Chromium and mermaid.js downloads run in the background so
+        // the window opens immediately and the same status line that reports
+        // font progress also reports these. Diagram work waits for them.
+        let chromium_error = None;
+        let (download_tx, download_rx) = mpsc::channel();
+        let download_cache = renderer.cache_dir.clone();
+        let download_js = renderer.mermaid_js.clone();
+        let download_ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let mut send = |text: &str| {
+                let _ = download_tx.send(DownloadMsg::Status(text.to_string()));
+                download_ctx.request_repaint();
+            };
+            let result = ensure_chromium_with(&download_cache, &mut send).and_then(|path| {
+                let renderer = Renderer {
+                    chromium: Some(path),
+                    mermaid_js: download_js,
+                    cache_dir: download_cache.clone(),
+                };
+                renderer
+                    .ensure_mermaid_js_with(&mut send)
+                    .map_err(|e| e.to_string())
+            });
+            let _ = download_tx.send(DownloadMsg::Done(result));
+            download_ctx.request_repaint();
+        });
         let shared = Arc::new(Renderer {
             chromium: renderer.chromium.clone(),
             mermaid_js: renderer.mermaid_js.clone(),
@@ -566,11 +588,11 @@ impl App {
 
         let prepared = prepare(&text, parent_dir(&path));
 
-        let diagrams = Rc::new(RefCell::new(DiagramUi::new(
-            shared,
-            prepared.diagrams.clone(),
-            theme,
-        )));
+        let diagrams = {
+            let mut diagrams = DiagramUi::new(shared, prepared.diagrams.clone(), theme);
+            diagrams.set_ready(false);
+            Rc::new(RefCell::new(diagrams))
+        };
         let tables = Rc::new(RefCell::new(TableUi::new(prepared.tables.clone())));
         let lists = Rc::new(RefCell::new(ListUi::new(prepared.lists.clone())));
         let paragraphs = Rc::new(RefCell::new(ParagraphUi::new(prepared.paragraphs.clone())));
@@ -666,6 +688,8 @@ impl App {
             status: None,
             font_rx,
             font_progress: None,
+            download_rx: Some(download_rx),
+            download_status: None,
         }
     }
 
@@ -712,6 +736,31 @@ impl App {
         });
     }
 
+    /// Drain first-run download messages; unblock diagrams when done.
+    fn poll_downloads(&mut self, ctx: &egui::Context) {
+        let mut done = None;
+        if let Some(rx) = &self.download_rx {
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    DownloadMsg::Status(text) => self.download_status = Some(text),
+                    DownloadMsg::Done(result) => done = Some(result),
+                }
+            }
+        }
+        if let Some(result) = done {
+            self.download_rx = None;
+            self.download_status = None;
+            self.diagrams.borrow_mut().set_ready(true);
+            if let Err(msg) = result {
+                self.chromium_error = Some(msg);
+            }
+            ctx.request_repaint();
+        }
+        if self.download_rx.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(150));
+        }
+    }
+
     /// Paint the bottom-left status line: a transient copy message, otherwise
     /// the active search (`/pat [i/n]`). Anchored in the window margin, so it
     /// never takes layout from the reading column; the document's bottom
@@ -741,6 +790,15 @@ impl App {
             }
         }
         if let Some(text) = self.search.borrow().state.status_text() {
+            status_area(ctx, |ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(text).color(status_color(self.theme)))
+                        .wrap_mode(egui::TextWrapMode::Extend),
+                );
+            });
+            return;
+        }
+        if let Some(text) = &self.download_status {
             status_area(ctx, |ui| {
                 ui.add(
                     egui::Label::new(egui::RichText::new(text).color(status_color(self.theme)))
@@ -898,6 +956,7 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_downloads(ctx);
         self.diagrams.borrow_mut().poll(ctx);
         self.images.borrow_mut().poll(ctx);
         self.watch_tick(ctx);

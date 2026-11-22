@@ -132,6 +132,10 @@ pub(crate) struct DiagramUi {
     /// Set when `popup` was opened this frame, so the opening click is not also
     /// read as a click on the dimmed background that would close it again.
     popup_fresh: bool,
+    /// False while the first-run Chromium/mermaid downloads run in the
+    /// background; diagrams show a placeholder instead of caching a
+    /// "chromium missing" failure that would outlive the install.
+    ready: bool,
 }
 
 impl DiagramUi {
@@ -163,6 +167,7 @@ impl DiagramUi {
             popup_closed_at: None,
             popup_closed_with_ctrl: false,
             popup_fresh: false,
+            ready: true,
         }
     }
 
@@ -205,7 +210,20 @@ impl DiagramUi {
 
     /// Draw a diagram inline, with the same vertical breathing room as a table
     /// above and below. The popup draws its image directly and skips this pad.
+    /// Gate diagram work until first-run downloads finish.
+    pub(crate) fn set_ready(&mut self, ready: bool) {
+        self.ready = ready;
+        if ready {
+            // A worker may have raced the gate; retry cleanly.
+            self.failures.clear();
+        }
+    }
+
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, id: &str) {
+        if !self.ready {
+            self.draw_preparing(ui);
+            return;
+        }
         let pad = table_pad(ui.text_style_height(&egui::TextStyle::Body));
         // The html hook runs in a wrapping left-to-right layout, where a bare
         // `add_space` advances horizontally; the vertical wrapper turns the
@@ -215,6 +233,21 @@ impl DiagramUi {
             self.show_unpadded(ui, id);
             ui.add_space(pad);
         });
+    }
+
+    fn draw_preparing(&self, ui: &mut egui::Ui) {
+        let height = 120.0;
+        let width = self.column.max(240.0);
+        let (_, rect) = ui.allocate_space(egui::vec2(width, height));
+        ui.painter()
+            .rect_filled(rect, 4.0, ui.visuals().faint_bg_color);
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "preparing diagrams…",
+            egui::FontId::proportional(14.0),
+            ui.visuals().weak_text_color(),
+        );
     }
 
     fn show_unpadded(&mut self, ui: &mut egui::Ui, id: &str) {
