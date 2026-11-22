@@ -616,7 +616,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         let fallback = spec
                             .items
                             .iter()
-                            .any(|it| it.text.contains("![") || it.text.contains('<'));
+                            .any(|it| it.text.contains("![") || has_raw_html(&it.text));
                         if fallback {
                             for l in &lines[i..j] {
                                 out.push_str(&rewrite_images(l, doc_dir));
@@ -1100,6 +1100,22 @@ fn is_block_boundary(line: &str) -> bool {
             digits > 0 && digits < t.len() && matches!(t.as_bytes()[digits], b'.' | b')')
         }
     }
+}
+
+/// Whether `text` carries raw HTML. `<` inside an inline code span is a
+/// comparison or a generic (`Option<FontDefinitions>`), not a tag: treating it
+/// as HTML hands the whole item to the library, which then draws the bullet,
+/// the checkbox and the indentation its own way.
+fn has_raw_html(text: &str) -> bool {
+    let mut in_code = false;
+    for ch in text.chars() {
+        match ch {
+            '`' => in_code = !in_code,
+            '<' if !in_code => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Parse a list block starting at `start` (which must carry a column-0 marker)
@@ -2068,6 +2084,16 @@ mod tests {
             assert!(p.lists.is_empty());
             assert!(p.markdown.contains("- a<br>b"));
             assert!(p.markdown.contains("- c"));
+        }
+
+        #[test]
+        fn angle_brackets_inside_code_keep_the_item_extracted() {
+            let p = prepare(
+                "- [ ] **Step 3:** `Option<FontDefinitions>` and `Vec<T>`\n- [ ] next\n",
+                Path::new("/d"),
+            );
+            assert_eq!(p.lists.len(), 1, "{}", p.markdown);
+            assert!(!p.markdown.contains("- [ ]"));
         }
 
         #[test]
