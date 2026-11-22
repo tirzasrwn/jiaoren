@@ -127,6 +127,7 @@ fn main() -> anyhow::Result<()> {
                     if !all {
                         println!("kept the managed Chromium; add --all to remove it too");
                     }
+                    println!("kept the downloaded fonts");
                 }
                 Err(e) => {
                     eprintln!("clean cache: {e}");

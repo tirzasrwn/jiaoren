@@ -88,7 +88,8 @@ fn older_than(
 
 /// Delete the jiaoren cache from the command line. `all` also removes the
 /// managed Chromium; otherwise the browser is kept so the next document does
-/// not need a 132 MB re-download. Returns `(bytes, files)` removed.
+/// not need a 132 MB re-download. The font cache is always kept: it is an
+/// asset, not a derived render. Returns `(bytes, files)` removed.
 pub fn clean_cache(all: bool) -> std::io::Result<(u64, usize)> {
     clean_cache_dir(&cache_root(), all)
 }
@@ -101,7 +102,7 @@ fn clean_cache_dir(dir: &Path, all: bool) -> std::io::Result<(u64, usize)> {
     let mut files = 0usize;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !all && name == "chromium" {
+        if name == "fonts" || (!all && name == "chromium") {
             continue;
         }
         let path = entry.path();
@@ -834,13 +835,17 @@ mod tests {
                 b"1234567890",
             )
             .unwrap();
+            fs::create_dir_all(base.join("fonts").join("3.4.0")).unwrap();
+            fs::write(base.join("fonts").join("3.4.0").join("face.ttf"), b"font").unwrap();
             let (bytes, files) = clean_cache_dir(&base, false).unwrap();
             assert_eq!((bytes, files), (5, 1));
             assert!(base.join("chromium").exists());
+            assert!(base.join("fonts").join("3.4.0").join("face.ttf").exists());
             assert!(!base.join("abc.svg").exists());
             let (bytes, files) = clean_cache_dir(&base, true).unwrap();
             assert_eq!((bytes, files), (10, 1));
             assert!(!base.join("chromium").exists());
+            assert!(base.join("fonts").join("3.4.0").join("face.ttf").exists());
             let _ = fs::remove_dir_all(&base);
         }
 

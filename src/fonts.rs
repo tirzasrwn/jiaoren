@@ -14,8 +14,9 @@ pub const FAMILY: &str = "FiraCode Nerd Font";
 pub const FONT_VERSION: &str = "3.4.0";
 
 /// Where the pinned FiraCode faces live in the nerd-fonts repository.
-const FONT_BASE: &str =
-    "https://raw.githubusercontent.com/ryanoasis/nerd-fonts/v3.4.0/patched-fonts/FiraCode";
+fn font_base() -> String {
+    format!("https://raw.githubusercontent.com/ryanoasis/nerd-fonts/v{FONT_VERSION}/patched-fonts/FiraCode")
+}
 
 /// Explicit font directory; skips the download entirely.
 pub const OVERRIDE_ENV: &str = "JIAOREN_FONT_DIR";
@@ -75,11 +76,26 @@ pub fn cached(cache_root: &Path) -> Option<egui::FontDefinitions> {
 pub fn fallback() -> Option<egui::FontDefinitions> {
     override_dir()
         .and_then(|dir| load_from_dir(&dir))
-        .or_else(|| {
-            candidate_dirs()
-                .into_iter()
-                .find_map(|dir| load_from_dir(&dir))
-        })
+        .or_else(system)
+}
+
+fn system() -> Option<egui::FontDefinitions> {
+    candidate_dirs()
+        .into_iter()
+        .find_map(|dir| load_from_dir(&dir))
+}
+
+/// Whether [`OVERRIDE_ENV`] names a usable directory.
+pub fn has_override() -> bool {
+    override_dir().is_some()
+}
+
+/// Definitions in the documented load order: override, managed cache, system.
+pub fn preferred(cache_root: &Path) -> Option<egui::FontDefinitions> {
+    override_dir()
+        .and_then(|dir| load_from_dir(&dir))
+        .or_else(|| cached(cache_root))
+        .or_else(system)
 }
 
 /// One-line source and version for `jr --version`.
@@ -89,6 +105,11 @@ pub fn version_line(cache_root: &Path) -> String {
         .iter()
         .any(|dir| dir.join(face(REGULAR)).is_file());
     version_line_with(Some(cached), system, override_dir().as_deref())
+}
+
+/// Whether startup must download: no override and no usable cached face.
+pub fn download_needed(cache_root: &Path) -> bool {
+    !has_override() && cached(cache_root).is_none()
 }
 
 /// Delete cached font versions other than [`FONT_VERSION`]. Best-effort.
@@ -118,11 +139,21 @@ pub fn download_cached(
     let dir = cache_dir(cache_root);
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     progress(0);
-    let regular_url = format!("{FONT_BASE}/Regular/{REGULAR}.ttf");
-    download_face(&regular_url, &dir, &face(REGULAR), progress)?;
+    let base = font_base();
+    let regular_url = format!("{base}/Regular/{REGULAR}.ttf");
+    {
+        // Regular and Bold are roughly the same size: map each meter onto half
+        // the bar so the second transfer never sits at a stalled 100%.
+        let mut pct = |p: u8| progress(p.min(50));
+        download_face(&regular_url, &dir, &face(REGULAR), &mut pct)?;
+    }
     // Bold is optional: without it bold runs fall back to Regular.
-    let bold_url = format!("{FONT_BASE}/Bold/{BOLD}.ttf");
-    let _ = download_face(&bold_url, &dir, &face(BOLD), &mut |_| {});
+    let bold_url = format!("{base}/Bold/{BOLD}.ttf");
+    {
+        let mut pct = |p: u8| progress(50 + p.min(50));
+        let _ = download_face(&bold_url, &dir, &face(BOLD), &mut pct);
+    }
+    progress(100);
     let regular =
         std::fs::read(dir.join(face(REGULAR))).map_err(|e| format!("read cached regular: {e}"))?;
     let bold = std::fs::read(dir.join(face(BOLD))).ok();
@@ -227,9 +258,15 @@ fn download_face(
     let mut pending = String::new();
     let mut last = 0u8;
     loop {
-        let n = stderr
-            .read(&mut chunk)
-            .map_err(|e| format!("read curl progress: {e}"))?;
+        let n = match stderr.read(&mut chunk) {
+            Ok(n) => n,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&tmp);
+                return Err(format!("read curl progress: {e}"));
+            }
+        };
         if n == 0 {
             break;
         }
@@ -323,9 +360,16 @@ fn defs_from_faces(regular: Vec<u8>, bold: Option<Vec<u8>>) -> egui::FontDefinit
 /// `Monospace`; the built-in egui fonts stay as fallbacks. `None` when the
 /// Regular face is missing or unreadable.
 pub fn load_from_dir(dir: &Path) -> Option<egui::FontDefinitions> {
-    let regular = std::fs::read(dir.join(face(REGULAR))).ok()?;
-    let bold = std::fs::read(dir.join(face(BOLD))).ok();
+    let regular = read_face(&dir.join(face(REGULAR)))?;
+    let bold = read_face(&dir.join(face(BOLD)));
     Some(defs_from_faces(regular, bold))
+}
+
+/// Read a face, rejecting short or non-font bytes: epaint panics on garbage,
+/// and a corrupt cached file must fall through to the next source instead.
+fn read_face(path: &Path) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(path).ok()?;
+    (bytes.len() >= 10_000 && is_font(&bytes)).then_some(bytes)
 }
 
 /// Search order for a locally installed copy: `~/.fonts`,
@@ -448,6 +492,30 @@ mod tests {
                 version_line_with(None, false, Some(Path::new("/x/fonts"))),
                 "3.4.0 (override: /x/fonts)"
             );
+        }
+
+        #[test]
+        fn load_from_dir_rejects_a_corrupt_face() {
+            let dir = std::env::temp_dir().join(format!("jiaoren-bad-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(face(REGULAR)), b"<html>proxy error</html>").unwrap();
+            assert!(load_from_dir(&dir).is_none());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn prune_keeps_only_the_pinned_version() {
+            let root = std::env::temp_dir().join(format!("jiaoren-prune-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let keep = cache_dir(&root);
+            let old = root.join("fonts").join("3.3.0");
+            std::fs::create_dir_all(&keep).unwrap();
+            std::fs::create_dir_all(&old).unwrap();
+            prune(&root);
+            assert!(keep.is_dir());
+            assert!(!old.exists());
+            let _ = std::fs::remove_dir_all(&root);
         }
     }
 }

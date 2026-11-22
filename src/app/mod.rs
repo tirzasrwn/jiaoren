@@ -199,6 +199,15 @@ fn font_progress_text(pct: u8) -> String {
     format!("Downloading FiraCode font… {pct}% (first run only)")
 }
 
+/// Failure line, naming whatever font the window actually kept.
+fn font_failure_status() -> &'static str {
+    if crate::fonts::fallback().is_some() {
+        "font download failed; using the system font"
+    } else {
+        "font download failed; using the built-in font"
+    }
+}
+
 /// Bottom-left status overlay, shared by copy messages and the search status.
 fn status_area(ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui)) {
     egui::Area::new(egui::Id::new("jiaoren-status"))
@@ -513,24 +522,25 @@ impl App {
         // in the background so the window still opens immediately.
         let cache_root = crate::mermaid::cache_root();
         crate::fonts::prune(&cache_root);
+        // Documented order: override, cache, system, egui defaults. On a fresh
+        // cache, start with the system font (or egui's defaults) and download
+        // in the background so the window still opens immediately.
+        let download = crate::fonts::download_needed(&cache_root);
+        if let Some(defs) = crate::fonts::preferred(&cache_root) {
+            ctx.set_fonts(defs);
+        }
         let mut font_rx = None;
-        match crate::fonts::cached(&cache_root) {
-            Some(defs) => ctx.set_fonts(defs),
-            None => {
-                if let Some(defs) = crate::fonts::fallback() {
-                    ctx.set_fonts(defs);
-                }
-                let (tx, rx) = mpsc::channel();
-                let root = cache_root.clone();
-                std::thread::spawn(move || {
-                    let mut send = |pct| {
-                        let _ = tx.send(crate::fonts::FontMsg::Progress(pct));
-                    };
-                    let result = crate::fonts::download_cached(&root, &mut send);
-                    let _ = tx.send(crate::fonts::FontMsg::Done(result));
-                });
-                font_rx = Some(rx);
-            }
+        if download {
+            let (tx, rx) = mpsc::channel();
+            let root = cache_root.clone();
+            std::thread::spawn(move || {
+                let mut send = |pct| {
+                    let _ = tx.send(crate::fonts::FontMsg::Progress(pct));
+                };
+                let result = crate::fonts::download_cached(&root, &mut send);
+                let _ = tx.send(crate::fonts::FontMsg::Done(result));
+            });
+            font_rx = Some(rx);
         }
         apply_theme(ctx, theme);
         let mut renderer = Renderer::new();
@@ -893,18 +903,32 @@ impl eframe::App for App {
         self.watch_tick(ctx);
         if let Some(rx) = self.font_rx.take() {
             let mut done = false;
-            while let Ok(msg) = rx.try_recv() {
-                match msg {
-                    crate::fonts::FontMsg::Progress(pct) => self.font_progress = Some(pct),
-                    crate::fonts::FontMsg::Done(Ok(defs)) => {
+            loop {
+                match rx.try_recv() {
+                    Ok(crate::fonts::FontMsg::Progress(pct)) => self.font_progress = Some(pct),
+                    Ok(crate::fonts::FontMsg::Done(Ok(defs))) => {
                         ctx.set_fonts(defs);
+                        // `set_fonts` takes effect on the next pass; ask for it
+                        // or the swap waits for the next input event.
+                        ctx.request_repaint();
                         self.font_progress = None;
                         done = true;
                     }
-                    crate::fonts::FontMsg::Done(Err(_)) => {
+                    Ok(crate::fonts::FontMsg::Done(Err(_))) => {
                         self.font_progress = None;
                         done = true;
-                        self.set_status("font download failed; using fallback font");
+                        self.set_status(font_failure_status());
+                        ctx.request_repaint();
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        // The worker died without a verdict: same fallback, and
+                        // no 100 ms repaint loop forever.
+                        self.font_progress = None;
+                        done = true;
+                        self.set_status(font_failure_status());
+                        ctx.request_repaint();
+                        break;
                     }
                 }
             }
