@@ -14,7 +14,8 @@ pub const FAMILY: &str = "FiraCode Nerd Font";
 pub const FONT_VERSION: &str = "3.4.0";
 
 /// Where the pinned FiraCode faces live in the nerd-fonts repository.
-const FONT_BASE: &str = "https://raw.githubusercontent.com/ryanoasis/nerd-fonts/v3.4.0/patched-fonts/FiraCode";
+const FONT_BASE: &str =
+    "https://raw.githubusercontent.com/ryanoasis/nerd-fonts/v3.4.0/patched-fonts/FiraCode";
 
 /// Explicit font directory; skips the download entirely.
 pub const OVERRIDE_ENV: &str = "JIAOREN_FONT_DIR";
@@ -74,7 +75,11 @@ pub fn cached(cache_root: &Path) -> Option<egui::FontDefinitions> {
 pub fn fallback() -> Option<egui::FontDefinitions> {
     override_dir()
         .and_then(|dir| load_from_dir(&dir))
-        .or_else(|| candidate_dirs().into_iter().find_map(|dir| load_from_dir(&dir)))
+        .or_else(|| {
+            candidate_dirs()
+                .into_iter()
+                .find_map(|dir| load_from_dir(&dir))
+        })
 }
 
 /// One-line source and version for `jr --version`.
@@ -118,8 +123,8 @@ pub fn download_cached(
     // Bold is optional: without it bold runs fall back to Regular.
     let bold_url = format!("{FONT_BASE}/Bold/{BOLD}.ttf");
     let _ = download_face(&bold_url, &dir, &face(BOLD), &mut |_| {});
-    let regular = std::fs::read(dir.join(face(REGULAR)))
-        .map_err(|e| format!("read cached regular: {e}"))?;
+    let regular =
+        std::fs::read(dir.join(face(REGULAR))).map_err(|e| format!("read cached regular: {e}"))?;
     let bold = std::fs::read(dir.join(face(BOLD))).ok();
     Ok(defs_from_faces(regular, bold))
 }
@@ -247,9 +252,7 @@ fn download_face(
             progress(pct);
         }
     }
-    let status = child
-        .wait()
-        .map_err(|e| format!("wait curl: {e}"))?;
+    let status = child.wait().map_err(|e| format!("wait curl: {e}"))?;
     if !status.success() {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("curl exited {status}"));
