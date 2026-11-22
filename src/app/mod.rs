@@ -195,6 +195,12 @@ struct Status {
 /// How long a clipboard status line stays on screen.
 const STATUS_DURATION: Duration = Duration::from_millis(1500);
 
+/// Whether a link click this frame asked for the `link copied` chip.
+fn take_link_copied(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|d| d.remove_temp::<()>(egui::Id::new(crate::justify::LINK_COPIED)))
+        .is_some()
+}
+
 /// Colour of the status line and the search prompt.
 fn status_color(theme: Theme) -> egui::Color32 {
     crate::theme::palette(theme).subtext0.into()
@@ -1405,6 +1411,11 @@ impl eframe::App for App {
         if self.code.borrow_mut().take_copied() {
             self.set_status("copied code");
         }
+        // A link click during this frame's document paint copied its URL; show
+        // the chip on the same frame instead of waiting for the next repaint.
+        if take_link_copied(ui.ctx()) {
+            self.set_status("link copied");
+        }
         self.draw_status(ui.ctx());
         // Final cursor wins over the scroll area's Grab: controls first, text
         // second, pan feedback third. The plain search command line is a text
@@ -1586,6 +1597,20 @@ mod tests {
                 font_progress_text(42),
                 "Downloading FiraCode font… 42% (first run only)"
             );
+        }
+    }
+
+    mod link_status {
+        use super::super::take_link_copied;
+        use crate::justify::LINK_COPIED;
+
+        #[test]
+        fn link_flag_is_consumed_once() {
+            let ctx = egui::Context::default();
+            assert!(!take_link_copied(&ctx));
+            ctx.data_mut(|d| d.insert_temp(egui::Id::new(LINK_COPIED), ()));
+            assert!(take_link_copied(&ctx));
+            assert!(!take_link_copied(&ctx));
         }
     }
 

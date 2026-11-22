@@ -1599,11 +1599,24 @@ fn paint_code_background(ui: &egui::Ui, painter: &egui::Painter, pos: Pos2, frag
     painter.rect_filled(bg, 2.0, ui.visuals().code_bg_color);
 }
 
-/// Schemes a document may hand to the OS opener. Everything else (javascript:,
+/// Schemes a link may copy to the clipboard. Everything else (javascript:,
 /// data:, file:, relative paths, bare anchors) stays inert text.
 pub(crate) fn link_is_safe(url: &str) -> bool {
     let lower = url.trim().to_ascii_lowercase();
     lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
+}
+
+/// One-frame handoff: a link click asked for the `link copied` status chip.
+pub(crate) const LINK_COPIED: &str = "jiaoren-link-copied";
+
+/// Copy a safe link and leave the status flag. Inert schemes copy nothing.
+fn click_link(ctx: &egui::Context, url: &str) -> bool {
+    if !link_is_safe(url) {
+        return false;
+    }
+    ctx.copy_text(url.to_owned());
+    ctx.data_mut(|d| d.insert_temp(Id::new(LINK_COPIED), ()));
+    true
 }
 
 fn paint_frag(ui: &egui::Ui, painter: &egui::Painter, pos: Pos2, frag: &Frag) {
@@ -1615,8 +1628,8 @@ fn paint_frag(ui: &egui::Ui, painter: &egui::Painter, pos: Pos2, frag: &Frag) {
         let id = Id::new(("mdpara-link", url, pos.x.to_bits(), pos.y.to_bits()));
         let safe = link_is_safe(url);
         let response = ui.interact(rect, id, Sense::click());
-        if safe && response.clicked() {
-            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+        if response.clicked() {
+            click_link(ui.ctx(), url);
         }
         if url.starts_with('#') && response.clicked() {
             ui.ctx().data_mut(|d| {
@@ -1636,6 +1649,53 @@ fn paint_frag(ui: &egui::Ui, painter: &egui::Painter, pos: Pos2, frag: &Frag) {
 
 #[cfg(test)]
 mod tests {
+    mod copy {
+        use super::super::{click_link, link_is_safe, LINK_COPIED};
+
+        #[test]
+        fn safe_links_copy_and_flag_the_status() {
+            let ctx = egui::Context::default();
+            assert!(click_link(&ctx, "https://example.com/docs"));
+            let copied = ctx.output(|o| {
+                o.commands.iter().any(
+                    |c| matches!(c, egui::OutputCommand::CopyText(t) if t == "https://example.com/docs"),
+                )
+            });
+            assert!(copied, "no CopyText command");
+            assert!(click_link(&ctx, "mailto:a@b.c"));
+            let mailed = ctx.output(|o| {
+                o.commands
+                    .iter()
+                    .any(|c| matches!(c, egui::OutputCommand::CopyText(t) if t == "mailto:a@b.c"))
+            });
+            assert!(mailed, "no mailto CopyText command");
+            let flagged = ctx
+                .data_mut(|d| d.remove_temp::<()>(egui::Id::new(LINK_COPIED)))
+                .is_some();
+            assert!(flagged);
+        }
+
+        #[test]
+        fn inert_schemes_copy_nothing() {
+            let ctx = egui::Context::default();
+            for url in [
+                "javascript:alert(1)",
+                "data:text/html,x",
+                "file:///etc/passwd",
+                "doc.md",
+            ] {
+                assert!(!link_is_safe(url));
+                assert!(!click_link(&ctx, url), "{url}");
+            }
+            let commands = ctx.output(|o| o.commands.len());
+            assert_eq!(commands, 0);
+            let flagged = ctx
+                .data_mut(|d| d.get_temp::<()>(egui::Id::new(LINK_COPIED)))
+                .is_some();
+            assert!(!flagged);
+        }
+    }
+
     mod links {
         use super::super::link_is_safe;
 

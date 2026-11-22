@@ -88,6 +88,9 @@ impl QuoteUi {
                     })
                     .inner;
                 let rect = painted.rect;
+                for rect in &painted.interactives {
+                    search.add_control(*rect, egui::CursorIcon::PointingHand);
+                }
                 union = Some(union.map_or(rect, |u| u.union(rect)));
                 let left = rect.left() - indent;
                 for level in 0..*depth {

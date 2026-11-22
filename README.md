@@ -49,6 +49,8 @@ theme, Macchiato for the dark theme. Window chrome and mermaid diagrams use the
 same palette.
 - A missing file, a directory, or a non-UTF-8 file prints a readable error to
   stderr and exits with status `2` (no window).
+- Clicking an `http(s)`/`mailto` link copies its URL and shows a `link copied`
+  chip; `#anchor` links jump to the heading instead.
 
 ## Typography
 
