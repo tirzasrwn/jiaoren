@@ -330,6 +330,18 @@ fn indent_columns(s: &str) -> usize {
     col
 }
 
+/// Strip control characters that would render as tofu and turn Unicode line/
+/// paragraph separators into spaces. Code fences keep their bytes verbatim.
+pub(crate) fn clean_text(s: &str) -> String {
+    s.chars()
+        .filter_map(|c| match c {
+            '\u{2028}' | '\u{2029}' => Some(' '),
+            c if c.is_control() && c != '\n' && c != '\t' => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
 /// Normalize `\r\n` and lone `\r` to `\n`, exactly once, so stored text has
 /// clean line offsets.
 fn normalize_newlines(s: &str) -> String {
@@ -488,11 +500,11 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                             // Cells are ordinary Markdown: give them the same
                             // relative-image rewrite every other line gets.
                             for c in &mut spec.header {
-                                *c = rewrite_images(c, doc_dir);
+                                *c = rewrite_images(&clean_text(c), doc_dir);
                             }
                             for row in &mut spec.rows {
                                 for c in row {
-                                    *c = rewrite_images(c, doc_dir);
+                                    *c = rewrite_images(&clean_text(c), doc_dir);
                                 }
                             }
                             let id = table_id(&spec);
@@ -555,13 +567,13 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         };
                         if let Some(end) = setext_end {
                             let level = setext_level(lines[end - 1]).unwrap_or(1);
-                            let text = normalize_newlines(
+                            let text = clean_text(&normalize_newlines(
                                 &lines[i..end - 1]
                                     .iter()
                                     .map(|l| l.trim())
                                     .collect::<Vec<_>>()
                                     .join(" "),
-                            );
+                            ));
                             let id = heading_id(level, &text, heading_seq);
                             heading_seq += 1;
                             headings.insert(
@@ -579,11 +591,13 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                             continue;
                         }
                         // CRLF safe: each line is trimmed at its end, then joined.
-                        let joined = lines[i..j]
-                            .iter()
-                            .map(|l| strip_hanging_indent(l.trim_end()))
-                            .collect::<Vec<_>>()
-                            .join("\n");
+                        let joined = clean_text(
+                            &lines[i..j]
+                                .iter()
+                                .map(|l| strip_hanging_indent(l.trim_end()))
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        );
                         // A paragraph that is only one local image becomes a
                         // placeholder, like a mermaid fence. Inline images,
                         // remote/data URIs and images inside tables, lists or
@@ -614,7 +628,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         continue;
                     }
                     if let Some((level, text)) = atx_heading(line) {
-                        let text = normalize_newlines(text);
+                        let text = clean_text(&normalize_newlines(text));
                         let id = heading_id(level, &text, heading_seq);
                         heading_seq += 1;
                         headings.insert(
@@ -758,7 +772,8 @@ pub fn parse_table_block(lines: &[&str]) -> Option<TableSpec> {
         while cells.len() < ncols {
             cells.push(String::new());
         }
-        // Extra cells beyond the header are kept, never dropped.
+        // GFM: cells past the header's column count are dropped.
+        cells.truncate(ncols);
         rows.push(cells);
     }
     Some(TableSpec { header, rows })
@@ -954,6 +969,9 @@ fn parse_list_block(lines: &[&str], start: usize) -> Option<(usize, ListSpec)> {
         break;
     }
     items.push(cur);
+    for item in &mut items {
+        item.text = clean_text(&item.text);
+    }
     Some((j, ListSpec { items }))
 }
 
@@ -1125,8 +1143,10 @@ fn rewrite_images(mut rest: &str, doc_dir: &Path) -> String {
             || target.starts_with("data:")
             || target.contains("://");
         if skip {
-            out.push_str("![");
-            rest = &rest[2..];
+            // Remote/data/absolute images are never fetched. Show the alt text
+            // instead of an image placeholder with no label.
+            out.push_str(alt);
+            rest = &rest[mid + 2 + end..];
             continue;
         }
         out.push_str(&format!("![{alt}]({})", file_uri(&doc_dir.join(target))));
@@ -1175,6 +1195,19 @@ mod tests {
                 "content after the quote must survive: {:?}",
                 p.markdown
             );
+        }
+    }
+
+    mod text_hygiene {
+        use super::super::{clean_text, prepare};
+
+        #[test]
+        fn controls_are_stripped_and_separators_become_spaces() {
+            assert_eq!(clean_text("a\u{0}b\u{7}c\u{2028}d\u{2029}e"), "abc d e");
+            assert_eq!(clean_text("keep\ttabs\nnewlines"), "keep\ttabs\nnewlines");
+            let p = prepare("a\u{0}b\n\n\u{2028}x\n", std::path::Path::new("/tmp"));
+            assert!(!p.markdown.contains('\u{0}'));
+            assert!(!p.markdown.contains('\u{2028}'));
         }
     }
 
@@ -1445,11 +1478,23 @@ mod tests {
         }
 
         #[test]
-        fn extra_cells_are_kept_not_dropped() {
+        fn extra_cells_are_dropped_per_gfm() {
             let spec = parse_table_block(&["| a | b |", "|---|---|", "| 1 | 2 | 3 |"]).unwrap();
+            assert_eq!(spec.rows, vec![vec!["1".to_string(), "2".to_string()]]);
+        }
+
+        #[test]
+        fn delimiter_cells_must_be_hyphens_with_optional_edge_colons() {
+            assert!(is_delim_cell("---"));
+            assert!(is_delim_cell(":--"));
+            assert!(is_delim_cell("--:"));
+            assert!(is_delim_cell(":-:"));
+            assert!(!is_delim_cell("-:-"));
+            assert!(!is_delim_cell(""));
+            assert!(!is_delim_cell("--x"));
             assert_eq!(
-                spec.rows,
-                vec![vec!["1".to_string(), "2".to_string(), "3".to_string()]]
+                parse_table_block(&["| a | b |", "| :-: | -:- |", "| 1 | 2 |"]),
+                None
             );
         }
 
@@ -2081,8 +2126,11 @@ mod tests {
             // An image-only line is a paragraph now; its source is rewritten.
             let out = p.paragraphs.values().next().unwrap();
             assert!(out.contains("![a](file:///docs/img/x.png)"));
-            assert!(out.contains("![b](/abs.png)"));
-            assert!(out.contains("![c](https://h/c.png)"));
+            // Never fetched: absolute and remote images show their alt text.
+            assert!(out.contains('b'));
+            assert!(out.contains('c'));
+            assert!(!out.contains("https://h/c.png"));
+            assert!(!out.contains("/abs.png"));
         }
 
         #[test]
@@ -2124,7 +2172,7 @@ mod tests {
         }
 
         #[test]
-        fn remote_and_data_images_are_not_extracted() {
+        fn remote_data_and_absolute_images_show_alt_text() {
             for target in [
                 "https://example.com/x.png",
                 "http://example.com/x.png",
@@ -2133,13 +2181,14 @@ mod tests {
             ] {
                 let md = format!("![x]({target})\n");
                 let p = prepare(&md, Path::new("/docs"));
+                assert!(p.images.is_empty(), "{target} is never fetched");
                 assert!(
-                    p.images.is_empty(),
-                    "{target} must stay on the library path"
+                    p.paragraphs.values().all(|s| !s.contains(target)),
+                    "{target} target must not be rendered"
                 );
                 assert!(
-                    p.paragraphs.values().any(|s| s.contains(target)),
-                    "{target} must be untouched"
+                    p.paragraphs.values().any(|s| s.contains('x')),
+                    "{target} must show its alt text"
                 );
             }
         }

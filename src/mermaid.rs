@@ -176,6 +176,25 @@ fn prune_chromium_versions(dir: &Path, now: std::time::SystemTime) {
     }
 }
 
+/// Strip the wrapper from the render page's error text and decode the HTML
+/// entities it carries, so the window shows `Parse error ...` rather than
+/// `id="out">ERR:...&gt;`.
+fn clean_error(raw: &str) -> String {
+    let text = raw
+        .strip_prefix("id=\"out\">ERR:")
+        .unwrap_or(raw)
+        .split("</div>")
+        .next()
+        .unwrap_or("mermaid error");
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+        .trim()
+        .to_string()
+}
+
 impl Renderer {
     /// Renderer using the user cache dir, with no Chromium discovered yet.
     pub fn new() -> Self {
@@ -277,11 +296,7 @@ impl Renderer {
         // The script source itself contains the literal "ERR:", so look only
         // at the output div's rendered text.
         if let Some(pos) = stdout.find("id=\"out\">ERR:") {
-            let msg = stdout[pos..]
-                .split("</div>")
-                .next()
-                .unwrap_or("mermaid error")
-                .to_string();
+            let msg = clean_error(&stdout[pos..]);
             self.write_err(id, theme, &msg);
             return Err(RenderError::MermaidJs(msg));
         }
@@ -822,6 +837,15 @@ mod tests {
             assert_eq!((bytes, files), (10, 1));
             assert!(!base.join("chromium").exists());
             let _ = fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn error_text_loses_the_wrapper_and_entities() {
+            assert_eq!(
+                clean_error("id=\"out\">ERR:Parse error on line 2:\n A --&gt; B</div>tail"),
+                "Parse error on line 2:\n A --> B"
+            );
+            assert_eq!(clean_error("plain &lt;err&gt;"), "plain <err>");
         }
 
         #[test]
