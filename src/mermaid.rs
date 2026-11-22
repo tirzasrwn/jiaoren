@@ -344,36 +344,23 @@ impl Renderer {
             progress("mermaid: ready");
             return Ok(());
         }
-        progress(&format!("mermaid: downloading {MERMAID_VERSION}…"));
         let tmp = PathBuf::from(format!(
             "{}.{}.tmp",
             self.mermaid_js.display(),
             std::process::id()
         ));
-        let status = Command::new("curl")
-            .arg("-fsSL")
-            .arg("--proto")
-            .arg("=https")
-            .arg("--proto-redir")
-            .arg("=https")
-            .arg("--connect-timeout")
-            .arg("5")
-            .arg("--max-time")
-            .arg("60")
-            .arg("-o")
-            .arg(&tmp)
-            .arg(MERMAID_URL)
-            .status()
-            .map_err(|e| RenderError::MermaidJs(format!("spawn curl: {e}")))?;
-        if status.success() {
-            fs::rename(&tmp, &self.mermaid_js)
-                .map_err(|e| RenderError::MermaidJs(format!("rename mermaid js: {e}")))?;
-            progress("mermaid: ready");
-            Ok(())
-        } else {
+        progress(&format!("mermaid: downloading 0% ({MERMAID_VERSION})…"));
+        let downloaded = crate::download::curl(MERMAID_URL, &tmp, 60, &mut |pct| {
+            progress(&format!("mermaid: downloading {pct}% ({MERMAID_VERSION})…"));
+        });
+        if let Err(e) = downloaded {
             let _ = fs::remove_file(&tmp);
-            Err(RenderError::MermaidJs("failed to download mermaid.min.js (network needed on first run only; set JIAOREN_MERMAID_JS to use an existing copy)".to_string()))
+            return Err(RenderError::MermaidJs(e));
         }
+        fs::rename(&tmp, &self.mermaid_js)
+            .map_err(|e| RenderError::MermaidJs(format!("rename mermaid js: {e}")))?;
+        progress("mermaid: ready");
+        Ok(())
     }
 }
 
@@ -578,24 +565,14 @@ fn install_chromium_with(
 
     fs::create_dir_all(&tmp_dir).map_err(|e| format!("create {}: {e}", tmp_dir.display()))?;
     progress(&format!(
-        "chromium: downloading {MANAGED_VERSION} (132 MB)…"
+        "chromium: downloading 0% ({MANAGED_VERSION}, 132 MB)…"
     ));
-    let status = Command::new("curl")
-        .arg("-fsSL")
-        .arg("--proto")
-        .arg("=https")
-        .arg("--proto-redir")
-        .arg("=https")
-        .arg("--retry")
-        .arg("2")
-        .arg("-o")
-        .arg(&zip)
-        .arg(&url)
-        .status()
-        .map_err(|e| fail("spawn curl", e.to_string()))?;
-    if !status.success() {
-        return Err(fail("download", format!("curl exited {status}")));
-    }
+    crate::download::curl(&url, &zip, 600, &mut |pct| {
+        progress(&format!(
+            "chromium: downloading {pct}% ({MANAGED_VERSION})…"
+        ));
+    })
+    .map_err(|e| fail("download", e))?;
     progress("chromium: verifying archive…");
     let status = Command::new("unzip")
         .arg("-t")

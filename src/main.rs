@@ -3,6 +3,7 @@
 
 mod app;
 mod doc;
+mod download;
 mod fonts;
 mod justify;
 mod mermaid;
