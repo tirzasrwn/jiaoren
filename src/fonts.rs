@@ -164,9 +164,7 @@ fn is_font(bytes: &[u8]) -> bool {
     let Some(magic) = bytes.get(..4) else {
         return false;
     };
-    [&[0u8, 1, 0, 0][..], b"OTTO", b"true", b"ttcf"]
-        .iter()
-        .any(|want| magic == *want)
+    [&[0u8, 1, 0, 0][..], b"OTTO", b"true", b"ttcf"].contains(&magic)
 }
 
 /// Validate `bytes` and atomically move them to `dest` via a temp file.
@@ -257,20 +255,10 @@ fn download_face(
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("curl exited {status}"));
     }
-    let bytes = match std::fs::read(&tmp) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(format!("read download: {e}"));
-        }
-    };
-    if bytes.len() < 10_000 || !is_font(&bytes) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err("download is not a font".to_string());
-    }
-    let moved = std::fs::rename(&tmp, &dest);
+    let read = std::fs::read(&tmp);
     let _ = std::fs::remove_file(&tmp);
-    moved.map_err(|e| format!("rename {}: {e}", dest.display()))
+    let bytes = read.map_err(|e| format!("read download: {e}"))?;
+    store_face(dir, &dest, &bytes)
 }
 
 /// Build [`egui::FontDefinitions`] from already-read face bytes.
@@ -328,14 +316,6 @@ fn defs_from_faces(regular: Vec<u8>, bold: Option<Vec<u8>>) -> egui::FontDefinit
         list.extend(defaults);
     }
     defs
-}
-
-/// Install the best available font once at startup. Temporary bridge until the
-/// app owns cache/fallback selection; a missing font leaves egui's defaults.
-pub fn install(ctx: &egui::Context) {
-    if let Some(defs) = cached(&crate::mermaid::cache_root()).or_else(fallback) {
-        ctx.set_fonts(defs);
-    }
 }
 
 /// Build [`egui::FontDefinitions`] from the Regular (and, if present, Bold)
