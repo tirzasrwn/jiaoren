@@ -67,38 +67,63 @@ pub struct Renderer {
     pub cache_dir: PathBuf,
 }
 
+/// Age that a temp file must reach before it is pruned, so a `.tmp` another
+/// jr instance is writing right now is never removed.
+const TMP_GRACE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Age that an old Chromium version directory must reach before removal, so a
+/// still-running older jr binary keeps its browser.
+const CHROMIUM_GRACE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Whether `modified` is older than `grace` relative to `now`.
+fn older_than(
+    modified: Option<std::time::SystemTime>,
+    now: std::time::SystemTime,
+    grace: std::time::Duration,
+) -> bool {
+    modified
+        .and_then(|m| now.duration_since(m).ok())
+        .is_some_and(|age| age > grace)
+}
+
 /// Delete cache entries that belong to older Mermaid/Chromium versions, plus
-/// scratch temps. Current-version renders and unknown user files stay.
+/// old scratch temps. Current-version renders, in-flight temps and unknown
+/// user files stay, so several jr instances can run together.
 fn prune_cache(dir: &Path) {
     let current_js = format!("mermaid-{MERMAID_VERSION}.min.js");
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
+    let now = std::time::SystemTime::now();
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         if path.is_dir() {
             if name == "chromium" {
-                prune_chromium_versions(&path);
+                prune_chromium_versions(&path, now);
             }
             continue;
         }
+        let meta = entry.metadata().ok();
         let stale_render = name.contains("-mermaid") && !name.contains(RENDER_VERSION);
         let stale_js =
             name.starts_with("mermaid") && name.ends_with(".min.js") && name != current_js;
-        if name.ends_with(".tmp") || stale_render || stale_js {
+        let stale_tmp = name.ends_with(".tmp")
+            && older_than(meta.and_then(|m| m.modified().ok()), now, TMP_GRACE);
+        if stale_render || stale_js || stale_tmp {
             let _ = fs::remove_file(&path);
         }
     }
 }
 
-fn prune_chromium_versions(dir: &Path) {
+fn prune_chromium_versions(dir: &Path, now: std::time::SystemTime) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
-        let stale = entry.file_name().to_string_lossy() != MANAGED_VERSION;
-        if stale && entry.path().is_dir() {
+        let old_version = entry.file_name().to_string_lossy() != MANAGED_VERSION;
+        let modified = entry.metadata().ok().and_then(|m| m.modified().ok());
+        if old_version && entry.path().is_dir() && older_than(modified, now, CHROMIUM_GRACE) {
             let _ = fs::remove_dir_all(entry.path());
         }
     }
@@ -169,9 +194,11 @@ impl Renderer {
 
         self.ensure_mermaid_js()?;
 
-        let html = self
-            .cache_dir
-            .join(format!("{id}-{}-{RENDER_VERSION}.html", theme.as_str()));
+        let html = self.cache_dir.join(format!(
+            "{id}-{}-{RENDER_VERSION}-{}.html",
+            theme.as_str(),
+            std::process::id()
+        ));
         let page = build_html(&self.mermaid_js, source, theme);
         fs::write(&html, &page).map_err(|e| RenderError::HtmlWrite(e.to_string()))?;
 
@@ -234,7 +261,8 @@ impl Renderer {
     fn atomic_write(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         // Append rather than replace the extension so .svg and .err of the
         // same id get distinct tmp names.
-        let tmp = PathBuf::from(format!("{}.tmp", path.display()));
+        // Per-process temp: two jr instances may render the same diagram.
+        let tmp = PathBuf::from(format!("{}.{}.tmp", path.display(), std::process::id()));
         fs::write(&tmp, bytes)?;
         fs::rename(&tmp, path)
     }
@@ -244,7 +272,11 @@ impl Renderer {
         if self.mermaid_js.exists() {
             return Ok(());
         }
-        let tmp = PathBuf::from(format!("{}.tmp", self.mermaid_js.display()));
+        let tmp = PathBuf::from(format!(
+            "{}.{}.tmp",
+            self.mermaid_js.display(),
+            std::process::id()
+        ));
         let status = Command::new("curl")
             .arg("-fsSL")
             .arg("--proto")
@@ -750,11 +782,23 @@ mod tests {
             assert!(dir.join(&current_js).exists());
             assert!(!dir.join(stale).exists());
             assert!(!dir.join(stale_js).exists());
-            assert!(!dir.join("leftover.tmp").exists());
+            // A fresh temp may belong to another running jr and stays.
+            assert!(dir.join("leftover.tmp").exists());
             assert!(dir.join("notes.txt").exists(), "user files stay");
             assert!(dir.join("chromium").join(MANAGED_VERSION).exists());
-            assert!(!dir.join("chromium").join("1.0.0").exists());
+            // A fresh old-version browser dir may be in use by an older jr.
+            assert!(dir.join("chromium").join("1.0.0").exists());
             let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn age_must_pass_before_pruning_can_touch_a_file() {
+            let now = std::time::SystemTime::now();
+            let fresh = now - std::time::Duration::from_secs(60);
+            let old = now - TMP_GRACE - std::time::Duration::from_secs(1);
+            assert!(!older_than(Some(fresh), now, TMP_GRACE));
+            assert!(older_than(Some(old), now, TMP_GRACE));
+            assert!(!older_than(None, now, TMP_GRACE));
         }
 
         #[test]
