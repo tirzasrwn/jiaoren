@@ -1497,6 +1497,7 @@ fn range_span(
     let mut lo: Option<f32> = None;
     let mut hi: Option<f32> = None;
     let mut prev_end: Option<f32> = None;
+    let mut last_matched_end: Option<usize> = None;
     for (frag, x) in placements {
         let frag_start = frag.offset;
         let frag_end = frag_start + frag.text.chars().count();
@@ -1505,9 +1506,10 @@ fn range_span(
             continue;
         }
         if frag_start >= end {
-            if let Some(hi) = hi.as_mut() {
-                *hi = hi.max(*x);
-            } else {
+            // Only reach into the following gap when the query itself ends in
+            // that gap (`"alpha "`); a match that stops on a glyph must stop at
+            // that glyph, not eat the space after it.
+            if hi.is_none() || last_matched_end.is_some_and(|e| end > e) {
                 hi = Some(*x);
             }
             break;
@@ -1533,6 +1535,7 @@ fn range_span(
         };
         lo = Some(lo.map_or(lo0, |v: f32| v.min(lo0)));
         hi = Some(hi.map_or(x1, |v: f32| v.max(x1)));
+        last_matched_end = Some(frag_end);
         prev_end = Some(x1);
     }
     match (lo, hi) {
