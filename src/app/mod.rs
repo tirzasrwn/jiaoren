@@ -194,6 +194,20 @@ fn status_color(theme: Theme) -> egui::Color32 {
     crate::theme::palette(theme).subtext0.into()
 }
 
+/// Status text shown while the first-run font download runs.
+fn font_progress_text(pct: u8) -> String {
+    format!("Downloading FiraCode font… {pct}% (first run only)")
+}
+
+/// Failure line, naming whatever font the window actually kept.
+fn font_failure_status() -> &'static str {
+    if crate::fonts::fallback().is_some() {
+        "font download failed; using the system font"
+    } else {
+        "font download failed; using the built-in font"
+    }
+}
+
 /// Bottom-left status overlay, shared by copy messages and the search status.
 fn status_area(ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui)) {
     egui::Area::new(egui::Id::new("jiaoren-status"))
@@ -492,6 +506,10 @@ pub(crate) struct App {
     last_mtime: Option<SystemTime>,
     last_poll: Instant,
     status: Option<Status>,
+    /// First-run font download, polled once per frame until it finishes.
+    font_rx: Option<mpsc::Receiver<crate::fonts::FontMsg>>,
+    /// Downloaded percentage while `font_rx` is live.
+    font_progress: Option<u8>,
 }
 
 impl App {
@@ -499,8 +517,31 @@ impl App {
     /// font and theme before the first frame.
     pub fn new(path: PathBuf, text: String, dark: bool, ctx: &egui::Context) -> Self {
         let theme = if dark { Theme::Dark } else { Theme::Light };
-        // Once, before the first frame: FiraCode primary, egui defaults as fallback.
-        crate::fonts::install(ctx);
+        // A cached FiraCode is installed before the first frame. On a fresh
+        // cache, start with the system font (or egui's defaults) and download
+        // in the background so the window still opens immediately.
+        let cache_root = crate::mermaid::cache_root();
+        crate::fonts::prune(&cache_root);
+        // Documented order: override, cache, system, egui defaults. On a fresh
+        // cache, start with the system font (or egui's defaults) and download
+        // in the background so the window still opens immediately.
+        let download = crate::fonts::download_needed(&cache_root);
+        if let Some(defs) = crate::fonts::preferred(&cache_root) {
+            ctx.set_fonts(defs);
+        }
+        let mut font_rx = None;
+        if download {
+            let (tx, rx) = mpsc::channel();
+            let root = cache_root.clone();
+            std::thread::spawn(move || {
+                let mut send = |pct| {
+                    let _ = tx.send(crate::fonts::FontMsg::Progress(pct));
+                };
+                let result = crate::fonts::download_cached(&root, &mut send);
+                let _ = tx.send(crate::fonts::FontMsg::Done(result));
+            });
+            font_rx = Some(rx);
+        }
         apply_theme(ctx, theme);
         let mut renderer = Renderer::new();
         // First-run downloads happen here, once, on the UI thread, before any
@@ -623,6 +664,8 @@ impl App {
             last_mtime,
             last_poll: Instant::now(),
             status: None,
+            font_rx,
+            font_progress: None,
         }
     }
 
@@ -698,6 +741,16 @@ impl App {
             }
         }
         if let Some(text) = self.search.borrow().state.status_text() {
+            status_area(ctx, |ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(text).color(status_color(self.theme)))
+                        .wrap_mode(egui::TextWrapMode::Extend),
+                );
+            });
+            return;
+        }
+        if let Some(pct) = self.font_progress {
+            let text = font_progress_text(pct);
             status_area(ctx, |ui| {
                 ui.add(
                     egui::Label::new(egui::RichText::new(text).color(status_color(self.theme)))
@@ -848,6 +901,42 @@ impl eframe::App for App {
         self.diagrams.borrow_mut().poll(ctx);
         self.images.borrow_mut().poll(ctx);
         self.watch_tick(ctx);
+        if let Some(rx) = self.font_rx.take() {
+            let mut done = false;
+            loop {
+                match rx.try_recv() {
+                    Ok(crate::fonts::FontMsg::Progress(pct)) => self.font_progress = Some(pct),
+                    Ok(crate::fonts::FontMsg::Done(Ok(defs))) => {
+                        ctx.set_fonts(defs);
+                        // `set_fonts` takes effect on the next pass; ask for it
+                        // or the swap waits for the next input event.
+                        ctx.request_repaint();
+                        self.font_progress = None;
+                        done = true;
+                    }
+                    Ok(crate::fonts::FontMsg::Done(Err(_))) => {
+                        self.font_progress = None;
+                        done = true;
+                        self.set_status(font_failure_status());
+                        ctx.request_repaint();
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        // The worker died without a verdict: same fallback, and
+                        // no 100 ms repaint loop forever.
+                        self.font_progress = None;
+                        done = true;
+                        self.set_status(font_failure_status());
+                        ctx.request_repaint();
+                        break;
+                    }
+                }
+            }
+            if !done {
+                self.font_rx = Some(rx);
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1395,6 +1484,22 @@ mod tests {
             assert!(!paragraph_needs_library("**bold** and `code`"));
             assert!(paragraph_needs_library("1 < 2"));
             assert!(!paragraph_needs_library("1 > 2"));
+        }
+    }
+
+    mod font_progress {
+        use super::super::font_progress_text;
+
+        #[test]
+        fn font_progress_text_has_percent_and_reason() {
+            assert_eq!(
+                font_progress_text(0),
+                "Downloading FiraCode font… 0% (first run only)"
+            );
+            assert_eq!(
+                font_progress_text(42),
+                "Downloading FiraCode font… 42% (first run only)"
+            );
         }
     }
 

@@ -39,8 +39,10 @@ jr --clean-cache --all    # also the managed Chromium (~132 MB)
 - `--dark` — start with the dark theme.
 - `--clean-cache` — delete cached diagram renders and the downloaded
   `mermaid.min.js`, then exit. The managed Chromium is kept; add `--all` to
-  remove it too. Startup prunes renders from older Mermaid/Chromium versions
-  automatically, and is safe while other `jr` instances are running.
+  remove it too. The downloaded font cache is always kept (it is an asset, not
+  a derived render). Startup prunes renders from older Mermaid/Chromium
+  versions and font versions other than the pinned one, and is safe while
+  other `jr` instances are running.
 
 Colors are [Catppuccin](https://catppuccin.com/palette/): Latte for the light
 theme, Macchiato for the dark theme. Window chrome and mermaid diagrams use the
@@ -51,14 +53,16 @@ same palette.
 ## Typography
 
 jiaoren uses **FiraCode Nerd Font** (family name `FiraCode Nerd Font`) for both
-body text and code, and for mermaid diagram labels. It looks for
-`FiraCodeNerdFont-Regular.ttf` / `FiraCodeNerdFont-Bold.ttf` in `~/.fonts`,
-`$XDG_DATA_HOME/fonts`, `~/.local/share/fonts`, then
-`/usr/share/fonts/truetype`. When the font is absent jiaoren starts normally on
-egui's built-in fonts.
+body text and code. On first run it downloads `FiraCodeNerdFont-Regular.ttf` and
+`FiraCodeNerdFont-Bold.ttf` into `~/.cache/jiaoren/fonts/3.4.0/` and reports the
+percentage in the bottom-left status line; the window opens immediately. A
+failed or offline download falls back to a system copy.
 
-To go back to the defaults, delete (or comment out) the
-`crate::fonts::install(ctx);` call in `src/app.rs::App::new`.
+Load order: `$JIAOREN_FONT_DIR` (explicit directory, no download), the managed
+cache, the system fonts (`~/.fonts`, `$XDG_DATA_HOME/fonts`,
+`~/.local/share/fonts`, `/usr/share/fonts/truetype`), then egui's built-in
+fonts. `jr --version` prints the font version and which source is in use.
+Mermaid diagram labels still need `FiraCode Nerd Font` installed system-wide.
 
 ## Keys
 

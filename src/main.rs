@@ -60,11 +60,12 @@ pub fn version_text() -> String {
         Err(_) => format!("{} (managed)", mermaid::MANAGED_VERSION),
     };
     format!(
-        "{} {}\nmermaid {}\nchromium {}",
+        "{} {}\nmermaid {}\nchromium {}\nfont {}",
         env!("CARGO_PKG_NAME"),
         env!("CARGO_PKG_VERSION"),
         mermaid::MERMAID_VERSION,
-        chromium
+        chromium,
+        fonts::version_line(&mermaid::cache_root())
     )
 }
 
@@ -126,6 +127,7 @@ fn main() -> anyhow::Result<()> {
                     if !all {
                         println!("kept the managed Chromium; add --all to remove it too");
                     }
+                    println!("kept the downloaded fonts");
                 }
                 Err(e) => {
                     eprintln!("clean cache: {e}");
@@ -208,6 +210,15 @@ mod tests {
             assert!(text.contains(&format!("mermaid {}", crate::mermaid::MERMAID_VERSION)));
             assert!(text.contains(&format!("chromium {}", crate::mermaid::MANAGED_VERSION)));
             assert!(text.contains("(managed)") || text.contains("(override:"));
+        }
+
+        #[test]
+        fn version_text_names_the_font() {
+            let text = version_text();
+            assert!(
+                text.lines().any(|l| l.starts_with("font ")),
+                "font line missing: {text}"
+            );
         }
 
         #[test]
