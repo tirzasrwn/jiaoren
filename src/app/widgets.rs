@@ -2,19 +2,6 @@
 
 use egui::{Color32, CornerRadius, Id, Rect, Sense, Stroke, StrokeKind};
 
-/// Icon-only copy control laid out in the current ui: two overlapping rounded
-/// sheets drawn with the painter, so it never depends on a font glyph. Returns
-/// true on click. `backdrop` fills the front sheet so the rear outline does not
-/// cut through it.
-pub(crate) fn copy_button(ui: &mut egui::Ui, tooltip: &str) -> (bool, Rect) {
-    let backdrop = ui.visuals().panel_fill;
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::CLICK);
-    (
-        paint_copy_button(ui, rect, response, tooltip, backdrop),
-        rect,
-    )
-}
-
 /// The same icon at a caller-chosen rect, for overlaying a block corner without
 /// taking layout space. `id` must be unique per visible instance.
 pub(crate) fn copy_button_at(

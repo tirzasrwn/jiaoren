@@ -73,6 +73,8 @@ impl TableUi {
         if ncols == 0 {
             return;
         }
+        // Right gutter kept free in the header's last cell for the copy icon.
+        const COPY_INSET: f32 = 18.0;
         let occurrence = self.occurrences.entry(id.to_string()).or_insert(0);
         let current = *occurrence;
         *occurrence += 1;
@@ -82,21 +84,11 @@ impl TableUi {
         let widths = self.column_widths(ui, id, &spec, ncols, available, spacing);
         // A distinct id per occurrence so two identical tables never share state.
         let grid_id = ui.id().with(("mdtable", id, occurrence));
-        let body_row_height = ui.text_style_height(&egui::TextStyle::Body);
         let dark = ui.visuals().dark_mode;
         // The html hook runs in a wrapping left-to-right layout, where a bare
         // `add_space` would advance horizontally; the vertical wrapper turns the
-        // padding into real space above and below the grid.
+        // padding into real space below the grid.
         ui.vertical(|ui| {
-            ui.add_space(table_pad(body_row_height));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let (clicked, rect) = super::widgets::copy_button(ui, "Copy table as CSV");
-                search.add_control(rect, egui::CursorIcon::Default);
-                if clicked {
-                    ui.ctx().copy_text(table_to_csv(&spec));
-                    self.copied = true;
-                }
-            });
             // The row colour paints the full table width behind the cells, so
             // the header reads as one bar instead of per-cell chips; data rows
             // alternate from the first one. The row under the pointer uses the
@@ -124,9 +116,13 @@ impl TableUi {
                             (ranges, current, Some(block))
                         };
                         let selection = block.and_then(|b| search.selection_range(b));
+                        // The last header cell leaves room for the overlaid copy
+                        // icon, so a long header wraps instead of running under it.
+                        let inset = if i + 1 == ncols { COPY_INSET } else { 0.0 };
                         let painted = render_cell(
                             ui,
                             cell_width(&widths, i),
+                            inset,
                             cell,
                             &mut self.cell_cache,
                             &ranges,
@@ -166,6 +162,7 @@ impl TableUi {
                             let painted = render_cell(
                                 ui,
                                 cell_width(&widths, i),
+                                0.0,
                                 cell,
                                 &mut self.cell_cache,
                                 &ranges,
@@ -203,7 +200,32 @@ impl TableUi {
                 }
                 ui.ctx().request_repaint();
             }
-            ui.add_space(table_pad(body_row_height));
+            // Overlay the copy icon inside the table's top-right corner instead
+            // of giving it a row of its own: a button row above the grid would
+            // push the table down and make the gap above differ from the gap
+            // below. The backdrop is the header fill so the rear sheet does not
+            // cut through it.
+            let bounds = ui.min_rect();
+            let icon = egui::Rect::from_min_size(
+                egui::pos2(bounds.right() - 16.0, bounds.top() + 2.0),
+                egui::vec2(14.0, 14.0),
+            );
+            let (_, header_fill) = table_fills(dark);
+            let (clicked, control) = super::widgets::copy_button_at(
+                ui,
+                icon,
+                ui.id().with(("table-copy", id, occurrence)),
+                "Copy table as CSV",
+                header_fill,
+            );
+            search.add_control(control, egui::CursorIcon::Default);
+            if clicked {
+                ui.ctx().copy_text(table_to_csv(&spec));
+                self.copied = true;
+            }
+            // Same bottom gap as a paragraph, so table-to-paragraph and
+            // paragraph-to-table read as one rhythm.
+            ui.add_space(crate::justify::block_gap(ui));
         });
     }
 
@@ -251,8 +273,8 @@ impl TableUi {
     }
 }
 
-/// Vertical breathing room above and below a table: three quarters of a body
-/// row reads as balanced without pushing tables apart from their captions.
+/// Vertical breathing room around a block: three quarters of a body row reads
+/// as balanced without pushing blocks apart from their captions.
 pub(crate) fn table_pad(row_height: f32) -> f32 {
     row_height * 0.75
 }
@@ -518,9 +540,14 @@ fn cell_needs_library_fallback(md: &str) -> bool {
 /// Render one cell, capped at `w` so text wraps and inline formatting (bold,
 /// code, links) still applies. Long tokens break at separators, so a cell never
 /// widens the grid past its column.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one cell needs its width, inset, markdown and search state"
+)]
 fn render_cell(
     ui: &mut egui::Ui,
     w: f32,
+    right_inset: f32,
     cell_md: &str,
     cache: &mut CommonMarkCache,
     highlights: &[(usize, usize)],
@@ -531,7 +558,10 @@ fn render_cell(
     // zero-height `allocate_ui_with_layout` would collapse every row to 0 and
     // let wrapped text paint over the next row.
     ui.vertical(|ui| {
+        // Hold the column at `w` even when the text is laid out narrower, so an
+        // inset leaves a gutter rather than shrinking the table.
         ui.set_width(w);
+        let w = (w - right_inset).max(20.0);
         if let Some((_alt, target)) = crate::doc::parse_standalone_image(cell_md) {
             if target.starts_with("file://") {
                 let box_size = egui::vec2(w, (w * 0.6).clamp(40.0, 240.0));
