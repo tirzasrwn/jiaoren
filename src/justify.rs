@@ -835,8 +835,8 @@ pub enum Marker {
     /// `○`, a nested bullet. U+25E6 `◦` is not used: it is missing from
     /// FiraCode Nerd Font and from egui's fallback set, so it renders as tofu.
     Hollow,
-    /// `{n}.`, an ordered item keeping its source number.
-    Number(u64),
+    /// `{n}.` or `{n})`, an ordered item keeping its source number/delimiter.
+    Number(u64, char),
     /// `☑` or `☐`, a task box.
     Task(bool),
 }
@@ -847,7 +847,7 @@ impl Marker {
         match self {
             Marker::Bullet => "•".to_string(),
             Marker::Hollow => "○".to_string(),
-            Marker::Number(n) => format!("{n}."),
+            Marker::Number(n, delim) => format!("{n}{delim}"),
             Marker::Task(true) => "☑".to_string(),
             Marker::Task(false) => "☐".to_string(),
         }
@@ -1804,7 +1804,8 @@ mod tests {
         fn labels_match_the_marker_kind() {
             assert_eq!(Marker::Bullet.label(), "•");
             assert_eq!(Marker::Hollow.label(), "○");
-            assert_eq!(Marker::Number(3).label(), "3.");
+            assert_eq!(Marker::Number(3, '.').label(), "3.");
+            assert_eq!(Marker::Number(4, ')').label(), "4)");
             assert_eq!(Marker::Task(true).label(), "☑");
             assert_eq!(Marker::Task(false).label(), "☐");
         }

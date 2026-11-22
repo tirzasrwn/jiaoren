@@ -60,7 +60,7 @@ impl ListUi {
                 let marker = match item.kind {
                     ListKind::Bullet if item.depth % 2 == 1 => Marker::Hollow,
                     ListKind::Bullet => Marker::Bullet,
-                    ListKind::Ordered(n) => Marker::Number(n),
+                    ListKind::Ordered(n, delim) => Marker::Number(n, delim),
                     ListKind::Task(done) => Marker::Task(done),
                 };
                 let runs = justify::parse_inline(&item.text);

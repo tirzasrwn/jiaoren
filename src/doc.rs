@@ -114,8 +114,8 @@ pub struct ListItem {
 pub enum ListKind {
     /// `-`, `*` or `+`.
     Bullet,
-    /// Ordered marker, keeping the literal number from the source.
-    Ordered(u64),
+    /// Ordered marker: literal number and `.`/`)` delimiter from the source.
+    Ordered(u64, char),
     /// Task marker; `true` when the box is checked.
     Task(bool),
 }
@@ -163,9 +163,10 @@ pub fn list_id(spec: &ListSpec) -> String {
         canon.push('\u{1f}');
         match item.kind {
             ListKind::Bullet => canon.push('b'),
-            ListKind::Ordered(number) => {
+            ListKind::Ordered(number, delim) => {
                 canon.push('o');
                 canon.push_str(&number.to_string());
+                canon.push(delim);
             }
             ListKind::Task(done) => canon.push(if done { 'x' } else { ' ' }),
         }
@@ -667,6 +668,38 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         i = j;
                         continue;
                     }
+                    // Lazy continuation of a quote: a following unindented line
+                    // stays inside it (audit T-CM-060).
+                    if strip_quote(line).is_some() {
+                        let mut end = i;
+                        while end < lines.len() && strip_quote(lines[end]).is_some() {
+                            end += 1;
+                        }
+                        let last_nonblank = end > i
+                            && strip_quote(lines[end - 1]).is_some_and(|s| !s.trim().is_empty());
+                        let mut lazy_end = end;
+                        while lazy_end < lines.len() {
+                            let l = lines[lazy_end];
+                            if l.trim().is_empty()
+                                || strip_quote(l).is_some()
+                                || is_block_boundary(l)
+                            {
+                                break;
+                            }
+                            lazy_end += 1;
+                        }
+                        if last_nonblank && lazy_end > end {
+                            for l in &lines[i..end] {
+                                out.push_str(l);
+                            }
+                            for l in &lines[end..lazy_end] {
+                                out.push_str("> ");
+                                out.push_str(l);
+                            }
+                            i = lazy_end;
+                            continue;
+                        }
+                    }
                     if let Some((level, text)) = atx_heading(line) {
                         let text = expand_links(&clean_text(&normalize_newlines(text)), &refs);
                         let id = heading_id(level, &text, heading_seq);
@@ -1038,6 +1071,16 @@ fn parse_list_block(lines: &[&str], start: usize) -> Option<(usize, ListSpec)> {
             j += 1;
             continue;
         }
+        // CommonMark lazy continuation: a non-indented line that is not a new
+        // block still belongs to the current item.
+        if !is_block_boundary(line) && !line.contains('|') && !line.trim_start().starts_with('<') {
+            if !cur.text.is_empty() {
+                cur.text.push(' ');
+            }
+            cur.text.push_str(line.trim());
+            j += 1;
+            continue;
+        }
         break;
     }
     items.push(cur);
@@ -1064,7 +1107,7 @@ fn list_marker(line: &str) -> Option<(usize, ListKind, &str)> {
             let digits = b.iter().take_while(|c| c.is_ascii_digit()).count();
             let number = s[..digits].parse().ok()?;
             match b.get(digits) {
-                Some(b'.') | Some(b')') => (ListKind::Ordered(number), digits + 1),
+                Some(&d @ (b'.' | b')')) => (ListKind::Ordered(number, d as char), digits + 1),
                 _ => return None,
             }
         }
@@ -1441,6 +1484,19 @@ mod tests {
         }
     }
 
+    mod list_delimiters {
+        use super::super::{prepare, ListKind};
+        use std::path::Path;
+
+        #[test]
+        fn parenthesised_ordered_marker_is_kept() {
+            let p = prepare("1) first\n2) second\n", Path::new("/d"));
+            let spec = p.lists.values().next().expect("list extracted");
+            assert_eq!(spec.items[0].kind, ListKind::Ordered(1, ')'));
+            assert_eq!(spec.items[1].kind, ListKind::Ordered(2, ')'));
+        }
+    }
+
     mod anchors {
         use super::super::slug;
 
@@ -1450,6 +1506,18 @@ mod tests {
             assert_eq!(slug("C++ & Rust"), "c--rust");
             assert_eq!(slug("snake_case and-dash"), "snake_case-and-dash");
             assert_eq!(slug("日本語 Heading"), "日本語-heading");
+        }
+    }
+
+    mod quote_lazy {
+        use super::super::prepare;
+        use std::path::Path;
+
+        #[test]
+        fn unindented_line_stays_inside_a_quote() {
+            let p = prepare("> quote line\nlazy line\n\nnext para\n", Path::new("/d"));
+            assert!(p.markdown.contains("> lazy line"), "{:?}", p.markdown);
+            assert!(p.markdown.contains("<mdpara"), "{:?}", p.markdown);
         }
     }
 
@@ -1829,7 +1897,7 @@ mod tests {
                 (0, &ListKind::Bullet)
             );
             assert_eq!(spec.items[2].depth, 1);
-            assert!(matches!(spec.items[3].kind, ListKind::Ordered(1)));
+            assert!(matches!(spec.items[3].kind, ListKind::Ordered(1, '.')));
             assert!(p.markdown.contains("<mdlist id="));
             assert!(!p.markdown.contains("- satu"));
         }
@@ -1855,8 +1923,8 @@ mod tests {
             let p = prepare(md, Path::new("/d"));
             let specs: Vec<_> = p.lists.into_values().collect();
             let all: Vec<_> = specs.iter().flat_map(|s| &s.items).collect();
-            assert!(matches!(all[0].kind, ListKind::Ordered(3)));
-            assert!(matches!(all[1].kind, ListKind::Ordered(4)));
+            assert!(matches!(all[0].kind, ListKind::Ordered(3, '.')));
+            assert!(matches!(all[1].kind, ListKind::Ordered(4, '.')));
             assert_eq!(all[2].kind, ListKind::Task(true));
             assert_eq!(all[3].kind, ListKind::Task(false));
         }
@@ -1883,8 +1951,8 @@ mod tests {
         }
 
         #[test]
-        fn list_then_paragraph_keeps_both() {
-            let p = prepare("- a\nnext para\n", Path::new("/d"));
+        fn list_then_blank_line_paragraph_keeps_both() {
+            let p = prepare("- a\n\nnext para\n", Path::new("/d"));
             assert_eq!(p.lists.len(), 1);
             assert_eq!(p.paragraphs.len(), 1);
             assert!(p.paragraphs.values().any(|s| s == "next para"));
@@ -1936,11 +2004,20 @@ mod tests {
         }
 
         #[test]
+        fn unindented_line_lazily_continues_the_item() {
+            let p = prepare("- item\ncontinuation line\n\nnext para\n", Path::new("/d"));
+            let spec = p.lists.values().next().unwrap();
+            assert_eq!(spec.items.len(), 1);
+            assert_eq!(spec.items[0].text, "item continuation line");
+            assert_eq!(p.paragraphs.len(), 1, "next paragraph stays separate");
+        }
+
+        #[test]
         fn plus_bullets_and_paren_ordered_markers() {
             let p = prepare("+ a\n1) b\n", Path::new("/d"));
             let spec = p.lists.values().next().unwrap();
             assert_eq!(spec.items[0].kind, ListKind::Bullet);
-            assert_eq!(spec.items[1].kind, ListKind::Ordered(1));
+            assert_eq!(spec.items[1].kind, ListKind::Ordered(1, ')'));
         }
 
         #[test]
