@@ -67,11 +67,51 @@ pub struct Renderer {
     pub cache_dir: PathBuf,
 }
 
+/// Delete cache entries that belong to older Mermaid/Chromium versions, plus
+/// scratch temps. Current-version renders and unknown user files stay.
+fn prune_cache(dir: &Path) {
+    let current_js = format!("mermaid-{MERMAID_VERSION}.min.js");
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if path.is_dir() {
+            if name == "chromium" {
+                prune_chromium_versions(&path);
+            }
+            continue;
+        }
+        let stale_render = name.contains("-mermaid") && !name.contains(RENDER_VERSION);
+        let stale_js =
+            name.starts_with("mermaid") && name.ends_with(".min.js") && name != current_js;
+        if name.ends_with(".tmp") || stale_render || stale_js {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+fn prune_chromium_versions(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry.file_name().to_string_lossy() != MANAGED_VERSION;
+        if stale && entry.path().is_dir() {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 impl Renderer {
     /// Renderer using the user cache dir, with no Chromium discovered yet.
     pub fn new() -> Self {
         let cache_dir = dirs_cache().join("jiaoren");
         fs::create_dir_all(&cache_dir).ok();
+        // Startup cleanup: renders and scripts from older Mermaid or Chromium
+        // versions are never read again.
+        prune_cache(&cache_dir);
         let mermaid_js = std::env::var_os("JIAOREN_MERMAID_JS")
             .map(PathBuf::from)
             // Versioned filename: a bump must not reuse the old script.
@@ -676,6 +716,45 @@ mod tests {
                 "no <svg> in chromium output"
             );
             assert_eq!(RenderError::Raster("e".into()).to_string(), "write svg: e");
+        }
+
+        #[test]
+        fn prune_removes_old_versions_and_keeps_current_cache() {
+            let dir = std::env::temp_dir().join(format!(
+                "jiaoren-prune-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(dir.join("chromium").join(MANAGED_VERSION)).unwrap();
+            fs::create_dir_all(dir.join("chromium").join("1.0.0")).unwrap();
+            let current = format!("abc-light-{RENDER_VERSION}.svg");
+            let stale =
+                "abc-light-5-mermaid11.12.0-htmlLabelsOff-2x-strict-svg-catppuccin-firacode.svg";
+            let current_js = format!("mermaid-{MERMAID_VERSION}.min.js");
+            let stale_js = "mermaid-11.12.0.min.js";
+            for name in [
+                current.as_str(),
+                "abc-dark-5-mermaid11.12.0-htmlLabelsOff-2x-strict-svg-catppuccin-firacode.err",
+                current_js.as_str(),
+                stale_js,
+                "leftover.tmp",
+                "notes.txt",
+            ] {
+                fs::write(dir.join(name), b"x").unwrap();
+            }
+            prune_cache(&dir);
+            assert!(dir.join(&current).exists());
+            assert!(dir.join(&current_js).exists());
+            assert!(!dir.join(stale).exists());
+            assert!(!dir.join(stale_js).exists());
+            assert!(!dir.join("leftover.tmp").exists());
+            assert!(dir.join("notes.txt").exists(), "user files stay");
+            assert!(dir.join("chromium").join(MANAGED_VERSION).exists());
+            assert!(!dir.join("chromium").join("1.0.0").exists());
+            let _ = fs::remove_dir_all(&dir);
         }
 
         #[test]
