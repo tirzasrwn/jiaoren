@@ -341,7 +341,6 @@ impl Renderer {
         progress: &mut dyn FnMut(&str),
     ) -> Result<(), RenderError> {
         if self.mermaid_js.exists() {
-            progress("mermaid: ready");
             return Ok(());
         }
         let tmp = PathBuf::from(format!(
@@ -445,7 +444,6 @@ pub fn ensure_chromium_with(
     progress: &mut dyn FnMut(&str),
 ) -> Result<PathBuf, String> {
     if let Some(p) = find_chromium(cache_dir) {
-        progress("chromium: ready");
         return Ok(p);
     }
     install_chromium_with(cache_dir, progress)
@@ -532,7 +530,6 @@ fn install_chromium_with(
     let _lock = acquire_install_lock(cache_dir)?;
     // Another instance may have installed while we waited for the lock.
     if let Some(p) = find_chromium(cache_dir) {
-        progress("chromium: ready");
         return Ok(p);
     }
     let version_dir = cache_dir.join("chromium").join(MANAGED_VERSION);
