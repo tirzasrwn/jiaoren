@@ -54,7 +54,11 @@ Background download, cache first, system fallback, then egui defaults.
    it, requests a repaint while active, draws the progress line through the
    existing bottom-left `status_area`, and on `Done` calls `ctx.set_fonts` with
    the bytes (not paths, so no file is kept open) then repaints.
-5. README's Typography section is updated: the font is downloaded once, the
+5. `jr --version` gains a `font <FONT_VERSION>` line: `(cache)` when the managed
+   faces are cached, `(system; may differ)` when only a system face is used,
+   `(egui default)` when none is found, and `(override: <path>)` for
+   `JIAOREN_FONT_DIR`.
+6. README's Typography section is updated: the font is downloaded once, the
    cache path, the `JIAOREN_FONT_DIR` override, and that diagrams still need
    the system font.
 
