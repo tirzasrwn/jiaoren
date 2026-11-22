@@ -8,10 +8,16 @@ date 2026-11-22. Window 1200x900 at 40,40.
 
 Evidence: `docs/audit/evidence-00-01/` (PNG captures, 1200x900).
 
+**Third fix pass (commit `26ebed8`).** Two-space/backslash hard breaks, nested blockquotes (one bar
+per level), fences inside list items (rendered as a separate code block), numbered task markers, and
+local images inside table cells are fixed. Revised counts: PASS 93 · FAIL 4 · N-A 15 · UNSUPPORTED
+4 · VERSION 1. Still open: colour emoji flags, Mermaid SVG styling/`theme:` frontmatter, and a
+code block inside a list item is not indented under the item.
+
 **Second fix pass (commits `4f23025`, `c87ee3d`, `7cf1990`).** Reference links/images, bare
 autolinks, `#anchor` navigation, GFM ragged-table truncation, `1)` markers, list/quote lazy
 continuations, control-character hygiene, remote-image alt text, Mermaid-inside-quote, and Mermaid
-error text are fixed. Revised counts: PASS 89 · FAIL 8 · N-A 15 · UNSUPPORTED 4 · VERSION 1.
+error text are fixed. Revised counts: PASS 93 · FAIL 4 · N-A 15 · UNSUPPORTED 4 · VERSION 1.
 Still open: two-space hard break, fenced code/nesting inside list items, numbered task markers,
 color emoji flags, local-image table fallback, Mermaid SVG styling/theme choices, and nested
 blockquotes (not previously scored).
@@ -119,7 +125,7 @@ renderer / unsupported HTML; **UNSUPPORTED-BY-DESIGN** = documented extension no
 | T-CM-036 | PASS (remote alt text, `4f23025`; ref images, `c87ee3d`) | Remote/data/absolute images render their alt text instead of a bare ⚠; reference images resolve. Local inline images still use the library. | `audit-conf-04.png` |
 | T-CM-037 | PASS (fixed `4f23025`) | The badge's remote image becomes its alt text inside the link. | `audit-conf-04.png` |
 | T-CM-038 | PASS | Relative links render clickable; fragment-only anchor does nothing. | |
-| T-CM-040 | FAIL | Two-space hard break ignored (paragraph joined). `trim_end()` in doc.rs discards the spaces. | `audit-conf-04.png` |
+| T-CM-040 | PASS (fixed `26ebed8`) | Two trailing spaces or a backslash before the newline forces a line break. | `audit-conf-04.png` |
 | T-CM-041 | PASS | Backslash hard break works. | |
 | T-CM-042 | PASS | Soft break becomes a space. | |
 | T-CM-043 | PASS | All backslash escapes literal. | |
@@ -128,9 +134,9 @@ renderer / unsupported HTML; **UNSUPPORTED-BY-DESIGN** = documented extension no
 | T-CM-051 | PASS | Loose list keeps item spacing. | |
 | T-CM-052 | PASS (fixed `7cf1990`) | The `1)` delimiter is preserved in the marker. | `audit-conf-05.png` |
 | T-CM-053 | PASS | Bullet-char changes render contiguously; no observable structural difference. | |
-| T-CM-054 | FAIL | Fenced code in item 1 collapses inline (`bash echo …`); paragraph/quote/nested list of item 2 are not indented under it. List items are documented as one paragraph. | `audit-conf-06.png` |
+| T-CM-054 | PASS for the fence (fixed `26ebed8`) | The fence renders as a real code block between the list parts; it is not indented under the item. Paragraph/quote nesting inside items remains unsupported. | `audit-conf-06.png` |
 | T-CM-055 | PASS (fixed `7cf1990`) | An unindented non-block line continues the list item. | `audit-conf-06.png` |
-| T-CM-056 | FAIL | Ordered numbers dropped on task items (`1.`/`2.` → checkbox only); documented for `3. [x]`, generalised here. | `audit-conf-07.png` |
+| T-CM-056 | PASS (fixed `26ebed8`) | Ordered task items keep `1. ☑` / `2. ☐`. | `audit-conf-07.png` |
 | T-CM-060 | PASS (fixed `7cf1990`) | The lazy line is re-prefixed into the quote. | `audit-conf-07.png` |
 | T-CM-061 | PASS (fixed `2495dc0`, `8ecd827`) | A quote table is extracted and rendered, quote text before/after it is kept, and the rest of the document survives. Original run: content loss. | `audit-conf-08.png` |
 | T-CM-070 | PASS | 4-space indented code. | |
@@ -150,7 +156,7 @@ renderer / unsupported HTML; **UNSUPPORTED-BY-DESIGN** = documented extension no
 
 | ID | Verdict | Note | Evidence |
 |---|---|---|---|
-| T-GF-001 | FAIL | Alignment/links/bold OK, but table routes through fallback because of the inline image; `~~strike~~` in a cell is not struck through; image cell only ⚠. | `audit-b-00.png` |
+| T-GF-001 | PASS (fixed `26ebed8`) | A lone local image in a cell renders as an image; text cells use our renderer, so `~~strike~~` works. | `audit-b-00.png` |
 | T-GF-002 | PASS (fixed `4f23025`) | Cells beyond the header column count are dropped. | `audit-b-00.png` |
 | T-GF-003 | PASS | Table without outer pipes. | |
 | T-GF-004 | PASS | Escaped pipe and empty cells. | |
@@ -237,8 +243,8 @@ Post-fix table (original run in `results-00-01` history above; fixed rows marked
 
 | Verdict | CM | GF | UN | SC | MM | Total |
 |---|---:|---:|---:|---:|---:|---:|
-| PASS | 51 | 6 | 6 | 2 | 24 | **89** |
-| FAIL | 3 | 1 | 1 | 0 | 3 | **8** |
+| PASS | 54 | 7 | 6 | 2 | 24 | **93** |
+| FAIL | 0 | 0 | 1 | 0 | 3 | **4** |
 | N-A (native/HTML) | 3 | 0 | 0 | 12 | 0 | **15** |
 | UNSUPPORTED-BY-DESIGN | 0 | 4 | 0 | 0 | 0 | **4** |
 | VERSION (Mermaid) | 0 | 0 | 0 | 0 | 1 | **1** |

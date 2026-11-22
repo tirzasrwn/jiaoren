@@ -25,6 +25,11 @@ Mermaid **12.3.0** after the version bump below.
 | Low: broken/remote images lost alt text | Remote/data/absolute images render their alt text; never fetched | Tests `remote_images_become_their_alt_text`, `remote_data_and_absolute_images_show_alt_text` |
 | Low: Mermaid error text leaked wrapper/entities | `clean_error` strips `id="out">ERR:` and decodes entities | Test `error_text_loses_the_wrapper_and_entities` |
 | Low: Mermaid inside a blockquote was code | A quote containing exactly one Mermaid fence is extracted | Test `mermaid_inside_a_blockquote_is_extracted` |
+| Medium: two-space hard break lost | Paragraph lines keep a backslash marker; `parse_inline` emits a `Break`, the layout wraps a forced line | Tests `two_trailing_spaces_become_a_forced_break`, `forced_break_closes_the_line` |
+| Medium: nested blockquotes flattened | New `<mdquote>` renderer: depth from repeated `>`, one bar per level, per-line search/selection; complex quote content still falls back to the library | Visual check of the smoke `Blockquotes (nested)` section; quote/lazy tests |
+| Medium: fenced code inside a list collapsed | The list parser stops at an indented fence, so the fence becomes a real code block (placed after the list part, not indented) | Test `code_inside_quotes_and_indented_code_is_untouched` updated |
+| Low: numbered task items lost their number | `ListKind::Task { done, ordered }` keeps `1.`/`1)` and the marker paints `1. ☑` | Test `ordered_task_item_keeps_its_number` |
+| Low: local image in a table cell fell back to the library | A lone local image cell renders with `egui::Image` in our cell renderer; text cells keep strike/bold | Visual check `| ![pic](pic.png) | ~~strike~~ |` |
 | High security: no URL scheme allowlist | `link_is_safe` allows only `http(s)://` and `mailto:`; other links stay inert and every link shows its destination as a hover tooltip | Test `only_web_and_mail_schemes_are_clickable` |
 
 Gates after the fixes: `cargo test` 344 passed / 2 ignored, clippy
@@ -37,12 +42,10 @@ warning-free; binary reinstalled.
   frame is ≈5.7 s and `G` responds in 0.62 s, settling in 4.1 s. The remaining
   slow action is a theme toggle while all 121 Mermaid diagrams need their dark
   rasters (each theme renders and caches separately); it is latency, not a hang.
-- Still open (Medium/Low): two-space hard break inside a paragraph; fenced
-  code and nested blocks inside list items; ordered numbers on task markers
-  (documented as boxes only); colour-emoji flags (font stack cannot render
-  colour bitmaps); local-image table cells still route to the library (so
-  strikethrough there is not applied); Mermaid SVG styling choices
-  (autonumber digits, quoted aliases, ER/journey labels, `theme:` frontmatter);
-  nested blockquotes flatten to one bar (new finding from the smoke test).
-  Updated counts: Part 1 PASS 89 · FAIL 8 · N-A 15 · unsupported 4 · version 1;
+- Still open: colour-emoji flags (the font stack cannot render colour bitmap
+  fonts); Mermaid SVG styling choices (autonumber digits, quoted aliases,
+  ER/journey labels, `theme:` frontmatter); a fenced code block inside a list
+  item renders after the list part instead of being indented under the item;
+  paragraphs/quotes nested inside list items still go to the library.
+  Updated counts: Part 1 PASS 93 · FAIL 4 · N-A 15 · unsupported 4 · version 1;
   Part 2 PASS 27 · FAIL 0.
