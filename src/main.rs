@@ -49,12 +49,18 @@ Keys: see the README (j/k, d/u, gg/G, +/-/a/0, t, r, q)."
 
 /// One-line-per-component version output for `jr --version`.
 pub fn version_text() -> String {
+    // The managed build is the default; an explicit JIAOREN_CHROMIUM override
+    // is what actually runs, so report the override as well.
+    let chromium = match std::env::var("JIAOREN_CHROMIUM") {
+        Ok(path) => format!("{} (override: {path})", mermaid::MANAGED_VERSION),
+        Err(_) => format!("{} (managed)", mermaid::MANAGED_VERSION),
+    };
     format!(
         "{} {}\nmermaid {}\nchromium {}",
         env!("CARGO_PKG_NAME"),
         env!("CARGO_PKG_VERSION"),
         mermaid::MERMAID_VERSION,
-        mermaid::MANAGED_VERSION
+        chromium
     )
 }
 
@@ -160,6 +166,7 @@ mod tests {
             assert!(text.contains(&format!("jiaoren {}", env!("CARGO_PKG_VERSION"))));
             assert!(text.contains(&format!("mermaid {}", crate::mermaid::MERMAID_VERSION)));
             assert!(text.contains(&format!("chromium {}", crate::mermaid::MANAGED_VERSION)));
+            assert!(text.contains("(managed)") || text.contains("(override:"));
         }
 
         #[test]
