@@ -441,7 +441,9 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                     // library sees it. A table nested in a blockquote leaves
                     // egui_commonmark's table flag set, and the next event makes
                     // it swallow the rest of the document (audit T-CM-061).
-                    if let Some((j, mut spec)) = quote_table_block(&lines, i) {
+                    if let Some((block_end, table_start, table_end, mut spec)) =
+                        quote_table_split(&lines, i)
+                    {
                         for c in &mut spec.header {
                             *c = rewrite_images(c, doc_dir);
                         }
@@ -452,13 +454,20 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         }
                         let id = table_id(&spec);
                         tables.insert(id.clone(), spec);
+                        // Quote text before the table stays a quote; the table
+                        // renders at top level because the library's quote
+                        // layout clips the reading-column width.
+                        if table_start > i {
+                            push_verbatim_block(&mut out, &lines[i..table_start]);
+                        }
                         if !out.is_empty() && !out.ends_with("\n\n") {
                             out.push('\n');
                         }
-                        // Render at top level: the library's quote layout clips
-                        // the table's full reading-column width.
                         out.push_str(&format!("<mdtable id=\"{id}\">\n\n"));
-                        i = j;
+                        if table_end < block_end {
+                            push_verbatim_block(&mut out, &lines[table_end..block_end]);
+                        }
+                        i = block_end;
                         continue;
                     }
                     // Table block: consecutive `|`-lines starting at a top-level
@@ -672,24 +681,65 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
 /// `TableSpec`. The delimiter row must have the same cell count as the header
 /// and each cell must match `:?-{1,}:?`. Malformed blocks return `None`, so
 /// the caller can fall back to emitting the lines verbatim.
-pub fn quote_table_block(lines: &[&str], start: usize) -> Option<(usize, TableSpec)> {
-    let mut end = start;
-    let mut body = Vec::new();
-    while end < lines.len() {
-        let Some(rest) = lines[end].trim_start().strip_prefix('>') else {
-            break;
-        };
-        let rest = rest.strip_prefix(' ').unwrap_or(rest).trim_end();
-        if !rest.trim().is_empty() && !rest.contains('|') {
-            return None;
-        }
-        body.push(rest);
-        end += 1;
+/// Emit raw block lines between blank lines, so a quote block starts and ends
+/// cleanly beside a table placeholder.
+fn push_verbatim_block(out: &mut String, lines: &[&str]) {
+    if !out.is_empty() && !out.ends_with("\n\n") {
+        out.push('\n');
     }
-    if end == start {
+    for line in lines {
+        out.push_str(line);
+    }
+    if !out.ends_with("\n\n") {
+        out.push('\n');
+    }
+}
+
+fn strip_quote(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix('>')?;
+    Some(rest.strip_prefix(' ').unwrap_or(rest).trim_end())
+}
+
+/// Find the first table inside the blockquote starting at `start`. Returns the
+/// block end, the table's line range within it, and the parsed spec. Quote text
+/// before and after the table is kept by the caller. Extracting the table is
+/// what stops egui_commonmark's leaked table flag from swallowing the rest of
+/// the document (audit T-CM-061).
+fn quote_table_split(lines: &[&str], start: usize) -> Option<(usize, usize, usize, TableSpec)> {
+    let mut block_end = start;
+    while block_end < lines.len() && strip_quote(lines[block_end]).is_some() {
+        block_end += 1;
+    }
+    if block_end == start {
         return None;
     }
-    parse_table_block(&body).map(|spec| (end, spec))
+    let mut line = start;
+    while line < block_end {
+        let Some(cell) = strip_quote(lines[line]) else {
+            break;
+        };
+        if !cell.contains('|') {
+            line += 1;
+            continue;
+        }
+        let mut run_end = line;
+        let mut body = Vec::new();
+        while run_end < block_end {
+            let Some(cell) = strip_quote(lines[run_end]) else {
+                break;
+            };
+            if !cell.contains('|') {
+                break;
+            }
+            body.push(cell);
+            run_end += 1;
+        }
+        if let Some(spec) = parse_table_block(&body) {
+            return Some((block_end, line, run_end, spec));
+        }
+        line += 1;
+    }
+    None
 }
 
 pub fn parse_table_block(lines: &[&str]) -> Option<TableSpec> {
@@ -1090,6 +1140,19 @@ fn rewrite_images(mut rest: &str, doc_dir: &Path) -> String {
 mod tests {
     mod quote_table {
         use super::super::prepare;
+
+        #[test]
+        fn mixed_quote_keeps_text_around_the_extracted_table() {
+            let p = prepare(
+                "> intro line\n> | a | b |\n> | - | - |\n> | 1 | 2 |\n> outro line\n\nafter marker\n",
+                std::path::Path::new("/tmp"),
+            );
+            assert_eq!(p.tables.len(), 1);
+            assert!(p.markdown.contains("> intro line"), "{:?}", p.markdown);
+            assert!(p.markdown.contains("> outro line"), "{:?}", p.markdown);
+            assert!(p.markdown.contains("<mdtable"), "{:?}", p.markdown);
+            assert!(p.markdown.contains("<mdpara"), "{:?}", p.markdown);
+        }
 
         #[test]
         fn table_inside_a_blockquote_becomes_a_placeholder_and_keeps_later_content() {
