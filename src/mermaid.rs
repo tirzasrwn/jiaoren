@@ -86,6 +86,53 @@ fn older_than(
         .is_some_and(|age| age > grace)
 }
 
+/// Delete the jiaoren cache from the command line. `all` also removes the
+/// managed Chromium; otherwise the browser is kept so the next document does
+/// not need a 132 MB re-download. Returns `(bytes, files)` removed.
+pub fn clean_cache(all: bool) -> std::io::Result<(u64, usize)> {
+    clean_cache_dir(&dirs_cache().join("jiaoren"), all)
+}
+
+fn clean_cache_dir(dir: &Path, all: bool) -> std::io::Result<(u64, usize)> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Ok((0, 0));
+    };
+    let mut bytes = 0u64;
+    let mut files = 0usize;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !all && name == "chromium" {
+            continue;
+        }
+        let path = entry.path();
+        let (entry_bytes, entry_files) = path_size(&path)?;
+        if path.is_dir() {
+            fs::remove_dir_all(&path)?;
+        } else {
+            fs::remove_file(&path)?;
+        }
+        bytes += entry_bytes;
+        files += entry_files;
+    }
+    Ok((bytes, files))
+}
+
+fn path_size(path: &Path) -> std::io::Result<(u64, usize)> {
+    if path.is_file() {
+        return Ok((fs::metadata(path)?.len(), 1));
+    }
+    let mut bytes = 0u64;
+    let mut files = 0usize;
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let (child_bytes, child_files) = path_size(&entry.path())?;
+            bytes += child_bytes;
+            files += child_files;
+        }
+    }
+    Ok((bytes, files))
+}
+
 /// Delete cache entries that belong to older Mermaid/Chromium versions, plus
 /// old scratch temps. Current-version renders, in-flight temps and unknown
 /// user files stay, so several jr instances can run together.
@@ -748,6 +795,33 @@ mod tests {
                 "no <svg> in chromium output"
             );
             assert_eq!(RenderError::Raster("e".into()).to_string(), "write svg: e");
+        }
+
+        #[test]
+        fn clean_cache_keeps_chromium_unless_all_is_set() {
+            let base = std::env::temp_dir().join(format!(
+                "jiaoren-clean-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(base.join("chromium").join(MANAGED_VERSION)).unwrap();
+            fs::write(base.join("abc.svg"), b"12345").unwrap();
+            fs::write(
+                base.join("chromium").join(MANAGED_VERSION).join("chrome"),
+                b"1234567890",
+            )
+            .unwrap();
+            let (bytes, files) = clean_cache_dir(&base, false).unwrap();
+            assert_eq!((bytes, files), (5, 1));
+            assert!(base.join("chromium").exists());
+            assert!(!base.join("abc.svg").exists());
+            let (bytes, files) = clean_cache_dir(&base, true).unwrap();
+            assert_eq!((bytes, files), (10, 1));
+            assert!(!base.join("chromium").exists());
+            let _ = fs::remove_dir_all(&base);
         }
 
         #[test]

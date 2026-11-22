@@ -27,6 +27,8 @@ pub enum Command {
     Help,
     /// Print version information and exit 0.
     Version,
+    /// Delete cached diagram renders; `all` also removes the managed Chromium.
+    CleanCache { all: bool },
 }
 
 const USAGE: &str = "usage: jr [--dark] <file.md>";
@@ -40,9 +42,11 @@ pub const HELP: &str = concat!(
 Usage: jr [OPTIONS] <FILE>
 
 Options:
-      --dark     start with the dark theme
-  -h, --help     print this help and exit
-  -V, --version  print version information and exit
+      --dark         start with the dark theme
+      --clean-cache  delete cached diagram renders and exit
+      --all          with --clean-cache, also delete the managed Chromium
+  -h, --help         print this help and exit
+  -V, --version      print version information and exit
 
 Keys: see the README (j/k, d/u, gg/G, +/-/a/0, t, r, q)."
 );
@@ -73,6 +77,14 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
         return Ok(Command::Version);
+    }
+    if args.iter().any(|a| a == "--clean-cache") {
+        let all = args.iter().any(|a| a == "--all");
+        let other = args.iter().any(|a| a != "--clean-cache" && a != "--all");
+        if other {
+            return Err(USAGE.to_string());
+        }
+        return Ok(Command::CleanCache { all });
     }
     let mut dark = false;
     let mut path: Option<PathBuf> = None;
@@ -105,6 +117,21 @@ fn main() -> anyhow::Result<()> {
         }
         Ok(Command::Version) => {
             println!("{}", version_text());
+            return Ok(());
+        }
+        Ok(Command::CleanCache { all }) => {
+            match mermaid::clean_cache(all) {
+                Ok((bytes, files)) => {
+                    println!("removed {files} cache entries ({} MB)", bytes / 1_000_000);
+                    if !all {
+                        println!("kept the managed Chromium; add --all to remove it too");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("clean cache: {e}");
+                    std::process::exit(1);
+                }
+            }
             return Ok(());
         }
         Err(e) => {
@@ -158,6 +185,20 @@ mod tests {
                     dark: true,
                 })
             );
+        }
+
+        #[test]
+        fn clean_cache_flag_parses_with_optional_all() {
+            assert_eq!(
+                parse_args(&a(&["--clean-cache"])).unwrap(),
+                Command::CleanCache { all: false }
+            );
+            assert_eq!(
+                parse_args(&a(&["--clean-cache", "--all"])).unwrap(),
+                Command::CleanCache { all: true }
+            );
+            assert!(parse_args(&a(&["--clean-cache", "doc.md"])).is_err());
+            assert!(parse_args(&a(&["--all"])).is_err());
         }
 
         #[test]
