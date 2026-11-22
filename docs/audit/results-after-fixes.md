@@ -1,8 +1,8 @@
 # Audit follow-up: Critical and High fixes
 
 Code base: `f30e668` (after the original reports at `6054524`).
-Environment: same as the reports (jiaoren 0.1.0, Mermaid 11.12.0, native egui
-renderer, X11 `:0`).
+Environment: same as the reports (jiaoren 0.1.0, native egui renderer, X11 `:0`),
+Mermaid **12.3.0** after the version bump below.
 
 ## What changed
 
@@ -14,6 +14,7 @@ renderer, X11 `:0`).
 | Critical: P3 code layout dominated the 3.2 MB document | `wrap_line` accumulates per-char advances instead of re-measuring every growing prefix (O(n²) → O(n) cheap lookups); tabs count four cells | Test extended with `a\tb`; isolated P3 (739 KB, 9,188 lines) with `target/release`: first frame 1.1 s, stable 3.9 s, 432 MB RSS (was 132–159 s first paint, 2.3 GB in debug) |
 | High: `xlink:href` SVGs rejected (`unknown namespace prefix`) | `ensure_xlink_namespace` declares `xmlns:xlink` on the root `<svg>` before usvg parses it | Test `undeclared_xlink_namespace_is_added`; the smoke C4Context diagram now rasterizes and displays |
 | High: CJK/Arabic tofu | `fonts.rs` loads Noto Sans CJK and Noto Naskh/Sans Arabic from the system font dirs as fallbacks after FiraCode (proportional, monospace and bold families) | Test `fallbacks_cover_cjk_and_arabic`; screenshot of 日本語/中文/한국어 and Arabic text renders shaped glyphs |
+| Mermaid version bump (11.12.0 → 12.3.0) | `src/mermaid.rs`: `MERMAID_VERSION`, versioned `mermaid.min.js` filename, `RENDER_VERSION` key bumped to `6-mermaid12.3.0…`; `jr --version` prints the Mermaid and Chromium versions | Smoke re-render: 20 light + 20 dark SVGs regenerated, 1 expected invalid-diagram error (fresh 12.3.0 cache). `T-HO-047` (`__proto__` node ids) now renders; the ER quoted-attribute case (`T-MM-040`) still fails inside Mermaid 12.3.0 |
 | High security: no URL scheme allowlist | `link_is_safe` allows only `http(s)://` and `mailto:`; other links stay inert and every link shows its destination as a hover tooltip | Test `only_web_and_mail_schemes_are_clickable` |
 
 Gates after the fixes: `cargo test` 344 passed / 2 ignored, clippy

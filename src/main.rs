@@ -47,6 +47,17 @@ Options:
 Keys: see the README (j/k, d/u, gg/G, +/-/a/0, t, r, q)."
 );
 
+/// One-line-per-component version output for `jr --version`.
+pub fn version_text() -> String {
+    format!(
+        "{} {}\nmermaid {}\nchromium {}",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION"),
+        mermaid::MERMAID_VERSION,
+        mermaid::MANAGED_VERSION
+    )
+}
+
 /// Parse the command line. `--help` and `--version` win over other arguments.
 /// Any usage error returns the message the caller prints before exiting with
 /// status 2.
@@ -87,7 +98,7 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Ok(Command::Version) => {
-            println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+            println!("{}", version_text());
             return Ok(());
         }
         Err(e) => {
@@ -141,6 +152,14 @@ mod tests {
                     dark: true,
                 })
             );
+        }
+
+        #[test]
+        fn version_text_names_mermaid_and_chromium() {
+            let text = version_text();
+            assert!(text.contains(&format!("jiaoren {}", env!("CARGO_PKG_VERSION"))));
+            assert!(text.contains(&format!("mermaid {}", crate::mermaid::MERMAID_VERSION)));
+            assert!(text.contains(&format!("chromium {}", crate::mermaid::MANAGED_VERSION)));
         }
 
         #[test]

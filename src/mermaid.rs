@@ -6,8 +6,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Once;
 
+/// Mermaid version used for diagram renders. Shown by `jr --version`.
+pub const MERMAID_VERSION: &str = "12.3.0";
+
+/// Where `ensure_mermaid_js` downloads that version from.
+pub const MERMAID_URL: &str = "https://cdn.jsdelivr.net/npm/mermaid@12.3.0/dist/mermaid.min.js";
+
 /// Cache-key version: bump when the render page or mermaid version changes.
-pub const RENDER_VERSION: &str = "5-mermaid11.12.0-htmlLabelsOff-2x-strict-svg-catppuccin-firacode";
+pub const RENDER_VERSION: &str = "6-mermaid12.3.0-htmlLabelsOff-2x-strict-svg-catppuccin-firacode";
 
 /// Colour theme used for the window and diagram renders.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -68,7 +74,8 @@ impl Renderer {
         fs::create_dir_all(&cache_dir).ok();
         let mermaid_js = std::env::var_os("JIAOREN_MERMAID_JS")
             .map(PathBuf::from)
-            .unwrap_or_else(|| cache_dir.join("mermaid.min.js"));
+            // Versioned filename: a bump must not reuse the old script.
+            .unwrap_or_else(|| cache_dir.join(format!("mermaid-{MERMAID_VERSION}.min.js")));
         Renderer {
             chromium: None,
             mermaid_js,
@@ -210,7 +217,7 @@ impl Renderer {
             .arg("60")
             .arg("-o")
             .arg(&tmp)
-            .arg("https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.min.js")
+            .arg(MERMAID_URL)
             .status()
             .map_err(|e| RenderError::MermaidJs(format!("spawn curl: {e}")))?;
         if status.success() {
@@ -669,6 +676,13 @@ mod tests {
                 "no <svg> in chromium output"
             );
             assert_eq!(RenderError::Raster("e".into()).to_string(), "write svg: e");
+        }
+
+        #[test]
+        fn render_key_and_download_track_the_mermaid_version() {
+            assert!(RENDER_VERSION.contains(MERMAID_VERSION));
+            assert!(MERMAID_URL.contains(MERMAID_VERSION));
+            assert!(!RENDER_VERSION.contains("11.12.0"));
         }
 
         #[test]

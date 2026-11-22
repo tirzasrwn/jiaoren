@@ -8,6 +8,10 @@ date 2026-11-22. Window 1200x900 at 40,40.
 
 Evidence: `docs/audit/evidence-00-01/` (PNG captures, 1200x900).
 
+**Mermaid updated to 12.3.0 after this run.** Smoke re-checked: all 18 diagram types render (20
+light + 20 dark SVGs, only the intentionally invalid diagram errors). `T-MM-040` still fails inside
+Mermaid 12.3.0 (ER quoted attribute); `T-HO-047` in Part 2 now renders.
+
 **Post-fix re-check (commit `8ecd827`).** The critical and high findings below were fixed after this
 run: quote tables (T-CM-061), the `xlink` SVGs, CJK/Arabic fallbacks, and URL schemes. Fixed rows are
 marked PASS (fixed); the original evidence is kept. Revised Part 1 counts: PASS 77 · FAIL 20 · N-A 15 ·
