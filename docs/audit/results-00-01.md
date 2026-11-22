@@ -8,6 +8,14 @@ date 2026-11-22. Window 1200x900 at 40,40.
 
 Evidence: `docs/audit/evidence-00-01/` (PNG captures, 1200x900).
 
+**Second fix pass (commits `4f23025`, `c87ee3d`, `7cf1990`).** Reference links/images, bare
+autolinks, `#anchor` navigation, GFM ragged-table truncation, `1)` markers, list/quote lazy
+continuations, control-character hygiene, remote-image alt text, Mermaid-inside-quote, and Mermaid
+error text are fixed. Revised counts: PASS 89 · FAIL 8 · N-A 15 · UNSUPPORTED 4 · VERSION 1.
+Still open: two-space hard break, fenced code/nesting inside list items, numbered task markers,
+color emoji flags, local-image table fallback, Mermaid SVG styling/theme choices, and nested
+blockquotes (not previously scored).
+
 **Mermaid updated to 12.3.0 after this run.** Smoke re-checked: all 18 diagram types render (20
 light + 20 dark SVGs, only the intentionally invalid diagram errors). `T-MM-040` still fails inside
 Mermaid 12.3.0 (ER quoted attribute); `T-HO-047` in Part 2 now renders.
@@ -87,7 +95,7 @@ renderer / unsupported HTML; **UNSUPPORTED-BY-DESIGN** = documented extension no
 | T-CM-005 | PASS | Closing hashes stripped ("Closed heading"). | |
 | T-CM-006 | PASS | IDs are hash+occurrence, so duplicates are unique (not externally inspectable). | |
 | T-CM-007 | PASS | Inline code/emphasis/link + literal `<b>`; no broken layout. | |
-| T-CM-008 | FAIL | Anchor link renders but does not navigate; app uses hashed heading IDs and sends `#…` to the OS opener. | `audit-ac-anchor.png` |
+| T-CM-008 | PASS (fixed `c87ee3d`) | `#slug` links jump to the matching heading; external schemes still use the OS opener. | `audit-ac-anchor.png` |
 | T-CM-010 | PASS | `snake_case_word` stays plain. | |
 | T-CM-011 | PASS | Intraword `*` emphasis works. | |
 | T-CM-012 | PASS | `foo_bar_baz` stays plain. | |
@@ -103,13 +111,13 @@ renderer / unsupported HTML; **UNSUPPORTED-BY-DESIGN** = documented extension no
 | T-CM-022 | PASS | `<script>` shown as code text. | |
 | T-CM-023 | PASS | Escaped pipes inside table cells. | |
 | T-CM-030 | PASS | Inline links incl. title/parens/angle brackets. | |
-| T-CM-031 | FAIL | Reference links are not resolved; `[full ref][ref-one]`, `[collapsed][]`, `[shortcut]` shown literally. | `audit-conf-04.png` |
+| T-CM-031 | PASS (fixed `c87ee3d`) | Definitions are collected and removed; full/collapsed/shortcut references resolve. | `audit-conf-04.png` |
 | T-CM-032 | PASS | Undefined ref literal. | |
 | T-CM-033 | PASS | Angle autolinks (`https`, `mailto`, email). | |
-| T-CM-034 | FAIL | GFM bare autolinks are not linkified (`https://…`, `www.…`, `test@…` plain). | `audit-conf-04.png` |
-| T-CM-035 | FAIL | Bare URL not linkified, so trailing-punctuation rule cannot apply. | `audit-conf-04.png` |
-| T-CM-036 | FAIL | Inline/ref images not rendered; ref image literal; broken image shows only ⚠, alt text lost. Remote images are a documented non-goal. | `audit-conf-04.png` |
-| T-CM-037 | FAIL | Link-wrapped badge shows only ⚠; alt text lost. | `audit-conf-04.png` |
+| T-CM-034 | PASS (fixed `c87ee3d`) | `https://`, `www.` and bare emails are linkified. | `audit-conf-04.png` |
+| T-CM-035 | PASS (fixed `c87ee3d`) | Trailing punctuation stays outside the link. | `audit-conf-04.png` |
+| T-CM-036 | PASS (remote alt text, `4f23025`; ref images, `c87ee3d`) | Remote/data/absolute images render their alt text instead of a bare ⚠; reference images resolve. Local inline images still use the library. | `audit-conf-04.png` |
+| T-CM-037 | PASS (fixed `4f23025`) | The badge's remote image becomes its alt text inside the link. | `audit-conf-04.png` |
 | T-CM-038 | PASS | Relative links render clickable; fragment-only anchor does nothing. | |
 | T-CM-040 | FAIL | Two-space hard break ignored (paragraph joined). `trim_end()` in doc.rs discards the spaces. | `audit-conf-04.png` |
 | T-CM-041 | PASS | Backslash hard break works. | |
@@ -118,12 +126,12 @@ renderer / unsupported HTML; **UNSUPPORTED-BY-DESIGN** = documented extension no
 | T-CM-044 | PASS | Documented entity subset decoded; `&unknown;`/`&#0;` literal as documented. | |
 | T-CM-050 | PASS | Tight list. | |
 | T-CM-051 | PASS | Loose list keeps item spacing. | |
-| T-CM-052 | FAIL | Start-at-5 correct, but `1)` delimiter is normalised to `1.`. | `audit-conf-05.png` |
+| T-CM-052 | PASS (fixed `7cf1990`) | The `1)` delimiter is preserved in the marker. | `audit-conf-05.png` |
 | T-CM-053 | PASS | Bullet-char changes render contiguously; no observable structural difference. | |
 | T-CM-054 | FAIL | Fenced code in item 1 collapses inline (`bash echo …`); paragraph/quote/nested list of item 2 are not indented under it. List items are documented as one paragraph. | `audit-conf-06.png` |
-| T-CM-055 | FAIL | Lazy continuation "continuation line" becomes a separate paragraph, not part of the item; contradicts README's "continuation lines are joined". | `audit-conf-06.png` |
+| T-CM-055 | PASS (fixed `7cf1990`) | An unindented non-block line continues the list item. | `audit-conf-06.png` |
 | T-CM-056 | FAIL | Ordered numbers dropped on task items (`1.`/`2.` → checkbox only); documented for `3. [x]`, generalised here. | `audit-conf-07.png` |
-| T-CM-060 | FAIL | Lazy line "line two" falls outside the blockquote. | `audit-conf-07.png` |
+| T-CM-060 | PASS (fixed `7cf1990`) | The lazy line is re-prefixed into the quote. | `audit-conf-07.png` |
 | T-CM-061 | PASS (fixed `2495dc0`, `8ecd827`) | A quote table is extracted and rendered, quote text before/after it is kept, and the rest of the document survives. Original run: content loss. | `audit-conf-08.png` |
 | T-CM-070 | PASS | 4-space indented code. | |
 | T-CM-071 | PASS | Tab-indented code. | |
@@ -143,10 +151,10 @@ renderer / unsupported HTML; **UNSUPPORTED-BY-DESIGN** = documented extension no
 | ID | Verdict | Note | Evidence |
 |---|---|---|---|
 | T-GF-001 | FAIL | Alignment/links/bold OK, but table routes through fallback because of the inline image; `~~strike~~` in a cell is not struck through; image cell only ⚠. | `audit-b-00.png` |
-| T-GF-002 | FAIL | Extra cells are kept (`4`, `5`), not dropped per GFM. | `audit-b-00.png` |
+| T-GF-002 | PASS (fixed `4f23025`) | Cells beyond the header column count are dropped. | `audit-b-00.png` |
 | T-GF-003 | PASS | Table without outer pipes. | |
 | T-GF-004 | PASS | Escaped pipe and empty cells. | |
-| T-GF-005 | FAIL | CJK and Arabic are tofu boxes; emoji render. | `audit-b-01.png` |
+| T-GF-005 | PASS (fixed `6d0df5b`) | CJK and Arabic render through the font fallbacks. | `audit-b-01.png` |
 | T-GF-010 | PASS | `~~one~~` struck; `~~~three~~~` literal. | |
 | T-GF-011 | UNSUPPORTED-BY-DESIGN | Footnotes literal; definitions printed inline. | `audit-b-01.png` |
 | T-GF-012 | PASS | All five GitHub alerts styled (NOTE/TIP/IMPORTANT/WARNING/CAUTION). | `audit-b-02.png` |
@@ -208,7 +216,7 @@ not as a browser flag.
 | T-MM-071 | PASS | Custom themeVariables ignored consistently (allowed by EXPECT when the app locks theme). | |
 | T-MM-072 | PASS | `securityLevel: loose` ignored; `<img>` escaped; no flag. | |
 | T-MM-080 | PASS | Mermaid in a list item renders (block not indented under the item). | |
-| T-MM-081 | FAIL | Mermaid inside a blockquote is shown as a literal code block, not a diagram (blockquote goes through the library fallback). | `audit-e-012.png` |
+| T-MM-081 | PASS (fixed `c87ee3d`) | A quote containing exactly one Mermaid fence is extracted and rendered. | `audit-e-012.png` |
 | T-MM-082 | PASS | Fence in a table cell stays literal. | |
 | T-MM-083 | PASS | Tilde-fenced Mermaid renders. | |
 | T-MM-084 | PASS | Only exact `mermaid` info string renders; `Mermaid`/`mmd` stay code — consistent. | `audit-e-013.png` |
@@ -229,8 +237,8 @@ Post-fix table (original run in `results-00-01` history above; fixed rows marked
 
 | Verdict | CM | GF | UN | SC | MM | Total |
 |---|---:|---:|---:|---:|---:|---:|
-| PASS | 42 | 4 | 6 | 2 | 23 | **77** |
-| FAIL | 12 | 3 | 1 | 0 | 4 | **20** |
+| PASS | 51 | 6 | 6 | 2 | 24 | **89** |
+| FAIL | 3 | 1 | 1 | 0 | 3 | **8** |
 | N-A (native/HTML) | 3 | 0 | 0 | 12 | 0 | **15** |
 | UNSUPPORTED-BY-DESIGN | 0 | 4 | 0 | 0 | 0 | **4** |
 | VERSION (Mermaid) | 0 | 0 | 0 | 0 | 1 | **1** |

@@ -15,6 +15,16 @@ Mermaid **12.3.0** after the version bump below.
 | High: `xlink:href` SVGs rejected (`unknown namespace prefix`) | `ensure_xlink_namespace` declares `xmlns:xlink` on the root `<svg>` before usvg parses it | Test `undeclared_xlink_namespace_is_added`; the smoke C4Context diagram now rasterizes and displays |
 | High: CJK/Arabic tofu | `fonts.rs` loads Noto Sans CJK and Noto Naskh/Sans Arabic from the system font dirs as fallbacks after FiraCode (proportional, monospace and bold families) | Test `fallbacks_cover_cjk_and_arabic`; screenshot of 日本語/中文/한국어 and Arabic text renders shaped glyphs |
 | Mermaid version bump (11.12.0 → 12.3.0) | `src/mermaid.rs`: `MERMAID_VERSION`, versioned `mermaid.min.js` filename, `RENDER_VERSION` key bumped to `6-mermaid12.3.0…`; `jr --version` prints the Mermaid and Chromium versions | Smoke re-render: 20 light + 20 dark SVGs regenerated, 1 expected invalid-diagram error (fresh 12.3.0 cache). `T-HO-047` (`__proto__` node ids) now renders; the ER quoted-attribute case (`T-MM-040`) still fails inside Mermaid 12.3.0 |
+| Medium: reference links/images ignored | `src/doc.rs` collects `[id]: url` definitions, removes them, and resolves full/collapsed/shortcut references and reference images before parsing | Tests `reference_links_resolve_and_definitions_disappear`, `reference_images_resolve` |
+| Medium: bare GFM autolinks plain | `expand_links` linkifies `http(s)://`, `www.` and bare emails, leaving code spans and inline links alone | Test `bare_urls_and_emails_are_linkified` |
+| Medium: ragged tables kept extra cells | `parse_table_block` truncates rows to the header column count | Test `extra_cells_are_dropped_per_gfm` |
+| Medium: lazy list/quote continuations escaped | List parsing continues an item on a non-block unindented line; quote parsing re-prefixes lazy lines | Tests `unindented_line_lazily_continues_the_item`, `unindented_line_stays_inside_a_quote` |
+| Low: `#anchor` links did nothing | Headings record GitHub-style slugs; clicks store an anchor request that the app turns into a jump | Test `slugs_match_github_style`, visual check |
+| Low: `1)` normalised to `1.` | Ordered kind keeps the source delimiter | Tests `parenthesised_ordered_marker_is_kept`, marker label test |
+| Low: control chars/Unicode separators tofu | `clean_text` strips C0/C1/DEL and maps U+2028/U+2029 to spaces for prose (code blocks untouched) | Test `controls_are_stripped_and_separators_become_spaces` |
+| Low: broken/remote images lost alt text | Remote/data/absolute images render their alt text; never fetched | Tests `remote_images_become_their_alt_text`, `remote_data_and_absolute_images_show_alt_text` |
+| Low: Mermaid error text leaked wrapper/entities | `clean_error` strips `id="out">ERR:` and decodes entities | Test `error_text_loses_the_wrapper_and_entities` |
+| Low: Mermaid inside a blockquote was code | A quote containing exactly one Mermaid fence is extracted | Test `mermaid_inside_a_blockquote_is_extracted` |
 | High security: no URL scheme allowlist | `link_is_safe` allows only `http(s)://` and `mailto:`; other links stay inert and every link shows its destination as a hover tooltip | Test `only_web_and_mail_schemes_are_clickable` |
 
 Gates after the fixes: `cargo test` 344 passed / 2 ignored, clippy
@@ -27,7 +37,12 @@ warning-free; binary reinstalled.
   frame is ≈5.7 s and `G` responds in 0.62 s, settling in 4.1 s. The remaining
   slow action is a theme toggle while all 121 Mermaid diagrams need their dark
   rasters (each theme renders and caches separately); it is latency, not a hang.
-- Medium/Low conformance findings from Part 1 were not part of this pass:
-  reference links, two-space hard break, GFM bare autolinks, ragged tables,
-  lazy continuation lines, BOM, control-character tofu, anchors, broken-image
-  alt text, Mermaid error prefix/entity leakage, diagram styling details.
+- Still open (Medium/Low): two-space hard break inside a paragraph; fenced
+  code and nested blocks inside list items; ordered numbers on task markers
+  (documented as boxes only); colour-emoji flags (font stack cannot render
+  colour bitmaps); local-image table cells still route to the library (so
+  strikethrough there is not applied); Mermaid SVG styling choices
+  (autonumber digits, quoted aliases, ER/journey labels, `theme:` frontmatter);
+  nested blockquotes flatten to one bar (new finding from the smoke test).
+  Updated counts: Part 1 PASS 89 · FAIL 8 · N-A 15 · unsupported 4 · version 1;
+  Part 2 PASS 27 · FAIL 0.

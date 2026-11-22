@@ -7,6 +7,10 @@ renderer; no document DOM and no document JavaScript. Mermaid `11.12.0` in headl
 `--host-resolver-rules=MAP * ~NOTFOUND`, `--virtual-time-budget=5000`. X11 `:0`, i3 workspace 9,
 floating window 1200x900 at 40,40; date 2026-11-22.
 
+**Second fix pass (commit `4f23025`).** Control characters are stripped, Unicode line/paragraph
+separators become spaces, and the `-:-` delimiter is rejected. Revised counts: PASS 27 · FAIL 0.
+Deferred: nothing from this file except cosmetic Mermaid error styling (fixed too).
+
 **Post-fix re-check (commit `8ecd827`).** The two raster panics (T-HO-040/041) and the fence
 suppression (T-HO-003) are fixed; the SVG raster is capped at 16384 px per side, backticks in a
 backtick-fence info string are rejected, and links outside `http(s)`/`mailto` are inert with the target
@@ -46,7 +50,7 @@ renderer; **BY-DESIGN** = documented non-goal; **VERSION** = contained Mermaid-s
 | T-HO-002 | PASS | all 40 list items render; nesting stops at depth 5, items 6–40 share one indent (`02-deep-list-levels.png`). |
 | T-HO-003 | PASS (fixed `2495dc0`) | The 200-backtick line is no longer a fence opener, so extraction continues; the huge `![…]` still prints a truncated image error (low, cosmetic). |
 | T-HO-004 | PASS | all ReDoS probes return at first paint; 400-column table / long link wrap and clip horizontally, no lag. |
-| T-HO-010 | FAIL | NUL/BEL/ESC/DEL/C1 are not invisible: shown as tofu boxes `ab□c□d□e□f□g` (`03-controls-bidi-homoglyph.png`). |
+| T-HO-010 | PASS (fixed `4f23025`) | Control characters are stripped from prose. |
 | T-HO-011 | PASS | noncharacters show tofu and U+FFFD shows a diamond fallback; inert, no crash (`03-…png`). |
 | T-HO-012 | PASS | RLO/isolate do not reorder the line or surrounding UI; reads `abc.exe and isolate` (`03-…png`). |
 | T-HO-013 | FAIL | U+2028/U+2029 are not line/paragraph breaks here: shown as tofu `a□b□c` (`03-…png`). |
@@ -77,7 +81,7 @@ renderer; **BY-DESIGN** = documented non-goal; **VERSION** = contained Mermaid-s
 | T-HO-053 | PASS | `END-OF-PART-2` is inside the final unclosed code block; the app still renders everything above it (`08-…png`). |
 
 Verdict counts (33 IDs): **original run** PASS 21, FAIL 6, N-A 2, VERSION 2, BY-DESIGN 2 —
-**after fixes** PASS 24, FAIL 3 (T-HO-010 controls, T-HO-013 separators, T-HO-031 broken delimiter).
+**after both fix passes** PASS 27, FAIL 0.
 
 ---
 
