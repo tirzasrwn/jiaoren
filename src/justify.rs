@@ -841,7 +841,8 @@ fn push_frag(
             body.clone(),
             link_color,
             false,
-            Stroke::new(1.0, link_color),
+            // Underline is painted per link span so spaces are covered too.
+            Stroke::NONE,
             Stroke::NONE,
         ),
         // Zero-width; build_words turns it into a forced line break.
@@ -1392,10 +1393,22 @@ fn paint_at(
                                 rect: Rect::from_min_size(pos, egui::vec2(frag.width, row_h)),
                             });
                         }
-                        if matches!(frag.kind, RunKind::Link(_)) {
-                            interactives
-                                .push(Rect::from_min_size(pos, egui::vec2(frag.width, row_h)));
-                        }
+                    }
+                    // One underline per link, spanning the spaces between its
+                    // words; the same span owns clicks.
+                    for (lo, hi, color) in link_spans(&placements) {
+                        painter.rect_filled(
+                            Rect::from_min_size(
+                                Pos2::new(lo, y + row_h - 2.0),
+                                egui::vec2(hi - lo, 1.0),
+                            ),
+                            0.0,
+                            color,
+                        );
+                        interactives.push(Rect::from_min_size(
+                            Pos2::new(lo, y),
+                            egui::vec2(hi - lo, row_h),
+                        ));
                     }
                 }
             }
@@ -1542,6 +1555,42 @@ fn range_span(
         (Some(lo), Some(hi)) if hi > lo => Some((lo, hi)),
         _ => None,
     }
+}
+
+/// Merged underline spans for links on one line: one `(lo, hi, color)` per
+/// link label, covering inter-word spaces. A new span starts on a different
+/// URL or a non-link fragment.
+fn link_spans(placements: &[(&Frag, f32)]) -> Vec<(f32, f32, Color32)> {
+    let mut out = Vec::new();
+    let mut open: Option<(&str, f32, f32, usize, Color32)> = None;
+    for (frag, x) in placements {
+        let RunKind::Link(url) = &frag.kind else {
+            if let Some((_, lo, hi, _, color)) = open.take() {
+                out.push((lo, hi, color));
+            }
+            continue;
+        };
+        let start = frag.offset;
+        let end = start + frag.text.chars().count();
+        let extend = open
+            .as_ref()
+            .is_some_and(|(u, _, _, last, _)| *u == url.as_str() && start <= last + 1);
+        if extend {
+            if let Some((_, _, hi, last, _)) = open.as_mut() {
+                *hi = *x + frag.width;
+                *last = end;
+            }
+        } else {
+            if let Some((_, lo, hi, _, color)) = open.take() {
+                out.push((lo, hi, color));
+            }
+            open = Some((url.as_str(), *x, *x + frag.width, end, frag.color));
+        }
+    }
+    if let Some((_, lo, hi, _, color)) = open {
+        out.push((lo, hi, color));
+    }
+    out
 }
 
 fn paint_code_background(ui: &egui::Ui, painter: &egui::Painter, pos: Pos2, frag: &Frag) {
