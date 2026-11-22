@@ -3,6 +3,7 @@ name = "jiaoren"
 version = "0.1.0"
 edition = "2021"
 description = "jiaoren (jr) — a zathura-like Markdown viewer with mermaid diagrams"
+license = "MIT"
 
 [[bin]]
 name = "jr"

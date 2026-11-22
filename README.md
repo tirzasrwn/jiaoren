@@ -272,3 +272,7 @@ Editing, tabs, a TUI mode, PDF/HTML export, math, remote images,
 and mermaid interactivity are out of scope for v1. See
 `docs/superpowers/specs/2026-11-20-mdview-design.md` for the full intent,
 goals, and constraints.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 tirzasrwn.
