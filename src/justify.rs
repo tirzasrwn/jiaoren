@@ -1041,6 +1041,7 @@ fn row_passes(has_code: bool, has_selection: bool) -> Vec<RowPass> {
 /// Intersection of `ranges` with the char span `[start, start + text.chars())`,
 /// returned as local char offsets within `text` plus the global range index.
 /// Range ends are exclusive.
+#[cfg(test)]
 pub(crate) fn local_ranges(
     start: usize,
     text: &str,
@@ -1368,9 +1369,21 @@ fn paint_at(
                     }
                 }
                 RowPass::Text => {
+                    // One rect per match, so spaces inside the query are covered
+                    // between words too.
+                    for (index, &(start, end)) in highlights.ranges.iter().enumerate() {
+                        if let Some((lo, hi)) = range_span(ui, &placements, start, end) {
+                            let color = highlight_color(ui, highlights.current == Some(index));
+                            painter.rect_filled(
+                                Rect::from_min_size(Pos2::new(lo, y), egui::vec2(hi - lo, row_h)),
+                                2.0,
+                                color,
+                            );
+                        }
+                    }
                     for (frag, frag_x) in &placements {
                         let pos = Pos2::new(*frag_x, y);
-                        paint_frag(ui, &painter, pos, frag, highlights);
+                        paint_frag(ui, &painter, pos, frag);
                         let len = frag.text.chars().count();
                         if len > 0 {
                             chars.push(CharSpan {
@@ -1473,45 +1486,59 @@ fn split_overwide(ui: &egui::Ui, words: Vec<Word>, column: f32) -> Vec<Word> {
     out
 }
 
-/// Paint the portions of one fragment covered by a match range, behind its
-/// glyphs. Partial overlap is measured with the fragment's own format so the
-/// rect covers only the matched characters.
-fn paint_highlights(
+/// Screen span of one match on a line's placements, including the gap when the
+/// match starts/ends in inter-word space.
+fn range_span(
     ui: &egui::Ui,
-    painter: &egui::Painter,
-    pos: Pos2,
-    frag: &Frag,
-    highlights: MatchHighlight<'_>,
-) {
-    for (start, end, index) in local_ranges(frag.offset, &frag.text, highlights.ranges) {
-        let color = highlight_color(ui, highlights.current == Some(index));
-        paint_char_range(ui, painter, pos, frag, start, end, color);
-    }
-}
-
-/// Paint one local char range of a fragment with the fragment's own format, so
-/// partial words get an exact-width rect.
-fn paint_char_range(
-    ui: &egui::Ui,
-    painter: &egui::Painter,
-    pos: Pos2,
-    frag: &Frag,
+    placements: &[(&Frag, f32)],
     start: usize,
     end: usize,
-    color: Color32,
-) {
-    if start >= end {
-        return;
+) -> Option<(f32, f32)> {
+    let mut lo: Option<f32> = None;
+    let mut hi: Option<f32> = None;
+    let mut prev_end: Option<f32> = None;
+    for (frag, x) in placements {
+        let frag_start = frag.offset;
+        let frag_end = frag_start + frag.text.chars().count();
+        if frag_end <= start {
+            prev_end = Some(*x + frag.width);
+            continue;
+        }
+        if frag_start >= end {
+            if let Some(hi) = hi.as_mut() {
+                *hi = hi.max(*x);
+            } else {
+                hi = Some(*x);
+            }
+            break;
+        }
+        let local_start = start.max(frag_start);
+        let local_end = end.min(frag_end);
+        if local_start >= local_end {
+            continue;
+        }
+        let prefix: String = frag.text.chars().take(local_start - frag_start).collect();
+        let piece: String = frag
+            .text
+            .chars()
+            .skip(local_start - frag_start)
+            .take(local_end - local_start)
+            .collect();
+        let x0 = *x + layout(ui, &prefix, &frag.format).size().x;
+        let x1 = x0 + layout(ui, &piece, &frag.format).size().x;
+        let lo0 = if start < frag_start {
+            prev_end.unwrap_or(x0)
+        } else {
+            x0
+        };
+        lo = Some(lo.map_or(lo0, |v: f32| v.min(lo0)));
+        hi = Some(hi.map_or(x1, |v: f32| v.max(x1)));
+        prev_end = Some(x1);
     }
-    let prefix: String = frag.text.chars().take(start).collect();
-    let piece: String = frag.text.chars().skip(start).take(end - start).collect();
-    let prefix_w = layout(ui, &prefix, &frag.format).size().x;
-    let piece_w = layout(ui, &piece, &frag.format).size().x;
-    let rect = Rect::from_min_size(
-        Pos2::new(pos.x + prefix_w, pos.y),
-        egui::vec2(piece_w, frag.galley.size().y),
-    );
-    painter.rect_filled(rect, 2.0, color);
+    match (lo, hi) {
+        (Some(lo), Some(hi)) if hi > lo => Some((lo, hi)),
+        _ => None,
+    }
 }
 
 fn paint_code_background(ui: &egui::Ui, painter: &egui::Painter, pos: Pos2, frag: &Frag) {
@@ -1527,16 +1554,8 @@ pub(crate) fn link_is_safe(url: &str) -> bool {
     lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
 }
 
-fn paint_frag(
-    ui: &egui::Ui,
-    painter: &egui::Painter,
-    pos: Pos2,
-    frag: &Frag,
-    highlights: MatchHighlight<'_>,
-) {
+fn paint_frag(ui: &egui::Ui, painter: &egui::Painter, pos: Pos2, frag: &Frag) {
     let size = frag.galley.size();
-    // Above the code background and selection, below the glyphs.
-    paint_highlights(ui, painter, pos, frag, highlights);
     painter.galley(pos, frag.galley.clone(), frag.color);
 
     if let RunKind::Link(url) = &frag.kind {
