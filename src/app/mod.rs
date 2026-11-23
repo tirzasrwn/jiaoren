@@ -782,7 +782,7 @@ impl App {
 
     /// Handle keys while the index overlay is open. Every other key is ignored.
     fn toc_input(&mut self, ui: &egui::Ui) {
-        let (close, up, down, left, right, jump) = ui.input(|i| {
+        let (close, up, down, left, right, jump, gg, bottom) = ui.input(|i| {
             (
                 i.key_pressed(egui::Key::Tab)
                     || i.key_pressed(egui::Key::Escape)
@@ -792,6 +792,28 @@ impl App {
                 i.key_pressed(egui::Key::H) || i.key_pressed(egui::Key::ArrowLeft),
                 i.key_pressed(egui::Key::L) || i.key_pressed(egui::Key::ArrowRight),
                 i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Space),
+                i.events.iter().any(|ev| {
+                    matches!(
+                        ev,
+                        egui::Event::Key {
+                            key: egui::Key::G,
+                            pressed: true,
+                            modifiers,
+                            ..
+                        } if !modifiers.shift
+                    )
+                }),
+                i.events.iter().any(|ev| {
+                    matches!(
+                        ev,
+                        egui::Event::Key {
+                            key: egui::Key::G,
+                            pressed: true,
+                            modifiers,
+                            ..
+                        } if modifiers.shift
+                    )
+                }),
             )
         });
         let mut changed = false;
@@ -813,6 +835,14 @@ impl App {
             }
             if right {
                 self.toc.fold(&self.prepared.toc, true);
+                changed = true;
+            }
+            if bottom {
+                self.toc.select_last(&self.prepared.toc);
+                changed = true;
+            }
+            if gg && self.toc.gg(std::time::Instant::now()) {
+                self.toc.select_first(&self.prepared.toc);
                 changed = true;
             }
             if jump {
@@ -1355,7 +1385,7 @@ impl eframe::App for App {
                     self.keys_help = !self.keys_help;
                 }
                 Action::ToggleToc => {
-                    self.toc.toggle_open();
+                    self.toc.toggle_open(&self.prepared.toc);
                     ui.ctx().request_repaint();
                     ui.ctx().request_repaint();
                 }

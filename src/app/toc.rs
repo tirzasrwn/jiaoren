@@ -17,15 +17,44 @@ pub(crate) struct TocState {
     /// Index into the full TOC vector.
     selected: usize,
     collapsed: HashSet<usize>,
+    /// First `g` of a `gg` press in the index.
+    last_g: Option<std::time::Instant>,
 }
 
 impl TocState {
-    pub(crate) fn toggle_open(&mut self) {
+    pub(crate) fn toggle_open(&mut self, toc: &[TocEntry]) {
         self.open = !self.open;
         if self.open {
             self.selected = 0;
-            self.collapsed.clear();
+            self.last_g = None;
+            // Minimise every parent so the index starts as a top-level outline.
+            self.collapsed = (0..toc.len())
+                .filter(|&i| toc[i].level <= MAX_DEPTH && self.has_children(toc, i))
+                .collect();
         }
+    }
+
+    /// `gg`: first visible heading.
+    pub(crate) fn select_first(&mut self, toc: &[TocEntry]) {
+        if let Some(&first) = self.visible(toc).first() {
+            self.selected = first;
+        }
+    }
+
+    /// `G`: last visible heading.
+    pub(crate) fn select_last(&mut self, toc: &[TocEntry]) {
+        if let Some(&last) = self.visible(toc).last() {
+            self.selected = last;
+        }
+    }
+
+    /// Track a `g` press; returns true when the second one completes `gg`.
+    pub(crate) fn gg(&mut self, now: std::time::Instant) -> bool {
+        let complete = self
+            .last_g
+            .is_some_and(|at| now.duration_since(at) < std::time::Duration::from_millis(500));
+        self.last_g = (!complete).then_some(now);
+        complete
     }
 
     pub(crate) fn close(&mut self) {
@@ -119,15 +148,8 @@ pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &TocState, them
                     ui.set_width(screen.width() - 28.0);
                     ui.set_height(screen.height() - 20.0);
                     let visible = state.visible(toc);
-                    let hint = egui::RichText::new(
-                        "Tab/Esc close · j/k move · h/l fold · Enter/Space jump",
-                    )
-                    .monospace()
-                    .color(ui.visuals().weak_text_color());
-                    ui.label(hint);
-                    ui.add_space(6.0);
                     egui::ScrollArea::vertical()
-                        .max_height(screen.height() - 70.0)
+                        .max_height(screen.height() - 30.0)
                         .show(ui, |ui| {
                             for &index in &visible {
                                 let entry = &toc[index];
@@ -151,6 +173,25 @@ pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &TocState, them
                                 }
                             }
                         });
+                });
+        });
+    // Same plain bottom-left chip as the search command line.
+    egui::Area::new(egui::Id::new("jiaoren-toc-help"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(ui.visuals().faint_bg_color)
+                .inner_margin(egui::Margin::symmetric(4, 2))
+                .show(ui, |ui| {
+                    ui.add(egui::Label::new(
+                        egui::RichText::new(
+                            "tab/esc close · j/k move · h/l fold · enter jump · gg/G",
+                        )
+                        .monospace()
+                        .color(ui.visuals().text_color()),
+                    ));
                 });
         });
 }
@@ -191,7 +232,6 @@ mod tests {
         fn collapse_hides_descendants_and_expand_restores_them() {
             let mut state = TocState {
                 open: true,
-                selected: 0,
                 ..TocState::default()
             };
             let toc = doc();
@@ -203,6 +243,28 @@ mod tests {
             state.selected = 5;
             state.fold(&toc, false);
             assert_eq!(state.visible(&toc), vec![0, 1, 2, 4, 5]);
+        }
+
+        #[test]
+        fn opening_minimises_every_parent() {
+            let toc = doc();
+            let mut state = TocState::default();
+            state.toggle_open(&toc);
+            assert!(state.open);
+            assert_eq!(state.visible(&toc), vec![0, 5]);
+        }
+
+        #[test]
+        fn gg_and_g_select_the_first_and_last_rows() {
+            let toc = doc();
+            let mut state = TocState::default();
+            state.select_last(&toc);
+            assert_eq!(state.selected, 5);
+            state.select_first(&toc);
+            assert_eq!(state.selected, 0);
+            let now = std::time::Instant::now();
+            assert!(!state.gg(now));
+            assert!(state.gg(now + std::time::Duration::from_millis(200)));
         }
 
         #[test]
