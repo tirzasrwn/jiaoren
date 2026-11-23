@@ -201,13 +201,31 @@ pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &mut TocState, 
                                 let indent = "  ".repeat((entry.level - 1) as usize);
                                 let plain = crate::justify::search_text(&entry.text);
                                 let text = format!("{indent}{marker} {plain}");
-                                let response = ui.selectable_label(
-                                    index == state.selected,
-                                    egui::RichText::new(text).monospace(),
+                                // Painted row: square selection box, no outline.
+                                let size = egui::TextStyle::Body.resolve(ui.style()).size;
+                                let font = egui::FontId::monospace(size);
+                                let color = if index == state.selected {
+                                    ui.visuals().selection.stroke.color
+                                } else {
+                                    ui.visuals().text_color()
+                                };
+                                let galley = ui.painter().layout_no_wrap(text, font, color);
+                                let (rect, response) = ui.allocate_exact_size(
+                                    egui::vec2(galley.size().x + 8.0, galley.size().y + 2.0),
+                                    egui::Sense::hover(),
                                 );
-                                // No keyboard focus: the index is painted, and a
-                                // focus ring on the first row looks like a glitch.
-                                response.surrender_focus();
+                                if index == state.selected {
+                                    ui.painter().rect_filled(
+                                        rect,
+                                        0.0,
+                                        ui.visuals().selection.bg_fill,
+                                    );
+                                }
+                                let text_pos = egui::pos2(
+                                    rect.left() + 4.0,
+                                    rect.center().y - galley.size().y / 2.0,
+                                );
+                                ui.painter().galley(text_pos, galley, color);
                                 if index == state.selected && state.scroll_to_selected {
                                     response.scroll_to_me(Some(egui::Align::Center));
                                     state.scroll_to_selected = false;
