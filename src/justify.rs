@@ -1338,7 +1338,7 @@ fn paint_at(
                     if let Some((lo, hi)) = selection_span {
                         painter.rect_filled(
                             Rect::from_min_size(Pos2::new(lo, y), egui::vec2(hi - lo, row_h)),
-                            2.0,
+                            0.0,
                             selection_color(ui),
                         );
                     }
@@ -1351,7 +1351,7 @@ fn paint_at(
                             let color = highlight_color(ui, highlights.current == Some(index));
                             painter.rect_filled(
                                 Rect::from_min_size(Pos2::new(lo, y), egui::vec2(hi - lo, row_h)),
-                                2.0,
+                                0.0,
                                 color,
                             );
                         }
