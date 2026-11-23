@@ -247,13 +247,6 @@ pub(crate) fn draw(
                                         0.0,
                                         ui.visuals().selection.bg_fill,
                                     );
-                                } else if response.hovered() {
-                                    // Mouse users get the same row feedback as `j`/`k`.
-                                    ui.painter().rect_filled(
-                                        rect,
-                                        0.0,
-                                        ui.visuals().widgets.hovered.bg_fill,
-                                    );
                                 }
                                 if response.clicked() {
                                     state.selected = index;
