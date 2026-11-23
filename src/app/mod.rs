@@ -1566,7 +1566,16 @@ impl eframe::App for App {
             self.draw_keys_help(ui.ctx());
         }
         if self.toc.open {
-            toc::draw(ui.ctx(), &self.prepared.toc, &mut self.toc, self.theme);
+            if let Some(index) = toc::draw(ui.ctx(), &self.prepared.toc, &mut self.toc, self.theme)
+            {
+                if let Some(entry) = self.prepared.toc.get(index) {
+                    if let Some(block) = self.search.borrow().heading_block(&entry.id) {
+                        self.jump_to = Some(block);
+                    }
+                }
+                self.toc.close();
+                ui.ctx().request_repaint();
+            }
         }
         // Final cursor wins over the scroll area's Grab: controls first, text
         // second, pan feedback third. The plain search command line is a text

@@ -154,11 +154,22 @@ impl TocState {
     }
 }
 
-/// Paint the overlay. Keyboard-only; the list scrolls to the selected row.
-pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &mut TocState, theme: Theme) {
+/// Left edge of the disclosure triangle for a row.
+fn rect_marker_x(left: f32, indent_chars: f32, char_w: f32) -> f32 {
+    left + 14.0 + indent_chars * char_w
+}
+
+/// Paint the overlay. Returns the TOC index the user clicked to jump to, if any.
+pub(crate) fn draw(
+    ctx: &egui::Context,
+    toc: &[TocEntry],
+    state: &mut TocState,
+    theme: Theme,
+) -> Option<usize> {
     let screen = ctx.content_rect();
     let palette = theme::palette(theme);
     let base = egui::Color32::from(palette.base);
+    let mut jump = None;
     egui::Area::new(egui::Id::new("jiaoren-toc"))
         .order(egui::Order::Foreground)
         .fixed_pos(screen.left_top())
@@ -195,8 +206,10 @@ pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &mut TocState, 
                             ui.add_space(8.0);
                             for &index in &visible {
                                 let entry = &toc[index];
-                                let marker = if state.has_children(toc, index) {
-                                    if state.collapsed.contains(&index) {
+                                let has_children = state.has_children(toc, index);
+                                let collapsed = state.collapsed.contains(&index);
+                                let marker = if has_children {
+                                    if collapsed {
                                         "▸"
                                     } else {
                                         "▾"
@@ -205,8 +218,10 @@ pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &mut TocState, 
                                     " "
                                 };
                                 let indent = "  ".repeat((entry.level - 1) as usize);
+                                let indent_chars = indent.chars().count() as f32;
                                 let plain = crate::justify::search_text(&entry.text);
                                 let text = format!("{indent}{marker} {plain}");
+                                let text_chars = text.chars().count() as f32;
                                 // Painted row: square selection box, no outline.
                                 let size = egui::TextStyle::Body.resolve(ui.style()).size;
                                 let font = egui::FontId::monospace(size);
@@ -216,12 +231,14 @@ pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &mut TocState, 
                                     ui.visuals().text_color()
                                 };
                                 let galley = ui.painter().layout_no_wrap(text, font, color);
+                                let char_w = galley.size().x / text_chars.max(1.0);
                                 // Full-width row: the selection bar spans the
                                 // window, zathura style.
                                 let (rect, response) = ui.allocate_exact_size(
                                     egui::vec2(ui.available_width(), galley.size().y + 2.0),
                                     egui::Sense::click(),
                                 );
+                                let marker_x = rect_marker_x(rect.left(), indent_chars, char_w);
                                 let response =
                                     response.on_hover_cursor(egui::CursorIcon::PointingHand);
                                 if index == state.selected {
@@ -241,6 +258,20 @@ pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &mut TocState, 
                                 if response.clicked() {
                                     state.selected = index;
                                     state.scroll_to_selected = false;
+                                    let on_marker =
+                                        ui.ctx().pointer_interact_pos().is_some_and(|p| {
+                                            p.x >= marker_x - 4.0 && p.x <= marker_x + char_w + 6.0
+                                        });
+                                    if has_children && on_marker {
+                                        // Triangle: fold without leaving the index.
+                                        state.fold(toc, collapsed);
+                                    } else {
+                                        // Row: reveal a collapsed section and jump.
+                                        if has_children && collapsed {
+                                            state.fold(toc, true);
+                                        }
+                                        jump = Some(index);
+                                    }
                                     ui.ctx().request_repaint();
                                 }
                                 let text_pos = egui::pos2(
@@ -259,7 +290,7 @@ pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &mut TocState, 
         });
     // Same plain bottom-left chip as the search command line.
     egui::Area::new(egui::Id::new("jiaoren-toc-help"))
-        .order(egui::Order::Foreground)
+        .order(egui::Order::Tooltip)
         .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
         .interactable(false)
         .show(ctx, |ui| {
@@ -276,6 +307,7 @@ pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &mut TocState, 
                     ));
                 });
         });
+    jump
 }
 
 #[cfg(test)]
