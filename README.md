@@ -90,8 +90,13 @@ Mermaid diagram labels still need `FiraCode Nerd Font` installed system-wide.
 | `y` | copy the text selection; with no selection the first `y` arms `yy` |
 | `/` | search: type a pattern, `Enter` confirms and jumps to the first match |
 | `n` / `N` | next / previous match, wrapping |
-| `esc` / `ctrl+c` | cancel prompt, else clear search, else clear selection, else quit |
+| `ctrl+g` | show the open file's path in the status line |
+| `?` | keyboard-shortcut overlay; `esc`, `q`, `?`, `ctrl+c` or a click closes it |
+| `esc` / `ctrl+c` | copy the selection, else cancel the prompt, else clear the search, else quit |
 | `q` | quit |
+
+`jr --keys` prints the same list to stdout, so the shortcuts are reachable
+without opening a document, and the in-viewer `?` overlay reads the same text.
 
 `/` opens a plain vim-style command line at the bottom-left on the same solid
 chip as the status line: matches update live as you type, Backspace edits,
@@ -108,8 +113,20 @@ around and scroll the current hit's block into view.
 
 Mouse: drag anywhere to pan the document in both axes (the wheel still
 scrolls, `gg` returns to the start). Dragging across text selects it; a plain
-click clears the selection. A plain click on a diagram or local image opens the
-zoom popup; dragging from it pans the document instead.
+click clears the selection. Ctrl+C and `y` both copy the selection, including
+while the drag button is still held, and the copy clears the highlight so the
+next Ctrl+C moves on to clearing the search or quitting. A plain click on a
+diagram or local image opens the zoom popup; dragging from it pans the document
+instead.
+
+While text is selected — dragging or after release — a code block stops painting
+its hover row, so the selection is the only highlight on screen. Each visual line
+is one continuous chip from its first selected glyph to its last, so the spaces
+between words and the stretched gaps of a justified line are covered, and no tint
+spills into the margins or the vertical gaps between blocks. Holding a drag in the
+top or bottom strip of the window scrolls the document, and the wheel scrolls it
+too while the button is still held — the selection follows the text that moves
+under the pointer, and `y` or Ctrl+C then copies all of it.
 
 Hovering a table row tints the whole row (all columns), so long rows are easy
 to trace. Data rows use the theme's `surface1`; the header uses `surface2` in

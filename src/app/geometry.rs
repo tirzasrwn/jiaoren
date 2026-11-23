@@ -180,6 +180,26 @@ pub(crate) fn overscroll_pad(viewport: f32) -> f32 {
     (viewport * 0.5).max(0.0)
 }
 
+/// Scroll pixels for a drag held near a viewport edge: zero in the middle of the
+/// window, ramping up to [`EDGE_SCROLL_MAX`] over the last [`EDGE_SCROLL_BAND`]
+/// pixels at the top (negative) or bottom (positive). The pointer may sit past
+/// the edge, so the ramp is clamped instead of growing without bound.
+pub(crate) fn edge_scroll(pointer_y: f32, viewport_top: f32, viewport_bottom: f32) -> f32 {
+    let down = (pointer_y - (viewport_bottom - EDGE_SCROLL_BAND)) / EDGE_SCROLL_BAND;
+    let up = ((viewport_top + EDGE_SCROLL_BAND) - pointer_y) / EDGE_SCROLL_BAND;
+    if down >= up {
+        down.clamp(0.0, 1.0) * EDGE_SCROLL_MAX
+    } else {
+        -up.clamp(0.0, 1.0) * EDGE_SCROLL_MAX
+    }
+}
+
+/// Height of the top and bottom strips that auto-scroll a selection drag.
+const EDGE_SCROLL_BAND: f32 = 24.0;
+
+/// Pixels per frame a drag scrolls at the very edge of the strip.
+const EDGE_SCROLL_MAX: f32 = 22.0;
+
 /// Trailing space after a document of `doc_height`. At least half the viewport
 /// so the last line can rise to mid-window, and also enough for a short
 /// document that the top pad is still reachable: the scroll maximum becomes
@@ -795,6 +815,29 @@ mod tests {
         fn bucket_scale_multiplies_by_dpi() {
             assert_eq!(bucket_scale(2, 1.0), 2.0);
             assert_eq!(bucket_scale(1, 1.25), 1.25);
+        }
+
+        #[test]
+        fn edge_scroll_waits_for_the_edge_strips() {
+            // Middle of the window: a drag does not scroll.
+            assert_eq!(edge_scroll(450.0, 0.0, 900.0), 0.0);
+            // Bottom strip scrolls the document down, top strip scrolls it up.
+            assert!(edge_scroll(899.0, 0.0, 900.0) > 0.0);
+            assert!(edge_scroll(1.0, 0.0, 900.0) < 0.0);
+            // Past the edge the speed is clamped, not unbounded.
+            assert_eq!(
+                edge_scroll(5000.0, 0.0, 900.0),
+                edge_scroll(900.0, 0.0, 900.0)
+            );
+            assert_eq!(
+                edge_scroll(-5000.0, 0.0, 900.0),
+                edge_scroll(0.0, 0.0, 900.0)
+            );
+            // Symmetric speed at both edges.
+            assert_eq!(
+                edge_scroll(900.0, 0.0, 900.0),
+                -edge_scroll(0.0, 0.0, 900.0)
+            );
         }
     }
 }

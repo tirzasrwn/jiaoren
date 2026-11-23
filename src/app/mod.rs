@@ -33,7 +33,8 @@ mod widgets;
 use code::CodeUi;
 use diagram::DiagramUi;
 use geometry::{
-    bottom_pad, content_column, home_scroll, home_target, jump_scroll_top, overscroll_pad,
+    bottom_pad, content_column, edge_scroll, home_scroll, home_target, jump_scroll_top,
+    overscroll_pad,
 };
 use heading::HeadingUi;
 use image::ImageUi;
@@ -194,6 +195,10 @@ struct Status {
 
 /// How long a clipboard status line stays on screen.
 const STATUS_DURATION: Duration = Duration::from_millis(1500);
+
+/// How long `Ctrl+G`'s file path stays on screen; a path needs longer to read
+/// than a one-word clipboard confirmation.
+const PATH_STATUS_DURATION: Duration = Duration::from_millis(4000);
 
 /// Whether a link click this frame asked for the `link copied` chip.
 fn take_link_copied(ctx: &egui::Context) -> bool {
@@ -518,6 +523,14 @@ pub(crate) struct App {
     select_press: Option<egui::Pos2>,
     /// Pointer moved far enough during this press to count as a drag.
     select_moved: bool,
+    /// The `?` keyboard-shortcut overlay is showing.
+    keys_help: bool,
+    /// Scroll pixels to add before this frame's layout: a selection drag held
+    /// near the top or bottom of the window scrolls the document.
+    autoscroll: f32,
+    /// Pointer position from the last frame, so a drag that runs past the window
+    /// edge keeps extending the selection instead of stalling.
+    last_pointer: Option<egui::Pos2>,
     #[expect(
         dead_code,
         reason = "the watcher must stay alive for the callback to fire"
@@ -543,6 +556,10 @@ impl App {
     /// font and theme before the first frame.
     pub fn new(path: PathBuf, text: String, dark: bool, ctx: &egui::Context) -> Self {
         let theme = if dark { Theme::Dark } else { Theme::Light };
+        // The watcher, a reload and Ctrl+G all want the real file: a path typed
+        // relative to the shell would otherwise be shown and re-read relative to
+        // whatever directory the viewer happens to be in.
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
         // A cached FiraCode is installed before the first frame. On a fresh
         // cache, start with the system font (or egui's defaults) and download
         // in the background so the window still opens immediately.
@@ -552,8 +569,11 @@ impl App {
         // cache, start with the system font (or egui's defaults) and download
         // in the background so the window still opens immediately.
         let download = crate::fonts::download_needed(&cache_root);
-        if let Some(defs) = crate::fonts::preferred(&cache_root) {
-            ctx.set_fonts(defs);
+        match crate::fonts::preferred(&cache_root) {
+            Some(defs) => ctx.set_fonts(defs),
+            // No FiraCode anywhere yet: the window still has to open (and draw
+            // bold runs) while the download runs in the background.
+            None => ctx.set_fonts(crate::fonts::placeholder_defs()),
         }
         let mut font_rx = None;
         if download {
@@ -703,6 +723,9 @@ impl App {
             copy_guard: CopyGuard::default(),
             select_press: None,
             select_moved: false,
+            keys_help: false,
+            autoscroll: 0.0,
+            last_pointer: None,
             watcher,
             watch_rx,
             pending_reload: None,
@@ -833,6 +856,35 @@ impl App {
         }
     }
 
+    /// Paint the `?` overlay: the shared key list on the same solid chip as the
+    /// status line, centred over the document.
+    fn draw_keys_help(&self, ctx: &egui::Context) {
+        egui::Area::new(egui::Id::new("jiaoren-keys-help"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(ui.visuals().faint_bg_color)
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        ui.visuals().widgets.noninteractive.bg_stroke.color,
+                    ))
+                    .corner_radius(egui::CornerRadius::same(4))
+                    .inner_margin(egui::Margin::symmetric(12, 10))
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(crate::KEYS_HELP)
+                                    .monospace()
+                                    .color(ui.visuals().text_color()),
+                            )
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                        );
+                    });
+            });
+    }
+
     /// Update the text selection from this frame's pointer events, using the
     /// previous frame's char maps. A plain click (press+release without moving)
     /// clears instead of selecting a char.
@@ -846,6 +898,12 @@ impl App {
             )
         });
         let mut s = self.search.borrow_mut();
+        // A drag that leaves the window keeps its last position: the buttons are
+        // still held, so the selection should keep growing.
+        let drag_pos = pos.or(self.last_pointer);
+        if pos.is_some() {
+            self.last_pointer = pos;
+        }
         if pressed {
             if let Some(p) = pos {
                 if s.pointer_on_control(p) {
@@ -862,7 +920,7 @@ impl App {
             }
         }
         if down && s.selection.dragging {
-            if let Some(p) = pos {
+            if let Some(p) = drag_pos {
                 if self
                     .select_press
                     .is_some_and(|start| p.distance(start) > 3.0)
@@ -872,7 +930,13 @@ impl App {
                 if let Some(point) = s.hit(p) {
                     s.selection.extend(point);
                 }
+                // Hugging the top or bottom strip scrolls the document, so a
+                // selection can run past what the window shows.
+                let view = ui.ctx().content_rect();
+                self.autoscroll = edge_scroll(p.y, view.top(), view.bottom());
             }
+        } else {
+            self.autoscroll = 0.0;
         }
         if released && s.selection.dragging {
             s.selection.dragging = false;
@@ -885,8 +949,29 @@ impl App {
         }
     }
 
-    /// Route Esc/Ctrl+C: cancel the prompt, clear a committed search, clear the
-    /// selection, or quit.
+    /// Copy the drag selection to the clipboard and clear it, confirming in the
+    /// status line. Shared by `y` and Ctrl+C so both copy the same text.
+    fn copy_selection(&mut self, ctx: &egui::Context) {
+        let text = {
+            let s = self.search.borrow();
+            selected_text(s.texts(), &s.selection)
+        };
+        let Some(text) = text.filter(|text| !text.is_empty()) else {
+            return;
+        };
+        ctx.copy_text(text);
+        self.set_status("copied selection");
+        // A selection copy is not a `yy` press: do not let a stale arm fire a
+        // whole-document copy on the next y.
+        self.keys.last_y = None;
+        // Clearing lets a second Ctrl+C fall through to the next rung (clear
+        // search, then quit) instead of re-copying the same text forever.
+        self.search.borrow_mut().selection.clear();
+        ctx.request_repaint();
+    }
+
+    /// Route Esc/Ctrl+C: cancel the prompt, copy the selection, clear a
+    /// committed search, or quit.
     fn cancel_search(&mut self, ctx: &egui::Context) {
         let prompt_open = self.search.borrow().is_open();
         let search_active = self.search.borrow().state.pattern.is_some();
@@ -897,13 +982,10 @@ impl App {
                 self.jump_to = restored;
                 ctx.request_repaint();
             }
+            CancelAction::CopySelection => self.copy_selection(ctx),
             CancelAction::ClearSearch => {
                 self.search.borrow_mut().state.clear();
                 self.jump_to = None;
-                ctx.request_repaint();
-            }
-            CancelAction::ClearSelection => {
-                self.search.borrow_mut().selection.clear();
                 ctx.request_repaint();
             }
             CancelAction::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
@@ -1082,9 +1164,30 @@ impl eframe::App for App {
         }
         let suppress_quit = quit_suppressed(input_time, popup_closed_at);
         let prompt_open = self.search.borrow().is_open();
+        // The `?` overlay owns the keyboard while it is up: Esc, `q`, `?`, Ctrl+C
+        // or a click closes it and every other key is dropped, so no stray key
+        // can scroll or quit from behind a help screen. Snapshotted before the
+        // close so the closing press is swallowed too instead of toggling the
+        // overlay back on.
+        let help_open = self.keys_help;
+        if help_open {
+            let close = ui.input(|i| {
+                i.key_pressed(egui::Key::Escape)
+                    || i.key_pressed(egui::Key::Questionmark)
+                    || i.key_pressed(egui::Key::Q)
+                    // Ctrl+C reaches winit as `Copy`; accept either form.
+                    || (i.key_pressed(egui::Key::C) && (i.modifiers.ctrl || i.modifiers.command))
+                    || i.events.iter().any(|ev| matches!(ev, egui::Event::Copy))
+                    || i.pointer.primary_pressed()
+            });
+            if close {
+                self.keys_help = false;
+                ui.ctx().request_repaint();
+            }
+        }
         // Pointer selection runs before the scroll area so a press on text can
         // suppress drag-panning in the same frame.
-        if !popup_open && !prompt_open {
+        if !popup_open && !prompt_open && !help_open {
             self.process_selection(ui);
         }
         // If a release/focus-loss happened while the prompt/popup blocked the
@@ -1097,7 +1200,24 @@ impl eframe::App for App {
             }
         }
         let mut acts: Vec<Action> = Vec::new();
-        if !popup_open && prompt_open {
+        // Edge auto-scroll moves the document under a held selection drag; the
+        // scroll area clamps the target to the content range.
+        if self.autoscroll != 0.0 {
+            self.scroll_y = (self.scroll_y + self.autoscroll).max(0.0);
+            ui.ctx().request_repaint();
+        }
+        // The scroll area ignores the wheel while a widget holds the drag (a
+        // selection drag does), so the document scrolls itself here and the
+        // selection keeps growing with the content that moves under the pointer.
+        if self.search.borrow().selection.dragging {
+            let delta = ui.input(|i| i.smooth_scroll_delta.y);
+            if delta != 0.0 {
+                self.scroll_y = (self.scroll_y - delta).max(0.0);
+                ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+                ui.ctx().request_repaint();
+            }
+        }
+        if !popup_open && prompt_open && !help_open {
             // Raw vim-style input: no widget, no focus. Events are consumed in
             // order and stop at Enter; later text cannot join the pattern.
             let batch = ui.input(|i| read_search_batch(&i.events));
@@ -1148,7 +1268,7 @@ impl eframe::App for App {
                     }
                 }
             }
-        } else if !popup_open {
+        } else if !popup_open && !help_open {
             // Once `/` opens the prompt in this batch, later keys are text for
             // the prompt, not viewer actions (`q`, `t`, `n`, …).
             let mut search_opened = false;
@@ -1247,20 +1367,14 @@ impl eframe::App for App {
                 }
                 Action::SearchNext => self.step_search(1, ui.ctx()),
                 Action::SearchPrev => self.step_search(-1, ui.ctx()),
-                Action::CopySelection => {
-                    let text = {
-                        let s = self.search.borrow();
-                        selected_text(s.texts(), &s.selection)
-                    };
-                    if let Some(text) = text {
-                        if !text.is_empty() {
-                            ui.ctx().copy_text(text);
-                            self.set_status("copied selection");
-                            // A selection copy is not a `yy` press: do not let a
-                            // stale arm fire a whole-document copy on the next y.
-                            self.keys.last_y = None;
-                        }
-                    }
+                Action::CopySelection => self.copy_selection(ui.ctx()),
+                Action::ShowPath => {
+                    let path = self.path.display().to_string();
+                    self.set_status_for(path, PATH_STATUS_DURATION);
+                }
+                Action::ToggleKeysHelp => {
+                    self.keys_help = !self.keys_help;
+                    ui.ctx().request_repaint();
                 }
                 // Esc/Ctrl+C: prompt, search, selection, then quit.
                 Action::CancelOrQuit => self.cancel_search(ui.ctx()),
@@ -1417,6 +1531,9 @@ impl eframe::App for App {
             self.set_status("link copied");
         }
         self.draw_status(ui.ctx());
+        if self.keys_help {
+            self.draw_keys_help(ui.ctx());
+        }
         // Final cursor wins over the scroll area's Grab: controls first, text
         // second, pan feedback third. The plain search command line is a text
         // surface; popups keep their own cursors.

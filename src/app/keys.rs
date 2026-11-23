@@ -39,6 +39,10 @@ pub enum Action {
     ToggleTheme,
     /// Re-read the document from disk.
     Reload,
+    /// Show the open document's path in the status line (`Ctrl+G`).
+    ShowPath,
+    /// Toggle the keyboard-shortcut overlay (`?`).
+    ToggleKeysHelp,
     /// Copy the whole document as Markdown.
     CopyDocument,
     /// Open the `/` search command line.
@@ -60,15 +64,17 @@ pub enum Action {
 pub enum CancelAction {
     /// Close the `/` prompt and discard its buffer.
     CancelPrompt,
+    /// Copy the drag selection, exactly like `y`.
+    CopySelection,
     /// Clear the committed pattern, hits and highlights.
     ClearSearch,
-    /// Clear the drag selection (after a search was already clear).
-    ClearSelection,
     /// Close the window.
     Quit,
 }
 
-/// Route Esc/Ctrl+C: prompt, then search, then selection, then quit.
+/// Route Esc/Ctrl+C: prompt, then copy the selection, then clear search, then
+/// quit. Ctrl+C copies selected text the way every other app does, so a drag
+/// selection is never thrown away by the usual copy key.
 pub fn cancel_action(
     prompt_open: bool,
     search_active: bool,
@@ -76,10 +82,10 @@ pub fn cancel_action(
 ) -> CancelAction {
     if prompt_open {
         CancelAction::CancelPrompt
+    } else if selection_active {
+        CancelAction::CopySelection
     } else if search_active {
         CancelAction::ClearSearch
-    } else if selection_active {
-        CancelAction::ClearSelection
     } else {
         CancelAction::Quit
     }
@@ -157,6 +163,9 @@ pub fn apply_key(
         Key::Num0 => Some(Action::ResetZoom),
         Key::T => Some(Action::ToggleTheme),
         Key::R => Some(Action::Reload),
+        // Ctrl+G shows the file path; a bare `g` still starts the `gg` window.
+        Key::G if modifiers.command || modifiers.ctrl => Some(Action::ShowPath),
+        Key::Questionmark => Some(Action::ToggleKeysHelp),
         Key::C if modifiers.command || modifiers.ctrl => Some(Action::CancelOrQuit),
         Key::Q => Some(Action::Quit),
         // Esc and Ctrl+C share the cancel prompt → clear search → quit ladder.
@@ -460,18 +469,43 @@ mod tests {
         }
 
         #[test]
-        fn cancel_action_is_prompt_then_search_then_selection_then_quit() {
+        fn cancel_action_is_prompt_then_copy_then_search_then_quit() {
             assert_eq!(
                 cancel_action(true, false, false),
                 CancelAction::CancelPrompt
             );
             assert_eq!(cancel_action(true, true, true), CancelAction::CancelPrompt);
-            assert_eq!(cancel_action(false, true, true), CancelAction::ClearSearch);
+            // A live selection is copied, not discarded, by Ctrl+C.
+            assert_eq!(
+                cancel_action(false, true, true),
+                CancelAction::CopySelection
+            );
             assert_eq!(
                 cancel_action(false, false, true),
-                CancelAction::ClearSelection
+                CancelAction::CopySelection
             );
+            assert_eq!(cancel_action(false, true, false), CancelAction::ClearSearch);
             assert_eq!(cancel_action(false, false, false), CancelAction::Quit);
+        }
+
+        #[test]
+        fn ctrl_g_shows_the_path_and_questionmark_the_key_help() {
+            let mut s = KeyState::default();
+            let now = std::time::Instant::now();
+            assert_eq!(
+                apply_key(&mut s, Key::G, Modifiers::CTRL, now),
+                Some(Action::ShowPath)
+            );
+            assert_eq!(
+                apply_key(&mut s, Key::G, Modifiers::COMMAND, now),
+                Some(Action::ShowPath)
+            );
+            assert_eq!(
+                apply_key(&mut s, Key::Questionmark, Modifiers::SHIFT, now),
+                Some(Action::ToggleKeysHelp)
+            );
+            // A bare `g` still arms `gg`.
+            assert_eq!(apply_key(&mut s, Key::G, Modifiers::NONE, now), None);
         }
 
         #[test]
