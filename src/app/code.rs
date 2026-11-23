@@ -19,6 +19,23 @@ pub(crate) struct CodeUi {
     occurrences: HashMap<String, usize>,
     /// Set when a block's copy button was clicked this frame.
     copied: bool,
+    /// Wrapped rows and box metrics per (block, column, font, dpi). Scrolling
+    /// only translates these, so the expensive layout runs once.
+    layouts: HashMap<CodeLayoutKey, CodeLayout>,
+}
+
+type CodeLayoutKey = (String, i32, i32, i32);
+
+struct CodeLayout {
+    rows: Vec<Row>,
+    spans: Vec<(usize, usize)>,
+    cell: f32,
+    gutter: f32,
+    width: f32,
+    content_height: f32,
+    row_h: f32,
+    pad: f32,
+    top_pad: f32,
 }
 
 impl CodeUi {
@@ -28,6 +45,7 @@ impl CodeUi {
             column: 0.0,
             occurrences: HashMap::new(),
             copied: false,
+            layouts: HashMap::new(),
         }
     }
 
@@ -36,12 +54,17 @@ impl CodeUi {
     pub(crate) fn begin_frame(&mut self, column: f32) {
         self.column = column;
         self.occurrences.clear();
+        // Zoom steps create new keys; keep the cache bounded.
+        if self.layouts.len() > 96 {
+            self.layouts.clear();
+        }
     }
 
     pub(crate) fn reset(&mut self, specs: HashMap<String, CodeSpec>) {
         self.specs = specs;
         self.occurrences.clear();
         self.copied = false;
+        self.layouts.clear();
     }
 
     /// Take the "a code block was copied" flag for the frame, if the button
@@ -52,9 +75,8 @@ impl CodeUi {
 
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, id: &str, search: &mut SearchUi) {
         // Clone so the spec outlives the immutable borrow of `self`.
-        let spec = match self.specs.get(id) {
-            Some(s) => s.clone(),
-            None => return, // unknown id: draw nothing, never panic
+        let Some(spec) = self.specs.get(id) else {
+            return; // unknown id: draw nothing, never panic
         };
         let occurrence = {
             let count = self.occurrences.entry(id.to_string()).or_insert(0);
@@ -75,32 +97,72 @@ impl CodeUi {
         // would otherwise light up a second time and read as a second
         // highlight on top of the selection.
         let selecting = search.selection.dragging || search.selection.is_active();
-        let row_h = ui.fonts_mut(|f| f.row_height(&mono));
-        let pad = row_h * 0.5;
-        let top_pad = code_top_pad(row_h);
+        let key: CodeLayoutKey = (
+            id.to_string(),
+            (self.column * 100.0).round() as i32,
+            (mono.size * 100.0).round() as i32,
+            (ui.ctx().pixels_per_point() * 100.0).round() as i32,
+        );
+        if !self.layouts.contains_key(&key) {
+            let row_h = ui.fonts_mut(|f| f.row_height(&mono));
+            let pad = row_h * 0.5;
+            let top_pad = code_top_pad(row_h);
+            let cell = line_width(ui, "M", &mono);
+            let line_count = code_lines(&spec.text).len();
+            // The number column plus one cell of gap; the text starts after it.
+            let gutter = gutter_width(line_count, cell);
+            // Leave the right padding inside the column so glyphs never spill
+            // past the block's background.
+            let content = content_width(self.column, gutter, pad, cell);
+            let rows = layout_rows(&spec.text, content, &|s| line_width(ui, s, &mono));
+            let width = self.column.max(gutter + cell);
+            let content_height = rows.len().max(1) as f32 * row_h + top_pad + pad;
+            self.layouts.insert(
+                key.clone(),
+                CodeLayout {
+                    rows,
+                    spans: code_line_spans(&spec.text),
+                    cell,
+                    gutter,
+                    width,
+                    content_height,
+                    row_h,
+                    pad,
+                    top_pad,
+                },
+            );
+        }
+        let Some(layout) = self.layouts.get(&key) else {
+            return;
+        };
+        let rows = &layout.rows;
+        let spans = &layout.spans;
+        let row_h = layout.row_h;
+        let pad = layout.pad;
+        let top_pad = layout.top_pad;
+        let cell = layout.cell;
+        let gutter = layout.gutter;
+        let width = layout.width;
+        let content_height = layout.content_height;
         let lines = code_lines(&spec.text);
-        let spans = code_line_spans(&spec.text);
         let line_marks = line_highlights(&spec.text, &ranges, current);
         let sel_ranges: Vec<(usize, usize)> = selection.into_iter().collect();
         let sel_marks = line_highlights(&spec.text, &sel_ranges, None);
         let other_fill = crate::justify::highlight_color(ui, false);
         let current_fill = crate::justify::highlight_color(ui, true);
         let selection_fill = crate::justify::selection_color(ui);
-        let cell = line_width(ui, "M", &mono);
-        // The number column plus one cell of gap; the text starts after it.
-        let gutter = gutter_width(lines.len(), cell);
-        // Leave the right padding inside the column so glyphs never spill past
-        // the block's background.
-        let content = content_width(self.column, gutter, pad, cell);
-        let rows = layout_rows(&spec.text, content, &|s| line_width(ui, s, &mono));
-        let width = self.column.max(gutter + cell);
-        let content_height = rows.len().max(1) as f32 * row_h + top_pad + pad;
         let gap = crate::justify::block_gap(ui);
         // Reserve the inter-block gap inside the allocation; the background and
         // the block's recorded height stay on the content area.
         let (_, rect) = ui.allocate_space(egui::vec2(width, content_height + gap));
         search.set_height(block, content_height);
         search.set_rect(block, rect);
+        // Off-screen blocks keep their height but paint nothing; a 9,000-line
+        // document then costs only the visible rows per frame.
+        if !ui.is_rect_visible(rect) {
+            search.set_char_map(block, Vec::new());
+            return;
+        }
         let painter = ui.painter().clone();
         let content = egui::Rect::from_min_size(rect.min, egui::vec2(width, content_height));
         painter.rect_filled(content, 2.0, ui.visuals().code_bg_color);

@@ -260,18 +260,27 @@ impl DiagramUi {
             Some(Ok(svg)) => self.draw_svg(ui, id, &svg, self.theme),
             Some(Err(msg)) => self.draw_error(ui, id, &msg),
             None => {
-                let enqueued = enqueue_diagram(
-                    &self.failures,
-                    &mut self.inflight,
-                    &self.sources,
-                    &self.queue,
-                    id,
-                    self.theme,
-                );
-                self.maybe_spawn();
-                if enqueued {
-                    ui.ctx()
-                        .request_repaint_after(std::time::Duration::from_millis(100));
+                // Only render diagrams near the viewport; a 120-diagram document
+                // would otherwise saturate the workers while the user reads.
+                let probe = egui::Rect::from_min_size(
+                    ui.cursor().min,
+                    egui::vec2(self.column.max(1.0), 400.0),
+                )
+                .expand(200.0);
+                if ui.is_rect_visible(probe) {
+                    let enqueued = enqueue_diagram(
+                        &self.failures,
+                        &mut self.inflight,
+                        &self.sources,
+                        &self.queue,
+                        id,
+                        self.theme,
+                    );
+                    self.maybe_spawn();
+                    if enqueued {
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(100));
+                    }
                 }
                 // On a theme switch keep the old theme's image on screen until
                 // the new render arrives; never flash a placeholder.
