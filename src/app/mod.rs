@@ -1431,6 +1431,11 @@ impl eframe::App for App {
                 .into_iter()
                 .map(|(kind, font)| (kind, egui::FontId::new(font.size * z, font.family)))
                 .collect();
+            // The document paints its own selection. egui labels are still
+            // selectable by default, so a drag would also select the invisible
+            // auxiliary labels around the custom blocks and paint stray chips
+            // in the left margin and the gaps between blocks.
+            ui.style_mut().interaction.selectable_labels = false;
 
             if let Some(reason) = &self.chromium_error {
                 ui.colored_label(
