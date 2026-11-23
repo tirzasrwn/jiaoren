@@ -174,9 +174,15 @@ pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &mut TocState, 
                     1.0,
                     ui.visuals().widgets.noninteractive.bg_stroke.color,
                 ))
-                .inner_margin(egui::Margin::symmetric(14, 10))
+                // No side margin: the selection bar spans the full window.
+                .inner_margin(egui::Margin {
+                    left: 0,
+                    right: 0,
+                    top: 10,
+                    bottom: 10,
+                })
                 .show(ui, |ui| {
-                    ui.set_width(screen.width() - 28.0);
+                    ui.set_width(screen.width());
                     ui.set_height(screen.height() - 20.0);
                     let visible = state.visible(toc);
                     egui::ScrollArea::vertical()
@@ -210,8 +216,10 @@ pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &mut TocState, 
                                     ui.visuals().text_color()
                                 };
                                 let galley = ui.painter().layout_no_wrap(text, font, color);
+                                // Full-width row: the selection bar spans the
+                                // window, zathura style.
                                 let (rect, response) = ui.allocate_exact_size(
-                                    egui::vec2(galley.size().x + 8.0, galley.size().y + 2.0),
+                                    egui::vec2(ui.available_width(), galley.size().y + 2.0),
                                     egui::Sense::hover(),
                                 );
                                 if index == state.selected {
@@ -222,7 +230,7 @@ pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &mut TocState, 
                                     );
                                 }
                                 let text_pos = egui::pos2(
-                                    rect.left() + 4.0,
+                                    rect.left() + 14.0,
                                     rect.center().y - galley.size().y / 2.0,
                                 );
                                 ui.painter().galley(text_pos, galley, color);
