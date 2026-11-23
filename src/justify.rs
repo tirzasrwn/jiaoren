@@ -995,31 +995,8 @@ pub(crate) fn selection_color(ui: &egui::Ui) -> Color32 {
     Color32::from_rgba_unmultiplied(r, g, b, 0x40)
 }
 
-/// Merge selection intervals by line: one `(line, left, right)` per line,
-/// spanning inter-word gaps. Input intervals on the same line may be disjoint;
-/// lines keep separate rects. Used by the painter so a selection looks
-/// continuous instead of one chip per word.
-pub(crate) fn merge_selection_spans(spans: &[(usize, f32, f32)]) -> Vec<(usize, f32, f32)> {
-    let mut out: Vec<(usize, f32, f32)> = Vec::new();
-    for &(line, left, right) in spans {
-        if left >= right {
-            continue;
-        }
-        match out.last_mut() {
-            Some((last_line, last_left, last_right))
-                if *last_line == line && left <= *last_right =>
-            {
-                *last_left = last_left.min(left);
-                *last_right = last_right.max(right);
-            }
-            _ => out.push((line, left, right)),
-        }
-    }
-    out
-}
-
-/// Ordered draw passes for one painted row. Code backgrounds must be below a
-/// merged selection span, and both below glyphs/search highlights.
+/// Ordered draw passes for one painted row. Code backgrounds must be below the
+/// selection chips, and both below glyphs/search highlights.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RowPass {
     CodeBackgrounds,
@@ -1317,6 +1294,9 @@ fn paint_at(
                 x += frag.width;
             }
         }
+        // One chip per visual line, from the first selected glyph to the last,
+        // so the spaces between words are covered and the line reads as one
+        // continuous highlight — the way a browser or a PDF reader selects.
         let mut selection_span: Option<(f32, f32)> = None;
         if let Some((sel_start, sel_end)) = highlights.selection {
             let mut lo = f32::INFINITY;
@@ -1359,14 +1339,11 @@ fn paint_at(
                 }
                 RowPass::Selection => {
                     if let Some((lo, hi)) = selection_span {
-                        // One rect covers inter-word gaps on this line.
-                        for (_, lo, hi) in merge_selection_spans(&[(row, lo, hi)]) {
-                            painter.rect_filled(
-                                Rect::from_min_size(Pos2::new(lo, y), egui::vec2(hi - lo, row_h)),
-                                2.0,
-                                selection_color(ui),
-                            );
-                        }
+                        painter.rect_filled(
+                            Rect::from_min_size(Pos2::new(lo, y), egui::vec2(hi - lo, row_h)),
+                            2.0,
+                            selection_color(ui),
+                        );
                     }
                 }
                 RowPass::Text => {
@@ -1875,41 +1852,7 @@ mod tests {
     }
 
     mod highlights {
-        use super::super::{local_ranges, merge_selection_spans, row_passes, RowPass};
-
-        #[test]
-        fn intersecting_or_adjacent_intervals_merge() {
-            assert_eq!(
-                merge_selection_spans(&[(0, 10.0, 20.0), (0, 15.0, 25.0)]),
-                vec![(0, 10.0, 25.0)]
-            );
-            assert_eq!(
-                merge_selection_spans(&[(0, 10.0, 20.0), (0, 20.0, 30.0)]),
-                vec![(0, 10.0, 30.0)]
-            );
-        }
-
-        #[test]
-        fn disjoint_gaps_stay_separate() {
-            assert_eq!(
-                merge_selection_spans(&[(0, 10.0, 20.0), (0, 30.0, 40.0)]),
-                vec![(0, 10.0, 20.0), (0, 30.0, 40.0)]
-            );
-        }
-
-        #[test]
-        fn separate_lines_keep_separate_rects() {
-            assert_eq!(
-                merge_selection_spans(&[(0, 10.0, 20.0), (1, 5.0, 15.0)]),
-                vec![(0, 10.0, 20.0), (1, 5.0, 15.0)]
-            );
-        }
-
-        #[test]
-        fn no_selection_has_no_rects() {
-            assert!(merge_selection_spans(&[]).is_empty());
-            assert!(merge_selection_spans(&[(0, 5.0, 5.0)]).is_empty());
-        }
+        use super::super::{local_ranges, row_passes, RowPass};
 
         #[test]
         fn row_passes_paint_code_background_then_selection_then_text() {

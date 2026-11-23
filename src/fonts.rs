@@ -302,8 +302,21 @@ fn read_face(path: &Path) -> Option<Vec<u8>> {
     (bytes.len() >= 10_000 && is_font(&bytes)).then_some(bytes)
 }
 
+/// Definitions that always bind the bold family, for the first run before a
+/// FiraCode face exists: the bold family lists egui's default proportional
+/// fonts, so a `**strong**` run renders instead of panicking.
+pub fn placeholder_defs() -> egui::FontDefinitions {
+    let mut defs = egui::FontDefinitions::default();
+    let fallback = defs.families[&egui::FontFamily::Proportional].clone();
+    defs.families
+        .insert(egui::FontFamily::Name(BOLD_FAMILY.into()), fallback);
+    defs
+}
+
 /// Search order for a locally installed copy: `~/.fonts`,
-/// `$XDG_DATA_HOME/fonts`, `~/.local/share/fonts`, `/usr/share/fonts/truetype`.
+/// `$XDG_DATA_HOME/fonts`, `~/.local/share/fonts`, `/usr/share/fonts/truetype`,
+/// each followed by its immediate subdirectories — font installers such as
+/// `getnf` drop the faces into a `FiraCode/` folder below them.
 fn candidate_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let home = std::env::var_os("HOME");
@@ -317,7 +330,19 @@ fn candidate_dirs() -> Vec<PathBuf> {
         dirs.push(PathBuf::from(h).join(".local/share/fonts"));
     }
     dirs.push(PathBuf::from("/usr/share/fonts/truetype"));
-    dirs
+    let mut out = dirs.clone();
+    for dir in &dirs {
+        let mut subdirs: Vec<PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
+        subdirs.sort();
+        out.extend(subdirs);
+    }
+    out
 }
 
 #[cfg(test)]

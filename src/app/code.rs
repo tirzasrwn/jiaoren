@@ -71,6 +71,10 @@ impl CodeUi {
         let block = search.record(ui, spec.text.clone());
         let (ranges, current) = search.highlights(block);
         let selection = search.selection_range(block);
+        // A drag selection (or an active one) owns the visual: the hover row
+        // would otherwise light up a second time and read as a second
+        // highlight on top of the selection.
+        let selecting = search.selection.dragging || search.selection.is_active();
         let row_h = ui.fonts_mut(|f| f.row_height(&mono));
         let pad = row_h * 0.5;
         let top_pad = code_top_pad(row_h);
@@ -104,7 +108,7 @@ impl CodeUi {
         // theme's hover fill, painted above the block background and below the
         // glyphs/selection.
         if let Some(pos) = ui.ctx().pointer_hover_pos() {
-            if content.contains(pos) {
+            if !selecting && content.contains(pos) {
                 let rel = (pos.y - (rect.top() + top_pad)).max(0.0);
                 let hovered_row = (rel / row_h).floor() as usize;
                 if let Some(row) = rows.get(hovered_row) {

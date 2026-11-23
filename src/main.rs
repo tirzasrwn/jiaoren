@@ -28,11 +28,35 @@ pub enum Command {
     Help,
     /// Print version information and exit 0.
     Version,
+    /// Print the keyboard shortcuts and exit 0.
+    Keys,
     /// Delete cached diagram renders; `all` also removes the managed Chromium.
     CleanCache { all: bool },
 }
 
 const USAGE: &str = "usage: jr [--dark] <file.md>";
+
+/// The keyboard shortcuts, one per line. Shared by `jr --keys` and the `?`
+/// overlay so the two can never drift apart.
+pub const KEYS_HELP: &str = "\
+j / ↓            scroll down one line
+k / ↑            scroll up one line
+d / u            scroll half a page down / up
+space / b        scroll a page down / up
+gg / G           jump to the top / bottom
+h / l            pan left / right (shift+←/→ too)
++ / = / -        zoom in / out
+a / 0            reset zoom (a also pans back left)
+t                toggle light/dark theme
+r                reload from disk
+ctrl+g           show the file path
+drag             select text (drag on empty space pans)
+y                copy the selection, yy copies the whole file
+/                search, Enter confirms
+n / N            next / previous match
+?                this list (esc, q or ctrl+c closes it)
+esc / ctrl+c     copy selection, else cancel prompt, else clear search, else quit
+q                quit";
 
 /// The text printed by `jr --help`.
 pub const HELP: &str = concat!(
@@ -46,10 +70,11 @@ Options:
       --dark         start with the dark theme
       --clean-cache  delete cached diagram renders and exit
       --all          with --clean-cache, also delete Chromium and cached fonts
+      --keys         print the keyboard shortcuts and exit
   -h, --help         print this help and exit
   -V, --version      print version information and exit
 
-Keys: see the README (j/k, d/u, gg/G, +/-/a/0, t, r, q)."
+Keys: jr --keys, or press ? in the viewer."
 );
 
 /// One-line-per-component version output for `jr --version`.
@@ -79,6 +104,13 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
         return Ok(Command::Version);
+    }
+    if args.iter().any(|a| a == "--keys") {
+        let other = args.iter().any(|a| a != "--keys");
+        if other {
+            return Err(USAGE.to_string());
+        }
+        return Ok(Command::Keys);
     }
     if args.iter().any(|a| a == "--clean-cache") {
         let all = args.iter().any(|a| a == "--all");
@@ -119,6 +151,10 @@ fn main() -> anyhow::Result<()> {
         }
         Ok(Command::Version) => {
             println!("{}", version_text());
+            return Ok(());
+        }
+        Ok(Command::Keys) => {
+            println!("{KEYS_HELP}");
             return Ok(());
         }
         Ok(Command::CleanCache { all }) => {
@@ -234,6 +270,14 @@ mod tests {
         #[test]
         fn long_version_returns_version() {
             assert_eq!(parse_args(&a(&["--version"])).unwrap(), Command::Version);
+        }
+
+        #[test]
+        fn keys_flag_returns_keys_and_takes_nothing_else() {
+            assert_eq!(parse_args(&a(&["--keys"])).unwrap(), Command::Keys);
+            assert!(parse_args(&a(&["--keys", "doc.md"])).is_err());
+            assert!(KEYS_HELP.lines().any(|l| l.starts_with("q")));
+            assert!(HELP.contains("--keys"));
         }
 
         #[test]
