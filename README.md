@@ -145,8 +145,14 @@ number per source line. A wrapped line continues on the next row with an empty
 gutter. Numbers are decoration: search, selection and both copy paths use the
 raw source text, so the clipboard never contains them.
 
-`Ctrl+C` follows the same cancel-then-quit ladder as `esc`; one press per Ctrl
-hold is acted on, so holding it cannot skip from clearing the search to quitting.
+`Ctrl+C` shares the cancel-then-quit ladder with `esc`, but copies first when
+text is selected: prompt, then copy the selection, then clear the search, then
+quit. One press per Ctrl hold is acted on, so holding it cannot skip from
+clearing the search to quitting.
+
+Resizing the window keeps the reading column centred: scrolling down does not
+stop it, and only a sideways pan of your own keeps its position. `a` is still
+there to reset the zoom and pan back when you want to.
 
 ## Mermaid diagrams
 

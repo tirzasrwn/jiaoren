@@ -214,9 +214,11 @@ pub(crate) fn bottom_pad(viewport_height: f32, doc_height: f32) -> f32 {
 /// Scroll offset for this frame's layout.
 ///
 /// `last_pad` is `None` on the first layout after open: home to `new_pad`.
-/// While the view is still at home (within one point of `last_pad`), follow a
-/// viewport resize by the pad delta so the heading stays at the top. Once the
-/// user has scrolled away, leave their position unchanged.
+/// Each axis homes on its own: while the view is still at home on an axis
+/// (within one point of `last_pad` on that axis), a viewport resize follows the
+/// pad delta, so the heading stays at the top and the reading column stays
+/// centred. An axis the user has moved away from keeps its position, so
+/// scrolling down does not stop the column re-centring in a wider window.
 pub(crate) fn home_scroll(
     current: egui::Vec2,
     last_pad: Option<egui::Vec2>,
@@ -225,12 +227,19 @@ pub(crate) fn home_scroll(
     let Some(last) = last_pad else {
         return new_pad;
     };
-    let at_home = (current.x - last.x).abs() <= 1.0 && (current.y - last.y).abs() <= 1.0;
-    if at_home {
-        current + (new_pad - last)
-    } else {
-        current
-    }
+    let near = |a: f32, b: f32| (a - b).abs() <= 1.0;
+    egui::vec2(
+        if near(current.x, last.x) {
+            current.x + (new_pad.x - last.x)
+        } else {
+            current.x
+        },
+        if near(current.y, last.y) {
+            current.y + (new_pad.y - last.y)
+        } else {
+            current.y
+        },
+    )
 }
 
 /// Scroll offset that centres a search hit's block: `block_top +
@@ -559,6 +568,29 @@ mod tests {
                     egui::vec2(150.0, 250.0)
                 ),
                 egui::vec2(300.0, 500.0)
+            );
+        }
+
+        #[test]
+        fn scrolled_down_still_re_centres_horizontally_on_a_resize() {
+            // Scrolled down but never panned sideways: a wider window must move
+            // the horizontal home with the resize, or the column sits off-centre.
+            assert_eq!(
+                home_scroll(
+                    egui::vec2(100.0, 900.0),
+                    Some(egui::vec2(100.0, 200.0)),
+                    egui::vec2(150.0, 250.0)
+                ),
+                egui::vec2(150.0, 900.0)
+            );
+            // Panned sideways but still at the top: the vertical home follows.
+            assert_eq!(
+                home_scroll(
+                    egui::vec2(400.0, 200.0),
+                    Some(egui::vec2(100.0, 200.0)),
+                    egui::vec2(150.0, 250.0)
+                ),
+                egui::vec2(400.0, 250.0)
             );
         }
 
