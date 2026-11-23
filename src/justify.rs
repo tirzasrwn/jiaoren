@@ -1825,6 +1825,11 @@ mod tests {
             // Inline HTML is painted as text, not stripped.
             assert_eq!(search_text("<b>x</b> and <br> y"), "<b>x</b> and <br> y");
             assert_eq!(search_text("1 < 2"), "1 < 2");
+            // Numbered heading with escaped dot and bold, as the index shows it.
+            assert_eq!(
+                search_text("**3\\. Tujuan dan kriteria keberhasilan**"),
+                "3. Tujuan dan kriteria keberhasilan"
+            );
         }
 
         #[test]

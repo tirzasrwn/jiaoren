@@ -19,18 +19,47 @@ pub(crate) struct TocState {
     collapsed: HashSet<usize>,
     /// First `g` of a `gg` press in the index.
     last_g: Option<std::time::Instant>,
+    /// Whether the overlay has been opened before; later opens keep the state.
+    initialized: bool,
+    /// Ask the next paint to reveal the selected row.
+    scroll_to_selected: bool,
 }
 
 impl TocState {
     pub(crate) fn toggle_open(&mut self, toc: &[TocEntry]) {
         self.open = !self.open;
         if self.open {
-            self.selected = 0;
             self.last_g = None;
-            // Minimise every parent so the index starts as a top-level outline.
-            self.collapsed = (0..toc.len())
-                .filter(|&i| toc[i].level <= MAX_DEPTH && self.has_children(toc, i))
-                .collect();
+            if !self.initialized {
+                self.initialized = true;
+                self.selected = 0;
+                // Minimise every parent so the first open is a top-level outline.
+                self.collapsed = (0..toc.len())
+                    .filter(|&i| toc[i].level <= MAX_DEPTH && self.has_children(toc, i))
+                    .collect();
+            } else {
+                // Reopening keeps the last selection and folds; reveal it if a
+                // collapsed ancestor hides it.
+                self.reveal_selected(toc);
+            }
+            self.scroll_to_selected = true;
+        }
+    }
+
+    /// Drop index state when a different document is loaded.
+    pub(crate) fn reset(&mut self) {
+        *self = TocState::default();
+    }
+
+    fn reveal_selected(&mut self, toc: &[TocEntry]) {
+        let mut level = toc.get(self.selected).map_or(MAX_DEPTH + 1, |e| e.level);
+        let mut j = self.selected;
+        while j > 0 {
+            j -= 1;
+            if toc[j].level < level {
+                self.collapsed.remove(&j);
+                level = toc[j].level;
+            }
         }
     }
 
@@ -38,6 +67,7 @@ impl TocState {
     pub(crate) fn select_first(&mut self, toc: &[TocEntry]) {
         if let Some(&first) = self.visible(toc).first() {
             self.selected = first;
+            self.scroll_to_selected = true;
         }
     }
 
@@ -45,6 +75,7 @@ impl TocState {
     pub(crate) fn select_last(&mut self, toc: &[TocEntry]) {
         if let Some(&last) = self.visible(toc).last() {
             self.selected = last;
+            self.scroll_to_selected = true;
         }
     }
 
@@ -95,6 +126,7 @@ impl TocState {
             .unwrap_or(0);
         let next = (pos as isize + delta).clamp(0, visible.len() as isize - 1);
         self.selected = visible[next as usize];
+        self.scroll_to_selected = true;
     }
 
     /// `h` collapses, `l` expands the selected heading.
@@ -123,7 +155,7 @@ impl TocState {
 }
 
 /// Paint the overlay. Keyboard-only; the list scrolls to the selected row.
-pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &TocState, theme: Theme) {
+pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &mut TocState, theme: Theme) {
     let screen = ctx.content_rect();
     let palette = theme::palette(theme);
     let base =
@@ -131,7 +163,7 @@ pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &TocState, them
     egui::Area::new(egui::Id::new("jiaoren-toc"))
         .order(egui::Order::Foreground)
         .fixed_pos(screen.left_top())
-        .interactable(false)
+        .interactable(true)
         .show(ctx, |ui| {
             // Area sizing follows content; paint the whole window first so no
             // document glyphs show through the index.
@@ -149,8 +181,9 @@ pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &TocState, them
                     ui.set_height(screen.height() - 20.0);
                     let visible = state.visible(toc);
                     egui::ScrollArea::vertical()
-                        .max_height(screen.height() - 30.0)
+                        .max_height(screen.height() - 70.0)
                         .show(ui, |ui| {
+                            ui.add_space(8.0);
                             for &index in &visible {
                                 let entry = &toc[index];
                                 let marker = if state.has_children(toc, index) {
@@ -163,13 +196,18 @@ pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &TocState, them
                                     " "
                                 };
                                 let indent = "  ".repeat((entry.level - 1) as usize);
-                                let text = format!("{indent}{marker} {}", entry.text);
+                                let plain = crate::justify::search_text(&entry.text);
+                                let text = format!("{indent}{marker} {plain}");
                                 let response = ui.selectable_label(
                                     index == state.selected,
                                     egui::RichText::new(text).monospace(),
                                 );
-                                if index == state.selected {
+                                // No keyboard focus: the index is painted, and a
+                                // focus ring on the first row looks like a glitch.
+                                response.surrender_focus();
+                                if index == state.selected && state.scroll_to_selected {
                                     response.scroll_to_me(Some(egui::Align::Center));
+                                    state.scroll_to_selected = false;
                                 }
                             }
                         });
@@ -187,7 +225,7 @@ pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &TocState, them
                 .show(ui, |ui| {
                     ui.add(egui::Label::new(
                         egui::RichText::new(
-                            "tab/esc close · j/k move · h/l fold · enter jump · gg/G",
+                            "tab/esc close · j/k · h/l · enter jump · gg/G · t theme",
                         )
                         .monospace()
                         .color(ui.visuals().text_color()),
@@ -252,6 +290,20 @@ mod tests {
             state.toggle_open(&toc);
             assert!(state.open);
             assert_eq!(state.visible(&toc), vec![0, 5]);
+        }
+
+        #[test]
+        fn reopening_keeps_selection_and_folds() {
+            let toc = doc();
+            let mut state = TocState::default();
+            state.toggle_open(&toc);
+            state.selected = 1; // One A is hidden by the initial minimise
+            state.fold(&toc, true); // expand One
+            state.selected = 2; // One A I
+            state.toggle_open(&toc); // close
+            state.toggle_open(&toc); // reopen
+            assert_eq!(state.selected, 2);
+            assert!(state.visible(&toc).contains(&2));
         }
 
         #[test]

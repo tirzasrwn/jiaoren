@@ -127,11 +127,6 @@ fn take_link_copied(ctx: &egui::Context) -> bool {
         .is_some()
 }
 
-/// Colour of the status line and the search prompt.
-fn status_color(theme: Theme) -> egui::Color32 {
-    crate::theme::palette(theme).subtext0.into()
-}
-
 /// Status text shown while the first-run font download runs.
 fn font_progress_text(pct: u8) -> String {
     format!("Downloading FiraCode font… {pct}% (first run only)")
@@ -164,11 +159,16 @@ fn status_area(ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 /// One-line status chip in the bottom-left corner.
-fn show_status(ctx: &egui::Context, theme: Theme, text: &str) {
+fn show_status(ctx: &egui::Context, text: &str) {
     status_area(ctx, |ui| {
         ui.add(
-            egui::Label::new(egui::RichText::new(text).color(status_color(theme)))
-                .wrap_mode(egui::TextWrapMode::Extend),
+            egui::Label::new(
+                egui::RichText::new(text)
+                    .monospace()
+                    .size(12.0)
+                    .color(ui.visuals().text_color()),
+            )
+            .wrap_mode(egui::TextWrapMode::Extend),
         );
     });
 }
@@ -695,6 +695,7 @@ impl App {
         // Old hits point into blocks that no longer exist.
         self.search.borrow_mut().state.clear();
         self.search.borrow_mut().selection.clear();
+        self.toc.reset();
         self.jump_to = None;
     }
 
@@ -752,7 +753,7 @@ impl App {
             return;
         }
         if let Some(text) = self.search.borrow().state.status_text() {
-            show_status(ctx, self.theme, &text);
+            show_status(ctx, &text);
             return;
         }
         // Active downloads beat transient clipboard/ready messages: the user
@@ -762,11 +763,11 @@ impl App {
                 Some(pct) => format!("{text} · {}", font_progress_text(pct)),
                 None => text.clone(),
             };
-            show_status(ctx, self.theme, &line);
+            show_status(ctx, &line);
             return;
         }
         if let Some(pct) = self.font_progress {
-            show_status(ctx, self.theme, &font_progress_text(pct));
+            show_status(ctx, &font_progress_text(pct));
             return;
         }
         if let Some(status) = &self.status {
@@ -774,7 +775,7 @@ impl App {
             if remaining.is_zero() {
                 self.status = None;
             } else {
-                show_status(ctx, self.theme, &status.message);
+                show_status(ctx, &status.message);
                 ctx.request_repaint_after(remaining);
             }
         }
@@ -786,7 +787,9 @@ impl App {
             (
                 i.key_pressed(egui::Key::Tab)
                     || i.key_pressed(egui::Key::Escape)
-                    || (i.key_pressed(egui::Key::Q) && !i.modifiers.any()),
+                    || (i.key_pressed(egui::Key::Q) && !i.modifiers.any())
+                    || (i.key_pressed(egui::Key::C) && i.modifiers.ctrl)
+                    || i.events.iter().any(|ev| matches!(ev, egui::Event::Copy)),
                 i.key_pressed(egui::Key::K) || i.key_pressed(egui::Key::ArrowUp),
                 i.key_pressed(egui::Key::J) || i.key_pressed(egui::Key::ArrowDown),
                 i.key_pressed(egui::Key::H) || i.key_pressed(egui::Key::ArrowLeft),
@@ -816,7 +819,21 @@ impl App {
                 }),
             )
         });
+        let theme_toggle = ui.input(|i| i.key_pressed(egui::Key::T) && !i.modifiers.any());
+        // The overlay owns every key: drop them before egui turns Tab into
+        // widget focus and paints a stray focus ring on the first row.
+        ui.input_mut(|i| {
+            i.events
+                .retain(|ev| !matches!(ev, egui::Event::Key { .. } | egui::Event::Text(_)))
+        });
         let mut changed = false;
+        if theme_toggle {
+            self.theme = match self.theme {
+                Theme::Light => Theme::Dark,
+                Theme::Dark => Theme::Light,
+            };
+            changed = true;
+        }
         if close {
             self.toc.close();
             changed = true;
@@ -1463,7 +1480,8 @@ impl eframe::App for App {
                     } else {
                         egui::scroll_area::DragScroll::Always
                     },
-                    mouse_wheel: !popup_open,
+                    // The index owns the wheel while it is open.
+                    mouse_wheel: !popup_open && !self.toc.open,
                 });
             let output = scroll.show(ui, |ui| {
                 let available = ui.available_width();
@@ -1548,7 +1566,7 @@ impl eframe::App for App {
             self.draw_keys_help(ui.ctx());
         }
         if self.toc.open {
-            toc::draw(ui.ctx(), &self.prepared.toc, &self.toc, self.theme);
+            toc::draw(ui.ctx(), &self.prepared.toc, &mut self.toc, self.theme);
         }
         // Final cursor wins over the scroll area's Grab: controls first, text
         // second, pan feedback third. The plain search command line is a text
