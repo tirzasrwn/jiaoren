@@ -220,14 +220,28 @@ pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &mut TocState, 
                                 // window, zathura style.
                                 let (rect, response) = ui.allocate_exact_size(
                                     egui::vec2(ui.available_width(), galley.size().y + 2.0),
-                                    egui::Sense::hover(),
+                                    egui::Sense::click(),
                                 );
+                                let response =
+                                    response.on_hover_cursor(egui::CursorIcon::PointingHand);
                                 if index == state.selected {
                                     ui.painter().rect_filled(
                                         rect,
                                         0.0,
                                         ui.visuals().selection.bg_fill,
                                     );
+                                } else if response.hovered() {
+                                    // Mouse users get the same row feedback as `j`/`k`.
+                                    ui.painter().rect_filled(
+                                        rect,
+                                        0.0,
+                                        ui.visuals().widgets.hovered.bg_fill,
+                                    );
+                                }
+                                if response.clicked() {
+                                    state.selected = index;
+                                    state.scroll_to_selected = false;
+                                    ui.ctx().request_repaint();
                                 }
                                 let text_pos = egui::pos2(
                                     rect.left() + 14.0,
