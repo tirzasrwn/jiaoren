@@ -158,8 +158,7 @@ impl TocState {
 pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &mut TocState, theme: Theme) {
     let screen = ctx.content_rect();
     let palette = theme::palette(theme);
-    let base =
-        egui::Color32::from_rgba_unmultiplied(palette.base.0, palette.base.1, palette.base.2, 246);
+    let base = egui::Color32::from(palette.base);
     egui::Area::new(egui::Id::new("jiaoren-toc"))
         .order(egui::Order::Foreground)
         .fixed_pos(screen.left_top())
@@ -181,7 +180,11 @@ pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &mut TocState, 
                     ui.set_height(screen.height() - 20.0);
                     let visible = state.visible(toc);
                     egui::ScrollArea::vertical()
-                        .max_height(screen.height() - 70.0)
+                        // Wheel-only list: the bar itself is visual noise and
+                        // its thumb clips against the window edge.
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                        .auto_shrink([false, false])
+                        .max_height(screen.height() - 74.0)
                         .show(ui, |ui| {
                             ui.add_space(8.0);
                             for &index in &visible {
@@ -210,6 +213,7 @@ pub(crate) fn draw(ctx: &egui::Context, toc: &[TocEntry], state: &mut TocState, 
                                     state.scroll_to_selected = false;
                                 }
                             }
+                            ui.add_space(8.0);
                         });
                 });
         });
