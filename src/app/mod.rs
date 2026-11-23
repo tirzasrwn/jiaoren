@@ -478,6 +478,9 @@ impl App {
     /// Build the app for `path` from its already-read `text`, installing the
     /// font and theme before the first frame.
     pub fn new(path: PathBuf, text: String, dark: bool, ctx: &egui::Context) -> Self {
+        // `+`/`-` zoom the document only. egui's own Ctrl+Plus zoom would also
+        // scale overlays like the heading index, so keep it off.
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let theme = if dark { Theme::Dark } else { Theme::Light };
         // The watcher, a reload and Ctrl+G all want the real file: a path typed
         // relative to the shell would otherwise be shown and re-read relative to

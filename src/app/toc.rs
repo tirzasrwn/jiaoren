@@ -226,8 +226,9 @@ pub(crate) fn draw(
                                 let text = format!("{indent}{marker} {plain}");
                                 let text_chars = text.chars().count() as f32;
                                 // Painted row: square selection box, no outline.
-                                let size = egui::TextStyle::Body.resolve(ui.style()).size;
-                                let font = egui::FontId::monospace(size);
+                                // Fixed size: document zoom must not inflate
+                                // the index.
+                                let font = egui::FontId::monospace(14.0);
                                 let color = if index == state.selected {
                                     ui.visuals().selection.stroke.color
                                 } else {
