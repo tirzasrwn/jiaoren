@@ -18,7 +18,7 @@ pub(crate) fn curl(
     url: &str,
     dest: &Path,
     max_time: u64,
-    progress: &mut dyn FnMut(u8),
+    progress: &mut impl FnMut(u8),
 ) -> Result<(), String> {
     let mut child = Command::new("curl")
         .arg("-fL")

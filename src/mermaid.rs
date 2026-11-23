@@ -338,7 +338,7 @@ impl Renderer {
     /// [`Self::ensure_mermaid_js`] with phase messages for the status line.
     pub(crate) fn ensure_mermaid_js_with(
         &self,
-        progress: &mut dyn FnMut(&str),
+        progress: &mut impl FnMut(&str),
     ) -> Result<(), RenderError> {
         if self.mermaid_js.exists() {
             return Ok(());
@@ -433,7 +433,7 @@ pub fn find_chromium(cache_dir: &Path) -> Option<PathBuf> {
 
 /// Return an existing Chromium, or download the pinned `chrome-headless-shell`
 /// into `cache_dir` (`~/.cache/jiaoren`) and return its path.
-#[allow(dead_code)] // kept for tests and non-app callers
+#[cfg(test)] // app uses ensure_chromium_with for progress messages
 pub fn ensure_chromium(cache_dir: &Path) -> Result<PathBuf, String> {
     ensure_chromium_with(cache_dir, &mut |_| {})
 }
@@ -441,7 +441,7 @@ pub fn ensure_chromium(cache_dir: &Path) -> Result<PathBuf, String> {
 /// [`ensure_chromium`] with phase messages for the app's download status line.
 pub fn ensure_chromium_with(
     cache_dir: &Path,
-    progress: &mut dyn FnMut(&str),
+    progress: &mut impl FnMut(&str),
 ) -> Result<PathBuf, String> {
     if let Some(p) = find_chromium(cache_dir) {
         return Ok(p);
@@ -518,14 +518,14 @@ fn validate_binary(path: &Path) -> Result<(), String> {
     }
 }
 
-#[allow(dead_code)] // kept for tests and non-app callers
+#[cfg(test)]
 fn install_chromium(cache_dir: &Path) -> Result<PathBuf, String> {
     install_chromium_with(cache_dir, &mut |_| {})
 }
 
 fn install_chromium_with(
     cache_dir: &Path,
-    progress: &mut dyn FnMut(&str),
+    progress: &mut impl FnMut(&str),
 ) -> Result<PathBuf, String> {
     let _lock = acquire_install_lock(cache_dir)?;
     // Another instance may have installed while we waited for the lock.

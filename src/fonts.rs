@@ -126,7 +126,7 @@ pub fn prune(cache_root: &Path) {
 /// Ensure the pinned faces are cached, downloading them once if needed.
 pub fn download_cached(
     cache_root: &Path,
-    progress: &mut dyn FnMut(u8),
+    progress: &mut impl FnMut(u8),
 ) -> Result<egui::FontDefinitions, String> {
     if let Some(defs) = override_dir().and_then(|dir| load_from_dir(&dir)) {
         return Ok(defs);
@@ -214,7 +214,7 @@ fn download_face(
     url: &str,
     dir: &Path,
     name: &str,
-    progress: &mut dyn FnMut(u8),
+    progress: &mut impl FnMut(u8),
 ) -> Result<(), String> {
     let dest = dir.join(name);
     let tmp = dir.join(format!("{name}.dl-{}", std::process::id()));

@@ -48,7 +48,9 @@ pub fn parse_inline(md: &str) -> Vec<Run> {
 
     while i < md.len() {
         let rest = &md[i..];
-        let c = rest.chars().next().unwrap();
+        let Some(c) = rest.chars().next() else {
+            break;
+        };
 
         if c == '\\' {
             if let Some(next) = rest[1..].chars().next() {
@@ -280,7 +282,10 @@ fn find_marker(s: &str, marker: &str, ch: char) -> Option<usize> {
         {
             return Some(i);
         }
-        i += rest.chars().next().unwrap().len_utf8();
+        let Some(c) = rest.chars().next() else {
+            break;
+        };
+        i += c.len_utf8();
     }
     None
 }
@@ -297,7 +302,9 @@ fn find_single(s: &str, ch: char) -> Option<usize> {
             i += n;
             continue;
         }
-        let c = rest.chars().next().unwrap();
+        let Some(c) = rest.chars().next() else {
+            break;
+        };
         if c == ch && !escaped(s, i) {
             let prev_double = i > 0 && bytes[i - 1] == ch as u8;
             let next_double = bytes.get(i + 1) == Some(&(ch as u8));
@@ -479,8 +486,7 @@ pub fn split_token(word: &str, max_width: f32, measure: &dyn Fn(&str) -> f32) ->
         }
         let cut = match sep_cut {
             Some((end, w)) if w >= max_width * 0.5 => end,
-            _ => last_fit
-                .unwrap_or_else(|| start + rest.chars().next().expect("non-empty").len_utf8()),
+            _ => last_fit.unwrap_or_else(|| start + rest.chars().next().map_or(0, char::len_utf8)),
         };
         parts.push(word[start..cut].to_string());
         start = cut;
@@ -559,7 +565,9 @@ pub(crate) fn strip_html(s: &str) -> String {
             i += len;
             continue;
         }
-        let c = rest.chars().next().unwrap();
+        let Some(c) = rest.chars().next() else {
+            break;
+        };
         out.push(c);
         i += c.len_utf8();
     }
@@ -868,7 +876,9 @@ fn push_frag(
         });
         *open = true;
     }
-    let word = words.last_mut().unwrap();
+    let Some(word) = words.last_mut() else {
+        return;
+    };
     word.width += width;
     word.frags.push(Frag {
         kind: run.kind.clone(),
@@ -1039,19 +1049,6 @@ pub(crate) fn local_ranges(
             }
         })
         .collect()
-}
-
-/// Paint `runs` as a fully justified paragraph in a `column`-wide slot starting
-/// at the current cursor. Every line but the last (and any line without a
-/// stretchable gap) is spread so its right edge lands on `cursor.left() + column`.
-#[allow(dead_code)] // kept as the plain justify entry point; paragraphs use draw_spaced
-pub fn draw(
-    ui: &mut egui::Ui,
-    runs: &[Run],
-    column: f32,
-    highlights: MatchHighlight<'_>,
-) -> PaintedBlock {
-    paint(ui, runs, column, true, highlights)
 }
 
 /// Justified variant with a hanging indent: the marker sits at `indent` and the

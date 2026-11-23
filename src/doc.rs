@@ -1334,7 +1334,9 @@ fn expand_links(md: &str, refs: &std::collections::HashMap<String, String>) -> S
     let mut i = 0;
     while i < md.len() {
         let rest = &md[i..];
-        let c = rest.chars().next().unwrap();
+        let Some(c) = rest.chars().next() else {
+            break;
+        };
         if c == '`' {
             if let Some(end) = rest[1..].find('`') {
                 out.push_str(&rest[..end + 2]);

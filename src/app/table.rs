@@ -434,7 +434,9 @@ fn visible_text(md: &str) -> String {
     let mut i = 0;
     while i < md.len() {
         let rest = &md[i..];
-        let c = rest.chars().next().unwrap();
+        let Some(c) = rest.chars().next() else {
+            break;
+        };
         match c {
             '\\' => {
                 if let Some(next) = rest[1..].chars().next() {
