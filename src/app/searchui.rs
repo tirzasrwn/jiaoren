@@ -37,6 +37,8 @@ pub(crate) struct SearchUi {
     controls: Vec<(egui::Rect, egui::CursorIcon)>,
     /// Heading anchors painted this frame: slug → block index.
     anchors: std::collections::HashMap<String, usize>,
+    /// Heading id → block index, for the index overlay jump.
+    heading_blocks: std::collections::HashMap<String, usize>,
 }
 
 impl SearchUi {
@@ -55,6 +57,7 @@ impl SearchUi {
             rects: Vec::new(),
             controls: Vec::new(),
             anchors: std::collections::HashMap::new(),
+            heading_blocks: std::collections::HashMap::new(),
         }
     }
 
@@ -67,6 +70,7 @@ impl SearchUi {
         self.rects.clear();
         self.controls.clear();
         self.anchors.clear();
+        self.heading_blocks.clear();
     }
 
     /// Record one searchable block at the ui's current cursor position. Returns
@@ -98,6 +102,16 @@ impl SearchUi {
     /// True when `pos` is over painted text (any block rect).
     pub(crate) fn pointer_over_text(&self, pos: egui::Pos2) -> bool {
         self.rects.iter().any(|rect| rect.contains(pos))
+    }
+
+    /// Record a heading id's block so the index overlay can jump to it.
+    pub(crate) fn record_heading(&mut self, id: &str, block: usize) {
+        self.heading_blocks.insert(id.to_string(), block);
+    }
+
+    /// Block for a heading id painted last frame.
+    pub(crate) fn heading_block(&self, id: &str) -> Option<usize> {
+        self.heading_blocks.get(id).copied()
     }
 
     /// Record a heading's anchor slug so `#slug` links can jump to it.

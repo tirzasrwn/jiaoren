@@ -60,6 +60,7 @@ impl HeadingUi {
             // does not leave a blank band.
             let block = search.record(ui, justify::search_text(&spec.text));
             search.record_anchor(&crate::doc::slug(&spec.text), block);
+            search.record_heading(&spec.id, block);
             let (ranges, current) = search.highlights(block);
             let highlights = justify::MatchHighlight {
                 ranges: &ranges,

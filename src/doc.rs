@@ -54,8 +54,18 @@ pub struct Prepared {
     pub images: HashMap<String, ImageSpec>,
     /// Headings keyed by [`heading_id`].
     pub headings: HashMap<String, HeadingSpec>,
+    /// Headings in document order, for the index overlay.
+    pub toc: Vec<TocEntry>,
     /// Fenced code blocks keyed by [`code_id`].
     pub code: HashMap<String, CodeSpec>,
+}
+
+/// One heading in document order, as shown in the index overlay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TocEntry {
+    pub level: u8,
+    pub text: String,
+    pub id: String,
 }
 
 /// A top-level heading, parsed out of the Markdown before rendering.
@@ -478,6 +488,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
     let mut quotes = HashMap::new();
     let mut images = HashMap::new();
     let mut headings = HashMap::new();
+    let mut toc = Vec::new();
     let mut code = HashMap::new();
     // Occurrence counter: identical headings still get distinct ids, so each
     // keeps its own start/EOF gap flags in the map.
@@ -665,6 +676,11 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                             );
                             let id = heading_id(level, &text, heading_seq);
                             heading_seq += 1;
+                            toc.push(TocEntry {
+                                level,
+                                text: text.clone(),
+                                id: id.clone(),
+                            });
                             headings.insert(
                                 id.clone(),
                                 HeadingSpec {
@@ -772,6 +788,11 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         let text = expand_links(&clean_text(&normalize_newlines(text)), &refs);
                         let id = heading_id(level, &text, heading_seq);
                         heading_seq += 1;
+                        toc.push(TocEntry {
+                            level,
+                            text: text.clone(),
+                            id: id.clone(),
+                        });
                         headings.insert(
                             id.clone(),
                             HeadingSpec {
@@ -829,6 +850,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
         quotes,
         images,
         headings,
+        toc,
         code,
     }
 }
@@ -1641,6 +1663,26 @@ mod tests {
             assert_eq!(spec.lines[0].1, "quote line lazy line");
             assert!(p.markdown.contains("<mdquote"), "{:?}", p.markdown);
             assert!(p.markdown.contains("<mdpara"), "{:?}", p.markdown);
+        }
+    }
+
+    mod toc {
+        use super::super::prepare;
+        use std::path::Path;
+
+        #[test]
+        fn toc_keeps_document_order_and_levels() {
+            let p = prepare(
+                "# One\n\n## One A\n\n### One A I\n\n#### Deep\n\n## One B\n\n# Two\n",
+                Path::new("/d"),
+            );
+            let levels: Vec<u8> = p.toc.iter().map(|e| e.level).collect();
+            assert_eq!(levels, vec![1, 2, 3, 4, 2, 1]);
+            let texts: Vec<&str> = p.toc.iter().map(|e| e.text.as_str()).collect();
+            assert_eq!(
+                texts,
+                vec!["One", "One A", "One A I", "Deep", "One B", "Two"]
+            );
         }
     }
 

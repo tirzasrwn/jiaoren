@@ -54,6 +54,7 @@ drag             select text (drag on empty space pans)
 y                copy the selection, yy copies the whole file
 /                search, Enter confirms
 n / N            next / previous match
+tab              heading index (depth 3): j/k move, h/l fold, enter jumps
 ?                this list (esc, q or ctrl+c closes it)
 esc / ctrl+c     copy selection, else cancel prompt, else clear search, else quit
 q                quit";

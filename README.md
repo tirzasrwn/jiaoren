@@ -88,6 +88,7 @@ Mermaid diagram labels still need `FiraCode Nerd Font` installed system-wide.
 | `yy` | copy the whole document as Markdown |
 | drag | select text across blocks |
 | `y` | copy the text selection; with no selection the first `y` arms `yy` |
+| `Tab` | heading index (depth 3): `j`/`k` move, `h`/`l` fold, `Enter`/`Space` jump |
 | `/` | search: type a pattern, `Enter` confirms and jumps to the first match |
 | `n` / `N` | next / previous match, wrapping |
 | `ctrl+g` | show the open file's path in the status line |

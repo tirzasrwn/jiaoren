@@ -43,6 +43,8 @@ pub enum Action {
     ShowPath,
     /// Toggle the keyboard-shortcut overlay (`?`).
     ToggleKeysHelp,
+    /// Toggle the heading index overlay (`Tab`).
+    ToggleToc,
     /// Copy the whole document as Markdown.
     CopyDocument,
     /// Open the `/` search command line.
@@ -166,6 +168,7 @@ pub fn apply_key(
         // Ctrl+G shows the file path; a bare `g` still starts the `gg` window.
         Key::G if modifiers.command || modifiers.ctrl => Some(Action::ShowPath),
         Key::Questionmark => Some(Action::ToggleKeysHelp),
+        Key::Tab => Some(Action::ToggleToc),
         Key::C if modifiers.command || modifiers.ctrl => Some(Action::CancelOrQuit),
         Key::Q => Some(Action::Quit),
         // Esc and Ctrl+C share the cancel prompt → clear search → quit ladder.

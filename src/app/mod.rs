@@ -29,6 +29,7 @@ mod raster;
 mod searchui;
 mod selection;
 mod table;
+mod toc;
 mod widgets;
 
 use code::CodeUi;
@@ -445,6 +446,8 @@ pub(crate) struct App {
     select_moved: bool,
     /// The `?` keyboard-shortcut overlay is showing.
     keys_help: bool,
+    /// Heading index overlay (Tab).
+    toc: toc::TocState,
     /// Scroll pixels to add before this frame's layout: a selection drag held
     /// near the top or bottom of the window scrolls the document.
     autoscroll: f32,
@@ -644,6 +647,7 @@ impl App {
             select_press: None,
             select_moved: false,
             keys_help: false,
+            toc: toc::TocState::default(),
             autoscroll: 0.0,
             last_pointer: None,
             watcher,
@@ -773,6 +777,56 @@ impl App {
                 show_status(ctx, self.theme, &status.message);
                 ctx.request_repaint_after(remaining);
             }
+        }
+    }
+
+    /// Handle keys while the index overlay is open. Every other key is ignored.
+    fn toc_input(&mut self, ui: &egui::Ui) {
+        let (close, up, down, left, right, jump) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::Tab)
+                    || i.key_pressed(egui::Key::Escape)
+                    || (i.key_pressed(egui::Key::Q) && !i.modifiers.any()),
+                i.key_pressed(egui::Key::K) || i.key_pressed(egui::Key::ArrowUp),
+                i.key_pressed(egui::Key::J) || i.key_pressed(egui::Key::ArrowDown),
+                i.key_pressed(egui::Key::H) || i.key_pressed(egui::Key::ArrowLeft),
+                i.key_pressed(egui::Key::L) || i.key_pressed(egui::Key::ArrowRight),
+                i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Space),
+            )
+        });
+        let mut changed = false;
+        if close {
+            self.toc.close();
+            changed = true;
+        } else {
+            if up {
+                self.toc.move_by(&self.prepared.toc, -1);
+                changed = true;
+            }
+            if down {
+                self.toc.move_by(&self.prepared.toc, 1);
+                changed = true;
+            }
+            if left {
+                self.toc.fold(&self.prepared.toc, false);
+                changed = true;
+            }
+            if right {
+                self.toc.fold(&self.prepared.toc, true);
+                changed = true;
+            }
+            if jump {
+                if let Some(entry) = self.toc.selected_entry(&self.prepared.toc) {
+                    if let Some(block) = self.search.borrow().heading_block(&entry.id) {
+                        self.jump_to = Some(block);
+                    }
+                }
+                self.toc.close();
+                changed = true;
+            }
+        }
+        if changed {
+            ui.ctx().request_repaint();
         }
     }
 
@@ -1105,9 +1159,14 @@ impl eframe::App for App {
                 ui.ctx().request_repaint();
             }
         }
+        // Tab index overlay: its own keys, swallowed like the help screen.
+        let toc_open = self.toc.open;
+        if toc_open && !help_open {
+            self.toc_input(ui);
+        }
         // Pointer selection runs before the scroll area so a press on text can
         // suppress drag-panning in the same frame.
-        if !popup_open && !prompt_open && !help_open {
+        if !popup_open && !prompt_open && !help_open && !toc_open {
             self.process_selection(ui);
         }
         // If a release/focus-loss happened while the prompt/popup blocked the
@@ -1188,7 +1247,7 @@ impl eframe::App for App {
                     }
                 }
             }
-        } else if !popup_open && !help_open {
+        } else if !popup_open && !help_open && !toc_open {
             // Once `/` opens the prompt in this batch, later keys are text for
             // the prompt, not viewer actions (`q`, `t`, `n`, …).
             let mut search_opened = false;
@@ -1294,6 +1353,10 @@ impl eframe::App for App {
                 }
                 Action::ToggleKeysHelp => {
                     self.keys_help = !self.keys_help;
+                }
+                Action::ToggleToc => {
+                    self.toc.toggle_open();
+                    ui.ctx().request_repaint();
                     ui.ctx().request_repaint();
                 }
                 // Esc/Ctrl+C: prompt, search, selection, then quit.
@@ -1453,6 +1516,9 @@ impl eframe::App for App {
         self.draw_status(ui.ctx());
         if self.keys_help {
             self.draw_keys_help(ui.ctx());
+        }
+        if self.toc.open {
+            toc::draw(ui.ctx(), &self.prepared.toc, &self.toc, self.theme);
         }
         // Final cursor wins over the scroll area's Grab: controls first, text
         // second, pan feedback third. The plain search command line is a text
