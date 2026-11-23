@@ -33,9 +33,12 @@ impl TocState {
             if !self.initialized {
                 self.initialized = true;
                 self.selected = 0;
-                // Minimise every parent so the first open is a top-level outline.
+                // Level-one sections start open; deeper parents start collapsed
+                // so the first view is the H1/H2 outline.
                 self.collapsed = (0..toc.len())
-                    .filter(|&i| toc[i].level <= MAX_DEPTH && self.has_children(toc, i))
+                    .filter(|&i| {
+                        toc[i].level > 1 && toc[i].level <= MAX_DEPTH && self.has_children(toc, i)
+                    })
                     .collect();
             } else {
                 // Reopening keeps the last selection and folds; reveal it if a
@@ -353,12 +356,12 @@ mod tests {
         }
 
         #[test]
-        fn opening_minimises_every_parent() {
+        fn opening_expands_level_one_and_collapses_deeper_parents() {
             let toc = doc();
             let mut state = TocState::default();
             state.toggle_open(&toc);
             assert!(state.open);
-            assert_eq!(state.visible(&toc), vec![0, 5]);
+            assert_eq!(state.visible(&toc), vec![0, 1, 4, 5]);
         }
 
         #[test]
