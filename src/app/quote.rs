@@ -56,68 +56,82 @@ impl QuoteUi {
         let sel_ranges: Vec<(usize, usize)> = selection.into_iter().collect();
         let row_h = ui.text_style_height(&egui::TextStyle::Body);
         let gap = row_h * 0.45;
-        let weak = ui.visuals().weak_text_color();
+        // Catppuccin mantle behind the quote and a surface2 accent bar on its
+        // left edge, like a callout panel.
+        let bg = ui.visuals().faint_bg_color;
+        let bar_color = ui.visuals().widgets.active.bg_fill;
+        let bar_w = (row_h * 0.28).clamp(3.0, 6.0);
+        let gap_after_bar = (row_h * 0.7).max(10.0);
+        let left_margin = (bar_w + gap_after_bar).round().clamp(12.0, 100.0) as i8;
+        let right_margin = (row_h * 0.55).round().clamp(6.0, 100.0) as i8;
+        let pad_y = (row_h * 0.4).round().clamp(4.0, 100.0) as i8;
         let column = self.column;
+        let inner_w = (column - left_margin as f32 - right_margin as f32).max(40.0);
         let mut chars = Vec::new();
         let mut start = 0usize;
-        let mut union: Option<egui::Rect> = None;
+        let mut frame_rect = None;
         // The html hook lays children out horizontally; a quote must stack.
         ui.vertical(|ui| {
-            for (depth, line) in lines {
-                let line_start = start;
-                let line_len = line.chars().count();
-                start += line_len + 1;
-                let (local_ranges, local_current) =
-                    clip_with_current(&ranges, current, line_start, line_len);
-                let local_sel = clip(&sel_ranges, line_start, line_len);
-                let runs = crate::justify::parse_inline(line);
-                let indent = *depth as f32 * gap;
-                let painted = ui
-                    .horizontal(|ui| {
-                        ui.add_space(indent);
-                        crate::justify::draw_left(
-                            ui,
-                            &runs,
-                            (column - indent).max(40.0),
-                            crate::justify::MatchHighlight {
-                                ranges: &local_ranges,
-                                current: local_current,
-                                selection: local_sel.first().copied(),
-                            },
-                        )
-                    })
-                    .inner;
-                let rect = painted.rect;
-                for rect in &painted.interactives {
-                    search.add_control(*rect, egui::CursorIcon::PointingHand);
-                }
-                union = Some(union.map_or(rect, |u| u.union(rect)));
-                let left = rect.left() - indent;
-                for level in 0..*depth {
-                    let x = left + level as f32 * gap;
-                    ui.painter().rect_filled(
-                        egui::Rect::from_min_size(
-                            egui::Pos2::new(x, rect.top()),
-                            egui::vec2(2.0, rect.height().max(row_h)),
-                        ),
-                        0.0,
-                        weak,
-                    );
-                }
-                for span in painted.chars {
-                    chars.push(crate::justify::CharSpan {
-                        start: line_start + span.start,
-                        len: span.len,
-                        rect: span.rect,
-                    });
-                }
-                if line.is_empty() {
-                    ui.add_space(row_h * 0.35);
-                }
-            }
+            let frame = egui::Frame::new()
+                .fill(bg)
+                .corner_radius(egui::CornerRadius::ZERO)
+                .inner_margin(egui::Margin {
+                    left: left_margin,
+                    right: right_margin,
+                    top: pad_y,
+                    bottom: pad_y,
+                })
+                .show(ui, |ui| {
+                    ui.set_width(inner_w);
+                    for (depth, line) in lines {
+                        let line_start = start;
+                        let line_len = line.chars().count();
+                        start += line_len + 1;
+                        let (local_ranges, local_current) =
+                            clip_with_current(&ranges, current, line_start, line_len);
+                        let local_sel = clip(&sel_ranges, line_start, line_len);
+                        let runs = crate::justify::parse_inline(line);
+                        let indent = *depth as f32 * gap;
+                        let painted = ui
+                            .horizontal(|ui| {
+                                ui.add_space(indent);
+                                crate::justify::draw_left(
+                                    ui,
+                                    &runs,
+                                    (inner_w - indent).max(40.0),
+                                    crate::justify::MatchHighlight {
+                                        ranges: &local_ranges,
+                                        current: local_current,
+                                        selection: local_sel.first().copied(),
+                                    },
+                                )
+                            })
+                            .inner;
+                        for rect in &painted.interactives {
+                            search.add_control(*rect, egui::CursorIcon::PointingHand);
+                        }
+                        for span in painted.chars {
+                            chars.push(crate::justify::CharSpan {
+                                start: line_start + span.start,
+                                len: span.len,
+                                rect: span.rect,
+                            });
+                        }
+                        if line.is_empty() {
+                            ui.add_space(row_h * 0.35);
+                        }
+                    }
+                });
+            let rect = frame.response.rect;
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(rect.min, egui::vec2(bar_w, rect.height())),
+                0.0,
+                bar_color,
+            );
+            frame_rect = Some(rect);
         });
         search.set_char_map(block, chars);
-        if let Some(rect) = union {
+        if let Some(rect) = frame_rect {
             search.set_rect(block, rect);
             search.set_height(block, rect.height());
         }
