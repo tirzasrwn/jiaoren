@@ -784,6 +784,16 @@ impl App {
         }
     }
 
+    /// Jump to the index's selected heading and close the overlay.
+    fn toc_jump(&mut self) {
+        if let Some(entry) = self.toc.selected_entry(&self.prepared.toc) {
+            if let Some(block) = self.search.borrow().heading_block(&entry.id) {
+                self.jump_to = Some(block);
+            }
+        }
+        self.toc.close();
+    }
+
     /// Handle keys while the index overlay is open. Every other key is ignored.
     fn toc_input(&mut self, ui: &egui::Ui) {
         let (close, up, down, left, right, jump, gg, bottom) = ui.input(|i| {
@@ -854,7 +864,12 @@ impl App {
                 changed = true;
             }
             if right {
-                self.toc.fold(&self.prepared.toc, true);
+                if self.toc.selected_has_children(&self.prepared.toc) {
+                    self.toc.fold(&self.prepared.toc, true);
+                } else {
+                    // A leaf has nothing to expand: `l` jumps like Enter/Space.
+                    self.toc_jump();
+                }
                 changed = true;
             }
             if bottom {
@@ -866,12 +881,7 @@ impl App {
                 changed = true;
             }
             if jump {
-                if let Some(entry) = self.toc.selected_entry(&self.prepared.toc) {
-                    if let Some(block) = self.search.borrow().heading_block(&entry.id) {
-                        self.jump_to = Some(block);
-                    }
-                }
-                self.toc.close();
+                self.toc_jump();
                 changed = true;
             }
         }

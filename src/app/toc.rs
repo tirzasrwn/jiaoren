@@ -143,6 +143,11 @@ impl TocState {
         }
     }
 
+    /// Whether the selected heading has children to expand.
+    pub(crate) fn selected_has_children(&self, toc: &[TocEntry]) -> bool {
+        self.has_children(toc, self.selected)
+    }
+
     fn has_children(&self, toc: &[TocEntry], index: usize) -> bool {
         let level = toc[index].level;
         toc.iter()
