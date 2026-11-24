@@ -937,6 +937,7 @@ impl App {
             )
         });
         let mut s = self.search.borrow_mut();
+        let mut copy_on_release = false;
         // A drag that leaves the window keeps its last position: the buttons are
         // still held, so the selection should keep growing.
         let drag_pos = pos.or(self.last_pointer);
@@ -948,7 +949,10 @@ impl App {
                 if s.pointer_on_control(p) {
                     // Link/copy-button presses own the click; keep any existing
                     // selection untouched.
-                } else if let Some(point) = s.hit_near(p) {
+                } else if let Some(point) = s
+                    .hit_near(p)
+                    .or_else(|| s.hit(p).filter(|_| s.pointer_over_text(p)))
+                {
                     s.selection.begin(point);
                     self.select_press = Some(p);
                     self.select_moved = false;
@@ -983,8 +987,16 @@ impl App {
             // range selection.
             if !self.select_moved || !s.selection.is_active() {
                 s.selection.clear();
+            } else {
+                // zathura behaviour: releasing a drag copies, so drag-select and
+                // paste works without a second key.
+                copy_on_release = true;
             }
             self.select_press = None;
+        }
+        drop(s);
+        if copy_on_release {
+            self.copy_selection(ui.ctx());
         }
     }
 
@@ -1419,8 +1431,19 @@ impl eframe::App for App {
                 Action::SearchPrev => self.step_search(-1, ui.ctx()),
                 Action::CopySelection => self.copy_selection(ui.ctx()),
                 Action::ShowPath => {
+                    // The file name is what the reader wants; a full path is
+                    // clipped off the right edge on narrow windows.
+                    let name = self.path.file_name().map_or_else(
+                        || self.path.display().to_string(),
+                        |n| n.to_string_lossy().into_owned(),
+                    );
                     let path = self.path.display().to_string();
-                    self.set_status_for(path, PATH_STATUS_DURATION);
+                    let text = if name == path {
+                        path
+                    } else {
+                        format!("{name} — {path}")
+                    };
+                    self.set_status_for(text, PATH_STATUS_DURATION);
                 }
                 Action::ToggleKeysHelp => {
                     self.keys_help = !self.keys_help;

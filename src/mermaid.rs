@@ -1,10 +1,16 @@
 //! Locate Chromium, download mermaid.js once, and cache diagram renders as SVG.
 
 use std::fs;
+use std::io::Read;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 use std::sync::Once;
+use std::time::{Duration, Instant};
+
+/// Wall-clock limit for one Chromium render. `--virtual-time-budget` bounds the
+/// page, not the process: a hung browser would otherwise burn a worker forever.
+const RENDER_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Mermaid version used for diagram renders. Shown by `jr --version`.
 pub const MERMAID_VERSION: &str = "12.3.0";
@@ -88,8 +94,8 @@ fn older_than(
 
 /// Delete the jiaoren cache from the command line. `all` also removes the
 /// managed Chromium; otherwise the browser is kept so the next document does
-/// not need a 132 MB re-download. The font cache is always kept: it is an
-/// asset, not a derived render. Returns `(bytes, files)` removed.
+/// not need a 132 MB re-download. Fonts are kept for the same reason unless
+/// `all` is set, which removes everything. Returns `(bytes, files)` removed.
 pub fn clean_cache(all: bool) -> std::io::Result<(u64, usize)> {
     clean_cache_dir(&cache_root(), all)
 }
@@ -180,6 +186,74 @@ fn prune_chromium_versions(dir: &Path, now: std::time::SystemTime) {
 /// Strip the wrapper from the render page's error text and decode the HTML
 /// entities it carries, so the window shows `Parse error ...` rather than
 /// `id="out">ERR:...&gt;`.
+/// Set once Chromium reports that the OS cannot sandbox it (Ubuntu 23.10+
+/// AppArmor restricts unprivileged user namespaces), so later renders skip the
+/// doomed sandboxed attempt.
+static SANDBOX_UNAVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Headless Chromium command for one render page. The sandbox stays on unless
+/// the OS cannot provide one, or the user forces `--no-sandbox`.
+fn chromium_command(chromium: &Path, html: &Path, sandbox: bool) -> Command {
+    let mut cmd = Command::new(chromium);
+    cmd.arg("--headless")
+        .arg("--disable-gpu")
+        // No network egress from the render page; diagram source is untrusted.
+        .arg("--host-resolver-rules=MAP * ~NOTFOUND")
+        .arg("--dump-dom")
+        .arg("--virtual-time-budget=5000")
+        .arg(format!("file://{}", html.display()));
+    if !sandbox {
+        cmd.arg("--no-sandbox");
+    }
+    cmd
+}
+
+/// Run `cmd` with captured output, killing it once `limit` elapses.
+fn output_with_timeout(cmd: &mut Command, limit: Duration) -> std::io::Result<Output> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("no stdout pipe"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("no stderr pipe"))?;
+    // Drain both pipes concurrently so a chatty render cannot fill a pipe and
+    // deadlock the wait loop.
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
+        buf
+    });
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill()?;
+            child.wait()?;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "render timed out",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    Ok(Output {
+        status,
+        stdout: out_reader.join().unwrap_or_default(),
+        stderr: err_reader.join().unwrap_or_default(),
+    })
+}
+
 fn clean_error(raw: &str) -> String {
     let text = raw
         .strip_prefix("id=\"out\">ERR:")
@@ -269,17 +343,7 @@ impl Renderer {
         let page = build_html(&self.mermaid_js, source, theme);
         fs::write(&html, &page).map_err(|e| RenderError::HtmlWrite(e.to_string()))?;
 
-        let out = Command::new(&chromium)
-            .arg("--headless")
-            .arg("--no-sandbox")
-            .arg("--disable-gpu")
-            // No network egress from the render page; diagram source is untrusted.
-            .arg("--host-resolver-rules=MAP * ~NOTFOUND")
-            .arg("--dump-dom")
-            .arg("--virtual-time-budget=5000")
-            .arg(format!("file://{}", html.display()))
-            .output()
-            .map_err(|e| RenderError::Spawn(format!("{}: {e}", chromium.display())))?;
+        let out = self.run_chromium(&chromium, &html)?;
 
         let _ = fs::remove_file(&html);
 
@@ -314,6 +378,27 @@ impl Renderer {
         self.atomic_write(&svg, svg_text.as_bytes())
             .map_err(|e| RenderError::Raster(e.to_string()))?;
         Ok(svg)
+    }
+
+    /// Run Chromium on the render page, keeping its sandbox when the OS allows
+    /// it. Retries with `--no-sandbox` only when Chromium itself reports that no
+    /// usable sandbox exists.
+    fn run_chromium(&self, chromium: &Path, html: &Path) -> Result<Output, RenderError> {
+        let forced = std::env::var_os("JIAOREN_CHROMIUM_NO_SANDBOX").is_some();
+        let sandbox = !forced && !SANDBOX_UNAVAILABLE.get().copied().unwrap_or(false);
+        let mut cmd = chromium_command(chromium, html, sandbox);
+        let out = output_with_timeout(&mut cmd, RENDER_TIMEOUT)
+            .map_err(|e| RenderError::Spawn(format!("{}: {e}", chromium.display())))?;
+        if sandbox
+            && !out.status.success()
+            && String::from_utf8_lossy(&out.stderr).contains("No usable sandbox")
+        {
+            let _ = SANDBOX_UNAVAILABLE.set(true);
+            let mut cmd = chromium_command(chromium, html, false);
+            return output_with_timeout(&mut cmd, RENDER_TIMEOUT)
+                .map_err(|e| RenderError::Spawn(format!("{}: {e}", chromium.display())));
+        }
+        Ok(out)
     }
 
     fn write_err(&self, id: &str, theme: Theme, msg: &str) {

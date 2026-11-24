@@ -106,8 +106,15 @@ impl TableUi {
             // The row colour paints the full table width behind the cells, so
             // the header reads as one bar instead of per-cell chips; data rows
             // alternate from the first one. The row under the pointer uses the
-            // hover fill, applied from the previous frame's row rects.
-            let hovered = self.hover.get(id, occurrence);
+            // hover fill, applied from the previous frame's row rects. While a
+            // selection is active the hover fill is suppressed so it does not
+            // paint a second colour under the selection.
+            let selecting = search.selection.dragging || search.selection.is_active();
+            let hovered = if selecting {
+                None
+            } else {
+                self.hover.get(id, occurrence)
+            };
             let spacing_y = ui.spacing().item_spacing.y;
             let mut row_rects: Vec<egui::Rect> = Vec::new();
             egui::Grid::new(grid_id).show(ui, |ui| {

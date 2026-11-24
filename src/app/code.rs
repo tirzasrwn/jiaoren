@@ -144,10 +144,6 @@ impl CodeUi {
         let gutter = layout.gutter;
         let width = layout.width;
         let content_height = layout.content_height;
-        let lines = code_lines(&spec.text);
-        let line_marks = line_highlights(&spec.text, &ranges, current);
-        let sel_ranges: Vec<(usize, usize)> = selection.into_iter().collect();
-        let sel_marks = line_highlights(&spec.text, &sel_ranges, None);
         let other_fill = crate::justify::highlight_color(ui, false);
         let current_fill = crate::justify::highlight_color(ui, true);
         let selection_fill = crate::justify::selection_color(ui);
@@ -163,6 +159,11 @@ impl CodeUi {
             search.set_char_map(block, Vec::new());
             return;
         }
+        // Per-line work only for blocks that actually paint.
+        let lines = code_lines(&spec.text);
+        let line_marks = line_highlights(&spec.text, &ranges, current);
+        let sel_ranges: Vec<(usize, usize)> = selection.into_iter().collect();
+        let sel_marks = line_highlights(&spec.text, &sel_ranges, None);
         let painter = ui.painter().clone();
         let content = egui::Rect::from_min_size(rect.min, egui::vec2(width, content_height));
         painter.rect_filled(content, 0.0, ui.visuals().code_bg_color);

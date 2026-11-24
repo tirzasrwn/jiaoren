@@ -2,8 +2,13 @@
 name = "jiaoren"
 version = "0.3.1"
 edition = "2021"
+rust-version = "1.95"
 description = "jiaoren (jr) — a zathura-like Markdown viewer with mermaid diagrams"
 license = "MIT"
+repository = "https://github.com/tirzasrwn/jiaoren"
+keywords = ["markdown", "viewer", "egui", "mermaid", "zathura"]
+categories = ["command-line-utilities", "graphics"]
+exclude = ["docs/**", "examples/**", "scripts/**"]
 
 [[bin]]
 name = "jr"

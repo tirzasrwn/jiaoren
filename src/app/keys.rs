@@ -149,28 +149,32 @@ pub fn apply_key(
     now: Instant,
 ) -> Option<Action> {
     match key {
-        Key::J | Key::ArrowDown => Some(Action::ScrollLines(1.0)),
-        Key::K | Key::ArrowUp => Some(Action::ScrollLines(-1.0)),
-        Key::H => Some(Action::ScrollCols(-1.0)),
-        Key::L => Some(Action::ScrollCols(1.0)),
+        // Plain bindings ignore modifier chords so the window manager and the
+        // terminal keep Ctrl+R, Ctrl+T, Ctrl+D and friends.
+        Key::J if !modifiers.any() => Some(Action::ScrollLines(1.0)),
+        Key::K if !modifiers.any() => Some(Action::ScrollLines(-1.0)),
+        Key::ArrowDown if !modifiers.command && !modifiers.ctrl => Some(Action::ScrollLines(1.0)),
+        Key::ArrowUp if !modifiers.command && !modifiers.ctrl => Some(Action::ScrollLines(-1.0)),
+        Key::H if !modifiers.any() => Some(Action::ScrollCols(-1.0)),
+        Key::L if !modifiers.any() => Some(Action::ScrollCols(1.0)),
         Key::ArrowLeft if modifiers.shift => Some(Action::ScrollCols(-1.0)),
         Key::ArrowRight if modifiers.shift => Some(Action::ScrollCols(1.0)),
-        Key::D => Some(Action::ScrollPages(0.5)),
-        Key::U => Some(Action::ScrollPages(-0.5)),
-        Key::Space => Some(Action::ScrollPages(1.0)),
-        Key::B => Some(Action::ScrollPages(-1.0)),
-        Key::Plus | Key::Equals => Some(Action::ZoomIn),
-        Key::Minus => Some(Action::ZoomOut),
-        Key::A => Some(Action::Fit),
-        Key::Num0 => Some(Action::ResetZoom),
-        Key::T => Some(Action::ToggleTheme),
-        Key::R => Some(Action::Reload),
+        Key::D if !modifiers.any() => Some(Action::ScrollPages(0.5)),
+        Key::U if !modifiers.any() => Some(Action::ScrollPages(-0.5)),
+        Key::Space if !modifiers.any() => Some(Action::ScrollPages(1.0)),
+        Key::B if !modifiers.any() => Some(Action::ScrollPages(-1.0)),
+        Key::Plus | Key::Equals if !modifiers.any() => Some(Action::ZoomIn),
+        Key::Minus if !modifiers.any() => Some(Action::ZoomOut),
+        Key::A if !modifiers.any() => Some(Action::Fit),
+        Key::Num0 if !modifiers.any() => Some(Action::ResetZoom),
+        Key::T if !modifiers.any() => Some(Action::ToggleTheme),
+        Key::R if !modifiers.any() => Some(Action::Reload),
         // Ctrl+G shows the file path; a bare `g` still starts the `gg` window.
         Key::G if modifiers.command || modifiers.ctrl => Some(Action::ShowPath),
         Key::Questionmark => Some(Action::ToggleKeysHelp),
         Key::Tab => Some(Action::ToggleToc),
         Key::C if modifiers.command || modifiers.ctrl => Some(Action::CancelOrQuit),
-        Key::Q => Some(Action::Quit),
+        Key::Q if !modifiers.any() => Some(Action::Quit),
         // Esc and Ctrl+C share the cancel prompt → clear search → quit ladder.
         Key::Escape => Some(Action::CancelOrQuit),
         Key::Slash if modifiers.is_none() => Some(Action::SearchOpen),
@@ -605,5 +609,42 @@ mod tests {
                 Some(Action::Quit)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod modifier_guard {
+    use super::*;
+
+    fn now() -> Instant {
+        Instant::now()
+    }
+
+    #[test]
+    fn ctrl_chords_do_not_trigger_plain_bindings() {
+        let mut s = KeyState::default();
+        for (key, modifiers) in [
+            (Key::R, Modifiers::CTRL),
+            (Key::T, Modifiers::CTRL),
+            (Key::D, Modifiers::CTRL),
+            (Key::H, Modifiers::CTRL),
+            (Key::L, Modifiers::ALT),
+            (Key::Q, Modifiers::COMMAND),
+        ] {
+            assert_eq!(apply_key(&mut s, key, modifiers, now()), None, "{key:?}");
+        }
+    }
+
+    #[test]
+    fn plain_bindings_still_work() {
+        let mut s = KeyState::default();
+        assert_eq!(
+            apply_key(&mut s, Key::R, Modifiers::NONE, now()),
+            Some(Action::Reload)
+        );
+        assert_eq!(
+            apply_key(&mut s, Key::Q, Modifiers::NONE, now()),
+            Some(Action::Quit)
+        );
     }
 }

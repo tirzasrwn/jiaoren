@@ -38,11 +38,10 @@ jr --clean-cache --all    # also Chromium and cached fonts (~132 MB)
 
 - `--dark` — start with the dark theme.
 - `--clean-cache` — delete cached diagram renders and the downloaded
-  `mermaid.min.js`, then exit. The managed Chromium and cached fonts are kept;
-  add `--all` to remove them too. The downloaded font cache is always kept (it is an asset, not
-  a derived render). Startup prunes renders from older Mermaid/Chromium
-  versions and font versions other than the pinned one, and is safe while
-  other `jr` instances are running.
+  `mermaid.min.js`, then exit. The managed Chromium and downloaded fonts are
+  kept (a re-download is expensive); add `--all` to remove those too. Startup
+  prunes renders from older Mermaid/Chromium versions and font versions other
+  than the pinned one, and is safe while other `jr` instances are running.
 
 Colors are [Catppuccin](https://catppuccin.com/palette/): Latte for the light
 theme, Macchiato for the dark theme. Window chrome and mermaid diagrams use the
@@ -86,7 +85,7 @@ Mermaid diagram labels still need `FiraCode Nerd Font` installed system-wide.
 | `t` | toggle light/dark theme |
 | `r` | reload from disk |
 | `yy` | copy the whole document as Markdown |
-| drag | select text across blocks |
+| drag | select text across blocks; releasing the drag copies it |
 | `y` | copy the text selection; with no selection the first `y` arms `yy` |
 | `Tab` | heading index (depth 3): `j`/`k` move, `h`/`l` fold, `gg`/`G` first/last, `Enter`/`Space` jump, `t` theme |
 | `/` | search: type a pattern, `Enter` confirms and jumps to the first match |
@@ -114,8 +113,9 @@ around and scroll the current hit's block into view.
 
 Mouse: drag anywhere to pan the document in both axes (the wheel still
 scrolls, `gg` returns to the start). Dragging across text selects it; a plain
-click clears the selection. Ctrl+C and `y` both copy the selection, including
-while the drag button is still held, and the copy clears the highlight so the
+click clears the selection. Releasing a drag copies it; Ctrl+C and `y` also
+copy the selection, including while the drag button is still held, and the copy
+clears the highlight so the
 next Ctrl+C moves on to clearing the search or quitting. A plain click on a
 diagram or local image opens the zoom popup; dragging from it pans the document
 instead.
@@ -254,7 +254,7 @@ Clear the cache from the CLI:
 
 ```bash
 jr --clean-cache          # diagram renders + mermaid.js
-jr --clean-cache --all    # also the managed Chromium
+jr --clean-cache --all    # also the managed Chromium and downloaded fonts
 ```
 
 Startup also prunes renders and scripts from older Mermaid/Chromium versions.

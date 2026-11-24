@@ -351,6 +351,7 @@ mod tests {
         use super::super::*;
 
         #[test]
+        #[ignore = "needs local FiraCode Nerd Font + Noto CJK/Arabic installed"]
         fn finds_the_regular_face_on_this_machine() {
             let defs = fallback().expect("FiraCode Nerd Font is installed under ~/.fonts");
             assert!(defs.font_data.keys().any(|k| k.contains("FiraCode")));
@@ -367,6 +368,7 @@ mod tests {
         }
 
         #[test]
+        #[ignore = "needs local FiraCode Nerd Font + Noto CJK/Arabic installed"]
         fn fallbacks_cover_cjk_and_arabic() {
             let defs = fallback().expect("font installed");
             let proportional = &defs.families[&egui::FontFamily::Proportional];
@@ -386,6 +388,7 @@ mod tests {
         }
 
         #[test]
+        #[ignore = "needs local FiraCode Nerd Font + Noto CJK/Arabic installed"]
         fn bold_face_has_its_own_family_after_regular() {
             let defs = fallback().expect("font installed");
             let mono = &defs.families[&egui::FontFamily::Monospace];

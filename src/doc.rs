@@ -30,8 +30,13 @@ pub fn read_doc(path: &Path) -> Result<String, DocError> {
         path: path.to_path_buf(),
         source,
     })?;
-    String::from_utf8(bytes).map_err(|_| DocError::NotUtf8 {
+    let text = String::from_utf8(bytes).map_err(|_| DocError::NotUtf8 {
         path: path.to_path_buf(),
+    })?;
+    // A BOM would hide the first line's `#`, so strip it before parsing.
+    Ok(match text.strip_prefix('\u{feff}') {
+        Some(stripped) => stripped.to_string(),
+        None => text,
     })
 }
 
@@ -113,7 +118,7 @@ pub struct QuoteSpec {
 pub fn quote_id(spec: &QuoteSpec) -> String {
     let mut canon = String::new();
     for (depth, text) in &spec.lines {
-        canon.push(depth.to_string().chars().next().unwrap_or('0'));
+        canon.push_str(&depth.to_string());
         canon.push('\u{1f}');
         canon.push_str(text);
         canon.push('\u{1e}');
@@ -424,8 +429,8 @@ fn strip_one_newline(s: &str) -> &str {
 
 /// True when `lines[from..]` still holds a non-blank line, i.e. a spacer
 /// emitted now would not sit at the end of the document.
-fn has_content_after(lines: &[&str], from: usize) -> bool {
-    lines[from..].iter().any(|l| !l.trim().is_empty())
+fn has_content_after(last_content: Option<usize>, from: usize) -> bool {
+    last_content.is_some_and(|last| last >= from)
 }
 
 /// A setext underline: one or more `=` or `-` and nothing else (up to 3 spaces
@@ -497,6 +502,9 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
     let mut open: Option<(char, usize, String, String)> = None;
     let mut body = String::new();
     let lines: Vec<&str> = md.split_inclusive('\n').collect();
+    // Index of the last non-blank line: makes "any content after here" O(1)
+    // instead of a fresh scan per heading.
+    let last_content = lines.iter().rposition(|line| !line.trim().is_empty());
     let (refs, ref_lines) = collect_reference_definitions(&lines);
     let mut i = 0usize;
     while i < lines.len() {
@@ -688,7 +696,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                                     text,
                                     id: id.clone(),
                                     space_before: !out.trim().is_empty(),
-                                    space_after: has_content_after(&lines, end),
+                                    space_after: has_content_after(last_content, end),
                                 },
                             );
                             push_placeholder(&mut out, "mdheading", &id);
@@ -800,7 +808,7 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                                 text,
                                 id: id.clone(),
                                 space_before: !out.trim().is_empty(),
-                                space_after: has_content_after(&lines, i + 1),
+                                space_after: has_content_after(last_content, i + 1),
                             },
                         );
                         push_placeholder(&mut out, "mdheading", &id);
@@ -816,9 +824,9 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                     if info.split_whitespace().next() == Some("mermaid") {
                         let id = diagram_id(&body);
                         diagrams.insert(id.clone(), body.trim().to_string());
-                        // Trailing blank line terminates the CommonMark HTML block so
-                        // a paragraph directly after the fence is not absorbed into it.
-                        out.push_str(&format!("<mermaid id=\"{id}\">\n\n"));
+                        // `push_placeholder` also emits the leading blank line a
+                        // type-7 HTML block needs, or the tag would be inlined.
+                        push_placeholder(&mut out, "mermaid", &id);
                     } else {
                         let lang = info.split_whitespace().next().unwrap_or("").to_string();
                         let text = normalize_newlines(strip_one_newline(&body));
@@ -1336,6 +1344,11 @@ fn collect_reference_definitions(
         let Some(rest) = t.strip_prefix('[') else {
             continue;
         };
+        // Indented lines are code (or a nested block), not definitions: claiming
+        // them would delete real content from the document.
+        if indent_columns(line) > 3 {
+            continue;
+        }
         let Some(end) = rest.find("]:") else {
             continue;
         };
@@ -1393,11 +1406,25 @@ fn expand_links(md: &str, refs: &std::collections::HashMap<String, String>) -> S
                 continue;
             }
         }
-        if let Some((len, url)) = autolink_at(rest) {
-            let text = &rest[..len];
-            out.push_str(&format!("[{text}]({url})"));
-            i += len;
-            continue;
+        if c == '<' {
+            // Inline HTML and autolinks: copy the tag verbatim so a URL inside
+            // an attribute is not rewritten into Markdown.
+            if let Some(end) = rest.find('>') {
+                out.push_str(&rest[..=end]);
+                i += end + 1;
+                continue;
+            }
+        }
+        // Autolinks only start at a word boundary; scanning from every
+        // character would be quadratic on a long whitespace-free token.
+        let at_word_start = i == 0 || md[..i].chars().next_back().is_some_and(char::is_whitespace);
+        if at_word_start {
+            if let Some((len, url)) = autolink_at(rest) {
+                let text = &rest[..len];
+                out.push_str(&format!("[{text}]({url})"));
+                i += len;
+                continue;
+            }
         }
         out.push(c);
         i += c.len_utf8();
@@ -2913,5 +2940,47 @@ mod tests {
             );
             let _ = std::fs::remove_file(&path);
         }
+    }
+}
+
+#[cfg(test)]
+mod audit_regressions {
+    use super::{prepare, quote_id, read_doc, QuoteSpec};
+    use std::path::Path;
+
+    #[test]
+    fn mermaid_after_a_plain_line_gets_a_leading_blank_line() {
+        // A `|` line is emitted verbatim, so `out` ends with one `\n`; without
+        // the extra blank line pulldown-cmark inlines the tag instead of making
+        // an HTML block, and the diagram disappears.
+        let p = prepare("a | b\n```mermaid\ngraph TD;\n```\n", Path::new("/d"));
+        assert!(p.markdown.contains("\n\n<mermaid id="), "{:?}", p.markdown);
+    }
+
+    #[test]
+    fn indented_reference_like_line_is_kept_as_content() {
+        // Four spaces is an indented code block, not a link definition.
+        let p = prepare("    [note]: see docs\n", Path::new("/d"));
+        assert!(p.markdown.contains("[note]: see docs"), "{:?}", p.markdown);
+    }
+
+    #[test]
+    fn read_doc_strips_the_utf8_bom() {
+        let path = std::env::temp_dir().join(format!("jiaoren-bom-{}.md", std::process::id()));
+        std::fs::write(&path, "\u{feff}# Title\n").unwrap();
+        let text = read_doc(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(text, "# Title\n");
+    }
+
+    #[test]
+    fn quote_ids_distinguish_depths_above_nine() {
+        let one = QuoteSpec {
+            lines: vec![(1, "same".to_string())],
+        };
+        let eleven = QuoteSpec {
+            lines: vec![(11, "same".to_string())],
+        };
+        assert_ne!(quote_id(&one), quote_id(&eleven));
     }
 }

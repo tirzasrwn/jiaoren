@@ -50,7 +50,7 @@ a / 0            reset zoom (a also pans back left)
 t                toggle light/dark theme
 r                reload from disk
 ctrl+g           show the file path
-drag             select text (drag on empty space pans)
+drag             select text (releasing copies; on empty space it pans)
 y                copy the selection, yy copies the whole file
 /                search, Enter confirms
 n / N            next / previous match

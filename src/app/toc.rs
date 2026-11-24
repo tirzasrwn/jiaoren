@@ -149,7 +149,12 @@ impl TocState {
     }
 
     fn has_children(&self, toc: &[TocEntry], index: usize) -> bool {
-        let level = toc[index].level;
+        // An empty TOC (or a stale selection) must not index out of bounds:
+        // `h`/`l` in the index overlay would otherwise panic.
+        let Some(entry) = toc.get(index) else {
+            return false;
+        };
+        let level = entry.level;
         toc.iter()
             .skip(index + 1)
             .take_while(|entry| entry.level > level)

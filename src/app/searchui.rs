@@ -212,6 +212,11 @@ impl SearchUi {
     /// Block-local highlight ranges and the current-hit index, if the current
     /// hit belongs to `block`.
     pub(crate) fn highlights(&self, block: usize) -> (Vec<(usize, usize)>, Option<usize>) {
+        // One highlight at a time: while a selection is painted, the search
+        // fills would sit on top of it and read as a second colour.
+        if self.selection.is_active() {
+            return (Vec::new(), None);
+        }
         self.state.block_highlights(block)
     }
 
