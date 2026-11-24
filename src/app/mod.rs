@@ -426,6 +426,10 @@ pub(crate) struct App {
     html_fn: HtmlFn,
     scroll_y: f32,
     scroll_x: f32,
+    /// Content scroll limits from the last layout. Key scrolls clamp to these
+    /// first, so pressing down at the bottom cannot hand egui an offset past
+    /// the end for one bouncing frame.
+    scroll_max: egui::Vec2,
     /// Block index the next layout must centre in the viewport (a confirmed or
     /// stepped search hit). Applied once after `home_scroll`, before the scroll
     /// area runs.
@@ -641,6 +645,7 @@ impl App {
             html_fn,
             scroll_y: 0.0,
             scroll_x: 0.0,
+            scroll_max: egui::Vec2::ZERO,
             jump_to: None,
             pad: None,
             scroll_bottom: false,
@@ -1373,9 +1378,15 @@ impl eframe::App for App {
                 cancel_done = true;
             }
             match act {
-                Action::ScrollLines(f) => self.scroll_y = (self.scroll_y + f * 40.0).max(0.0),
-                Action::ScrollPages(f) => self.scroll_y = (self.scroll_y + f * page_h).max(0.0),
-                Action::ScrollCols(f) => self.scroll_x = (self.scroll_x + f * 40.0).max(0.0),
+                Action::ScrollLines(f) => {
+                    self.scroll_y = (self.scroll_y + f * 40.0).clamp(0.0, self.scroll_max.y);
+                }
+                Action::ScrollPages(f) => {
+                    self.scroll_y = (self.scroll_y + f * page_h).clamp(0.0, self.scroll_max.y);
+                }
+                Action::ScrollCols(f) => {
+                    self.scroll_x = (self.scroll_x + f * 40.0).clamp(0.0, self.scroll_max.x);
+                }
                 Action::Top => {
                     let home = home_target(self.pad);
                     self.scroll_x = home.x;
@@ -1538,6 +1549,7 @@ impl eframe::App for App {
             });
             let max_y = (output.content_size.y - output.inner_rect.height()).max(0.0);
             let max_x = (output.content_size.x - output.inner_rect.width()).max(0.0);
+            self.scroll_max = egui::vec2(max_x, max_y);
             let adjust = std::mem::take(&mut self.diagrams.borrow_mut().scroll_adjust);
             let jump_bottom = std::mem::take(&mut self.scroll_bottom);
             self.scroll_y = if jump_bottom {
