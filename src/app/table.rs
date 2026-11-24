@@ -26,6 +26,10 @@ pub(crate) struct TableUi {
     /// frame's rects. Identical tables share an id, so the occurrence is part
     /// of the key or they would fight over one entry.
     hover: RowHover,
+    /// Measured row heights per table id and occurrence. egui's Grid paints
+    /// its row colour with a hard-coded 2 px radius, so tables paint their own
+    /// square fills from the previous frame's heights instead.
+    row_heights: HashMap<(String, usize), Vec<f32>>,
 }
 
 impl TableUi {
@@ -37,6 +41,7 @@ impl TableUi {
             widths: HashMap::new(),
             copied: false,
             hover: RowHover::default(),
+            row_heights: HashMap::new(),
         }
     }
 
@@ -52,6 +57,7 @@ impl TableUi {
         self.widths.clear();
         self.copied = false;
         self.hover = RowHover::default();
+        self.row_heights.clear();
     }
 
     /// Take the "a table was copied" flag for the frame, if the button fired.
@@ -85,6 +91,14 @@ impl TableUi {
         // A distinct id per occurrence so two identical tables never share state.
         let grid_id = ui.id().with(("mdtable", id, occurrence));
         let dark = ui.visuals().dark_mode;
+        let height_key = (id.to_string(), occurrence);
+        let prev_heights = self
+            .row_heights
+            .get(&height_key)
+            .cloned()
+            .unwrap_or_default();
+        let mut frame_heights: Vec<f32> = Vec::new();
+        let table_width = widths.iter().sum::<f32>() + spacing * (ncols.saturating_sub(1)) as f32;
         // The html hook runs in a wrapping left-to-right layout, where a bare
         // `add_space` would advance horizontally; the vertical wrapper turns the
         // padding into real space below the grid.
@@ -96,18 +110,78 @@ impl TableUi {
             let hovered = self.hover.get(id, occurrence);
             let spacing_y = ui.spacing().item_spacing.y;
             let mut row_rects: Vec<egui::Rect> = Vec::new();
-            egui::Grid::new(grid_id)
-                .with_row_color(move |row, _style| match hovered {
-                    Some(hover) if hover == row => Some(row_fill_hover(dark, row)),
-                    _ => row_fill(dark, row),
-                })
-                .show(ui, |ui| {
+            egui::Grid::new(grid_id).show(ui, |ui| {
+                let row_top = ui.cursor().min.y;
+                paint_row_fill(
+                    ui,
+                    row_top,
+                    table_width,
+                    spacing_y,
+                    prev_heights.first().copied(),
+                    0,
+                    hovered,
+                    dark,
+                );
+                for i in 0..ncols {
+                    let cell = spec.header.get(i).map_or("", String::as_str);
+                    // One block per cell, row-major; the row top is enough
+                    // to jump to it. Cells routed to the library are not
+                    // searchable, so they are not recorded.
+                    let (ranges, current, block) = if cell_needs_library_fallback(cell) {
+                        (Vec::new(), None, None)
+                    } else {
+                        let block = search.record(ui, crate::justify::search_text(cell));
+                        let (ranges, current) = search.highlights(block);
+                        (ranges, current, Some(block))
+                    };
+                    let selection = block.and_then(|b| search.selection_range(b));
+                    // The last header cell leaves room for the overlaid copy
+                    // icon, so a long header wraps instead of running under it.
+                    let inset = if i + 1 == ncols { COPY_INSET } else { 0.0 };
+                    let painted = render_cell(
+                        ui,
+                        cell_width(&widths, i),
+                        inset,
+                        cell,
+                        &mut self.cell_cache,
+                        &ranges,
+                        current,
+                        selection,
+                    );
+                    if let Some(block) = block {
+                        search.set_height(block, painted.height);
+                        search.set_rect(block, painted.rect);
+                        search.set_char_map(block, painted.chars);
+                        for rect in painted.interactives {
+                            search.add_control(rect, egui::CursorIcon::PointingHand);
+                        }
+                    }
+                }
+                let bounds = ui.min_rect();
+                frame_heights.push((bounds.bottom() - row_top).max(0.0));
+                row_rects.push(hover_rect(
+                    egui::Rect::from_min_max(
+                        egui::pos2(bounds.left(), row_top),
+                        egui::pos2(bounds.right(), bounds.bottom()),
+                    ),
+                    spacing_y,
+                ));
+                ui.end_row();
+                for (data_index, row) in spec.rows.iter().enumerate() {
                     let row_top = ui.cursor().min.y;
+                    let row_index = data_index + 1;
+                    paint_row_fill(
+                        ui,
+                        row_top,
+                        table_width,
+                        spacing_y,
+                        prev_heights.get(row_index).copied(),
+                        row_index,
+                        hovered,
+                        dark,
+                    );
                     for i in 0..ncols {
-                        let cell = spec.header.get(i).map_or("", String::as_str);
-                        // One block per cell, row-major; the row top is enough
-                        // to jump to it. Cells routed to the library are not
-                        // searchable, so they are not recorded.
+                        let cell = row.get(i).map_or("", String::as_str);
                         let (ranges, current, block) = if cell_needs_library_fallback(cell) {
                             (Vec::new(), None, None)
                         } else {
@@ -116,13 +190,10 @@ impl TableUi {
                             (ranges, current, Some(block))
                         };
                         let selection = block.and_then(|b| search.selection_range(b));
-                        // The last header cell leaves room for the overlaid copy
-                        // icon, so a long header wraps instead of running under it.
-                        let inset = if i + 1 == ncols { COPY_INSET } else { 0.0 };
                         let painted = render_cell(
                             ui,
                             cell_width(&widths, i),
-                            inset,
+                            0.0,
                             cell,
                             &mut self.cell_cache,
                             &ranges,
@@ -139,6 +210,7 @@ impl TableUi {
                         }
                     }
                     let bounds = ui.min_rect();
+                    frame_heights.push((bounds.bottom() - row_top).max(0.0));
                     row_rects.push(hover_rect(
                         egui::Rect::from_min_max(
                             egui::pos2(bounds.left(), row_top),
@@ -147,48 +219,17 @@ impl TableUi {
                         spacing_y,
                     ));
                     ui.end_row();
-                    for row in &spec.rows {
-                        let row_top = ui.cursor().min.y;
-                        for i in 0..ncols {
-                            let cell = row.get(i).map_or("", String::as_str);
-                            let (ranges, current, block) = if cell_needs_library_fallback(cell) {
-                                (Vec::new(), None, None)
-                            } else {
-                                let block = search.record(ui, crate::justify::search_text(cell));
-                                let (ranges, current) = search.highlights(block);
-                                (ranges, current, Some(block))
-                            };
-                            let selection = block.and_then(|b| search.selection_range(b));
-                            let painted = render_cell(
-                                ui,
-                                cell_width(&widths, i),
-                                0.0,
-                                cell,
-                                &mut self.cell_cache,
-                                &ranges,
-                                current,
-                                selection,
-                            );
-                            if let Some(block) = block {
-                                search.set_height(block, painted.height);
-                                search.set_rect(block, painted.rect);
-                                search.set_char_map(block, painted.chars);
-                                for rect in painted.interactives {
-                                    search.add_control(rect, egui::CursorIcon::PointingHand);
-                                }
-                            }
-                        }
-                        let bounds = ui.min_rect();
-                        row_rects.push(hover_rect(
-                            egui::Rect::from_min_max(
-                                egui::pos2(bounds.left(), row_top),
-                                egui::pos2(bounds.right(), bounds.bottom()),
-                            ),
-                            spacing_y,
-                        ));
-                        ui.end_row();
-                    }
-                });
+                }
+            });
+            let changed = frame_heights.len() != prev_heights.len()
+                || frame_heights
+                    .iter()
+                    .zip(&prev_heights)
+                    .any(|(a, b)| (a - b).abs() > 0.5);
+            self.row_heights.insert(height_key, frame_heights);
+            if changed {
+                ui.ctx().request_repaint();
+            }
             let next = ui
                 .ctx()
                 .pointer_hover_pos()
@@ -518,6 +559,39 @@ fn measure(ui: &egui::Ui, text: &str, font: &egui::FontId) -> f32 {
             .size()
             .x
     })
+}
+
+/// Paint one table row background: square corners, full table width, using the
+/// previous frame's height. egui's Grid row colour is hard-coded to a 2 px
+/// radius, so the table draws its own.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "row fill needs geometry, hover state and theme"
+)]
+fn paint_row_fill(
+    ui: &egui::Ui,
+    row_top: f32,
+    table_width: f32,
+    spacing_y: f32,
+    height: Option<f32>,
+    row: usize,
+    hovered: Option<usize>,
+    dark: bool,
+) {
+    let height = height.unwrap_or_else(|| ui.text_style_height(&egui::TextStyle::Body) * 1.2);
+    let fill = match hovered {
+        Some(hover) if hover == row => Some(row_fill_hover(dark, row)),
+        _ => row_fill(dark, row),
+    };
+    let Some(fill) = fill else {
+        return;
+    };
+    let left = ui.cursor().min.x;
+    let rect = egui::Rect::from_min_size(
+        egui::Pos2::new(left - 2.0, row_top - spacing_y * 0.5),
+        egui::vec2(table_width + 4.0, height + spacing_y),
+    );
+    ui.painter().rect_filled(rect, 0.0, fill);
 }
 
 /// Width for column `i`, falling back to the last measured width for rows that
