@@ -183,12 +183,14 @@ To point jiaoren at a different binary instead, set:
 export JIAOREN_CHROMIUM=/path/to/chrome
 ```
 
-There is no official hash for the pinned CfT artifact, so no artifact hash is
-verified: the pinned version only selects the download URL, and integrity is
-limited to `unzip -t` on the archive and a `--version` run of the extracted
-binary before it is published. Those are smoke checks, not a supply-chain
-guarantee. The download is validated in a temp directory and only then renamed
-into place, so a killed install leaves no half-written binary.
+jiaoren pins a SHA-256 for the Chrome for Testing zip, `mermaid.min.js`, and
+both managed font faces. Each download is hashed before it is renamed or
+unpacked; a mismatch deletes the temp file and reports the artifact and both
+digests. This is not a signature and does not vouch for the upstream host, but
+it rejects a body that differs from the pinned release. Downloads also have byte
+caps and abort if the transfer stalls. The Chromium download is validated in a
+temp directory and only then renamed into place, so a killed install leaves no
+half-written binary.
 
 If Chromium cannot be found or installed, the document still opens and a
 warning banner names the failing step; diagrams simply won't render.
@@ -242,7 +244,9 @@ line naming the path.
 
 Everything managed lives under `~/.cache/jiaoren/`: versioned FiraCode faces,
 chromium, `mermaid-<version>.min.js`, and the diagram SVGs (keyed by diagram
-content, theme and render version). Reopening a document is instant and
+content, theme and render version). If neither `XDG_CACHE_HOME` nor `HOME` is
+set, the cache goes in a per-UID directory under the system temp dir, created
+with mode `0700` and checked for ownership. Reopening a document is instant and
 diagrams stay sharp at any zoom.
 
 First-run downloads (fonts, Chromium, mermaid.js) run in the background while

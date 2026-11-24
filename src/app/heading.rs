@@ -32,10 +32,9 @@ impl HeadingUi {
     }
 
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, id: &str, search: &mut SearchUi) {
-        // Clone so the spec outlives the immutable borrow of `self`.
-        let spec = match self.specs.get(id) {
-            Some(s) => s.clone(),
-            None => return, // unknown id: draw nothing, never panic
+        // Borrow the spec for the frame; nothing in `self` is mutated here.
+        let Some(spec) = self.specs.get(id) else {
+            return; // unknown id: draw nothing, never panic
         };
         let column = self.column;
         let body = justify::body_font(ui);
@@ -58,7 +57,8 @@ impl HeadingUi {
             }
             // Record at the heading's text top, after the gap above, so a jump
             // does not leave a blank band.
-            let block = search.record(ui, justify::search_text(&spec.text));
+            let text = search.cached_text(id, || justify::search_text(&spec.text));
+            let block = search.record(ui, text);
             search.record_anchor(&crate::doc::slug(&spec.text), block);
             search.record_heading(&spec.id, block);
             let (ranges, current) = search.highlights(block);

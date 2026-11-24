@@ -2,6 +2,7 @@
 //! row per item, with the marker painted in the gutter.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::doc::{ListKind, ListSpec};
 use crate::justify::{self, Marker};
@@ -16,11 +17,17 @@ pub(crate) struct ListUi {
     /// Reading column in effect this frame; `ui.available_width()` inside the
     /// html hook is not that column.
     column: f32,
+    /// Visible text per item, built once per list id and shared per frame.
+    texts: HashMap<String, Rc<[Rc<str>]>>,
 }
 
 impl ListUi {
     pub(crate) fn new(specs: HashMap<String, ListSpec>) -> Self {
-        ListUi { specs, column: 0.0 }
+        ListUi {
+            specs,
+            column: 0.0,
+            texts: HashMap::new(),
+        }
     }
 
     /// Record the document's reading column once per frame, before the viewer
@@ -31,26 +38,28 @@ impl ListUi {
 
     pub(crate) fn reset(&mut self, specs: HashMap<String, ListSpec>) {
         self.specs = specs;
+        self.texts.clear();
     }
 
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, id: &str, search: &mut SearchUi) {
-        // Clone so the spec outlives the borrow while the closure borrows `ui`.
-        let spec = match self.specs.get(id) {
-            Some(s) => s.clone(),
-            None => return, // unknown id: draw nothing, never panic
+        // Borrow the spec for the frame; the text cache is a separate field.
+        let Some(spec) = self.specs.get(id) else {
+            return; // unknown id: draw nothing, never panic
         };
         let column = self.column;
         let space = justify::space_width(ui);
         let pad = table_pad(ui.text_style_height(&egui::TextStyle::Body));
+        let texts = item_texts(&mut self.texts, id, spec);
         // A bare `add_space` would advance horizontally in the hook's wrapping
         // layout; the vertical wrapper makes the padding real space.
         ui.vertical(|ui| {
             // Half the normal item gap reads as one block, not loose items.
             ui.spacing_mut().item_spacing.y *= 0.5;
             ui.add_space(pad);
-            for item in &spec.items {
+            for (index, item) in spec.items.iter().enumerate() {
                 // One searchable block per item, at the row it starts on.
-                let block = search.record(ui, crate::justify::search_text(&item.text));
+                let text = texts.get(index).map_or_else(|| Rc::from(""), Rc::clone);
+                let block = search.record(ui, text);
                 let (ranges, current) = search.highlights(block);
                 let highlights = justify::MatchHighlight {
                     ranges: &ranges,
@@ -75,5 +84,52 @@ impl ListUi {
             }
             ui.add_space(pad);
         });
+    }
+}
+
+/// Visible text of every item in one list, built once and shared per frame.
+fn item_texts<'a>(
+    cache: &'a mut HashMap<String, Rc<[Rc<str>]>>,
+    id: &str,
+    spec: &ListSpec,
+) -> &'a [Rc<str>] {
+    if !cache.contains_key(id) {
+        let texts: Vec<Rc<str>> = spec
+            .items
+            .iter()
+            .map(|item| Rc::from(crate::justify::search_text(&item.text)))
+            .collect();
+        cache.insert(id.to_string(), Rc::from(texts));
+    }
+    cache.get(id).map_or(&[][..], |texts| &texts[..])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::item_texts;
+    use crate::doc::{ListItem, ListKind, ListSpec};
+    use std::collections::HashMap;
+
+    #[test]
+    fn item_texts_are_built_once_and_reused() {
+        let item = |text: &str| ListItem {
+            depth: 0,
+            kind: ListKind::Bullet,
+            text: text.to_string(),
+        };
+        let spec = ListSpec {
+            items: vec![item("**one**"), item("`two`")],
+        };
+        let mut cache = HashMap::new();
+        let first = item_texts(&mut cache, "list", &spec);
+        assert_eq!(&*first[0], "one");
+        assert_eq!(&*first[1], "two");
+        // A different spec under the same id is ignored: the cache wins.
+        let changed = ListSpec {
+            items: vec![item("changed")],
+        };
+        let again = item_texts(&mut cache, "list", &changed);
+        assert_eq!(again.len(), 2);
+        assert_eq!(&*again[0], "one");
     }
 }

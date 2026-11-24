@@ -45,6 +45,7 @@ impl TocState {
                 // collapsed ancestor hides it.
                 self.reveal_selected(toc);
             }
+            self.clamp_selected(toc);
             self.scroll_to_selected = true;
         }
     }
@@ -55,7 +56,11 @@ impl TocState {
     }
 
     fn reveal_selected(&mut self, toc: &[TocEntry]) {
-        let mut level = toc.get(self.selected).map_or(MAX_DEPTH + 1, |e| e.level);
+        let Some(entry) = toc.get(self.selected) else {
+            self.selected = 0;
+            return;
+        };
+        let mut level = entry.level;
         let mut j = self.selected;
         while j > 0 {
             j -= 1;
@@ -136,11 +141,29 @@ impl TocState {
     pub(crate) fn fold(&mut self, toc: &[TocEntry], expand: bool) {
         if expand {
             self.collapsed.remove(&self.selected);
-            return;
-        }
-        if self.has_children(toc, self.selected) {
+        } else if self.has_children(toc, self.selected) {
             self.collapsed.insert(self.selected);
         }
+        self.clamp_selected(toc);
+    }
+
+    /// Keep the selection on a row that is actually visible: a stale index (or
+    /// a selection hidden by a fold) moves to the closest visible row above,
+    /// else the first one. An entirely empty list keeps the selection as-is;
+    /// Enter is a no-op there.
+    fn clamp_selected(&mut self, toc: &[TocEntry]) {
+        let visible = self.visible(toc);
+        if visible.is_empty() || visible.contains(&self.selected) {
+            return;
+        }
+        let target = visible
+            .iter()
+            .rev()
+            .find(|&&index| index < self.selected)
+            .or_else(|| visible.first())
+            .copied()
+            .unwrap_or(self.selected);
+        self.selected = target;
     }
 
     /// Whether the selected heading has children to expand.
@@ -161,9 +184,12 @@ impl TocState {
             .any(|entry| entry.level <= MAX_DEPTH)
     }
 
-    /// The heading the selection points at.
+    /// The heading the selection points at, if it is actually on screen. A
+    /// selection hidden by a fold or a heading deeper than [`MAX_DEPTH`] is not
+    /// jumpable, so Enter on an empty list is a no-op.
     pub(crate) fn selected_entry<'a>(&self, toc: &'a [TocEntry]) -> Option<&'a TocEntry> {
-        toc.get(self.selected)
+        let entry = toc.get(self.selected)?;
+        self.visible(toc).contains(&self.selected).then_some(entry)
     }
 }
 
@@ -217,6 +243,14 @@ pub(crate) fn draw(
                         .max_height(screen.height() - 74.0)
                         .show(ui, |ui| {
                             ui.add_space(8.0);
+                            if visible.is_empty() {
+                                ui.add(egui::Label::new(
+                                    egui::RichText::new("no headings (depth 3)")
+                                        .monospace()
+                                        .size(14.0)
+                                        .color(ui.visuals().weak_text_color()),
+                                ));
+                            }
                             for &index in &visible {
                                 let entry = &toc[index];
                                 let has_children = state.has_children(toc, index);
@@ -414,6 +448,38 @@ mod tests {
             assert_eq!(state.selected, 0);
             state.move_by(&toc, 99);
             assert_eq!(state.selected, 5);
+        }
+
+        #[test]
+        fn enter_has_no_target_when_no_heading_is_visible() {
+            let toc = vec![entry(4, "too deep for the index")];
+            let mut state = TocState::default();
+            state.toggle_open(&toc);
+            assert!(state.visible(&toc).is_empty());
+            // `selected_entry` is what Enter jumps with: no visible row, no jump.
+            assert!(state.selected_entry(&toc).is_none());
+            assert!(state.selected_entry(&[]).is_none());
+        }
+
+        #[test]
+        fn empty_index_fold_is_a_noop_instead_of_a_panic() {
+            let mut state = TocState::default();
+            state.toggle_open(&[]);
+            state.fold(&[], false);
+            state.fold(&[], true);
+            assert!(state.selected_entry(&[]).is_none());
+        }
+
+        #[test]
+        fn folding_clamps_a_hidden_selection_to_a_visible_row() {
+            let toc = doc();
+            let mut state = TocState::default();
+            state.toggle_open(&toc);
+            assert_eq!(state.visible(&toc), vec![0, 1, 4, 5]);
+            state.selected = 3; // hidden under the collapsed One A (index 1)
+            state.fold(&toc, true);
+            assert_eq!(state.selected, 1);
+            assert!(state.selected_entry(&toc).is_some());
         }
     }
 }

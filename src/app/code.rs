@@ -26,6 +26,49 @@ pub(crate) struct CodeUi {
 
 type CodeLayoutKey = (String, i32, i32, i32);
 
+/// Layouts kept before stale zoom/column/DPI keys are evicted. Every key that
+/// matches the current frame is kept, however many blocks the document has.
+const MAX_LAYOUT_CACHE: usize = 96;
+
+/// Reading column key, in hundredths of a point.
+fn column_key(column: f32) -> i32 {
+    (column * 100.0).round() as i32
+}
+
+/// Font size key, in hundredths of a point.
+fn font_key(font: &egui::FontId) -> i32 {
+    (font.size * 100.0).round() as i32
+}
+
+/// Display density key, in hundredths of a pixel per point.
+fn ppp_key(ui: &egui::Ui) -> i32 {
+    (ui.ctx().pixels_per_point() * 100.0).round() as i32
+}
+
+/// The code font of the current style, with a fallback for a style without a
+/// monospace entry.
+fn mono_font(ui: &egui::Ui) -> egui::FontId {
+    ui.style()
+        .text_styles
+        .get(&egui::TextStyle::Monospace)
+        .cloned()
+        .unwrap_or_else(|| egui::FontId::monospace(14.0))
+}
+
+/// Whether two layout keys describe the same column, font and density. The id
+/// is deliberately ignored: every block at the current zoom is kept.
+fn same_layout_dims(key: &CodeLayoutKey, current: &CodeLayoutKey) -> bool {
+    key.1 == current.1 && key.2 == current.2 && key.3 == current.3
+}
+
+/// Evict layouts from a previous zoom level or window width once the cache
+/// grows, keeping every entry that matches this frame.
+fn prune_stale_layouts<V>(layouts: &mut HashMap<CodeLayoutKey, V>, current: &CodeLayoutKey) {
+    if layouts.len() > MAX_LAYOUT_CACHE {
+        layouts.retain(|key, _| same_layout_dims(key, current));
+    }
+}
+
 struct CodeLayout {
     rows: Vec<Row>,
     spans: Vec<(usize, usize)>,
@@ -50,14 +93,20 @@ impl CodeUi {
     }
 
     /// Record the document's reading column once per frame, before the viewer
-    /// runs.
-    pub(crate) fn begin_frame(&mut self, column: f32) {
+    /// runs. Also drops layouts from a previous zoom/DPI/column so the cache
+    /// stays bounded without a full clear (which would re-lay out every block on
+    /// every zoom step).
+    pub(crate) fn begin_frame(&mut self, ui: &egui::Ui, column: f32) {
         self.column = column;
         self.occurrences.clear();
-        // Zoom steps create new keys; keep the cache bounded.
-        if self.layouts.len() > 96 {
-            self.layouts.clear();
-        }
+        let mono = mono_font(ui);
+        let current = (
+            String::new(),
+            column_key(column),
+            font_key(&mono),
+            ppp_key(ui),
+        );
+        prune_stale_layouts(&mut self.layouts, &current);
     }
 
     pub(crate) fn reset(&mut self, specs: HashMap<String, CodeSpec>) {
@@ -84,13 +133,11 @@ impl CodeUi {
             *count += 1;
             occurrence
         };
-        let mono = ui
-            .style()
-            .text_styles
-            .get(&egui::TextStyle::Monospace)
-            .cloned()
-            .unwrap_or_else(|| egui::FontId::monospace(14.0));
-        let block = search.record(ui, spec.text.clone());
+        let mono = mono_font(ui);
+        // The block text is shared per placeholder id: the full source is
+        // copied once, not on every frame.
+        let text = search.cached_text(id, || spec.text.clone());
+        let block = search.record(ui, text);
         let (ranges, current) = search.highlights(block);
         let selection = search.selection_range(block);
         // A drag selection (or an active one) owns the visual: the hover row
@@ -99,9 +146,9 @@ impl CodeUi {
         let selecting = search.selection.dragging || search.selection.is_active();
         let key: CodeLayoutKey = (
             id.to_string(),
-            (self.column * 100.0).round() as i32,
-            (mono.size * 100.0).round() as i32,
-            (ui.ctx().pixels_per_point() * 100.0).round() as i32,
+            column_key(self.column),
+            font_key(&mono),
+            ppp_key(ui),
         );
         if !self.layouts.contains_key(&key) {
             let row_h = ui.fonts_mut(|f| f.row_height(&mono));
@@ -159,11 +206,18 @@ impl CodeUi {
             search.set_char_map(block, Vec::new());
             return;
         }
-        // Per-line work only for blocks that actually paint.
+        // Per-line work only for blocks that actually paint, and only when a
+        // search or selection can produce a mark at all.
         let lines = code_lines(&spec.text);
-        let line_marks = line_highlights(&spec.text, &ranges, current);
-        let sel_ranges: Vec<(usize, usize)> = selection.into_iter().collect();
-        let sel_marks = line_highlights(&spec.text, &sel_ranges, None);
+        let line_marks = if ranges.is_empty() {
+            Vec::new()
+        } else {
+            line_highlights(&spec.text, &ranges, current)
+        };
+        let sel_marks = match selection {
+            Some(range) => line_highlights(&spec.text, &[range], None),
+            None => Vec::new(),
+        };
         let painter = ui.painter().clone();
         let content = egui::Rect::from_min_size(rect.min, egui::vec2(width, content_height));
         painter.rect_filled(content, 0.0, ui.visuals().code_bg_color);
@@ -210,7 +264,8 @@ impl CodeUi {
                 painter.galley(egui::Pos2::new(x, pos.y), galley, number_color);
             }
             // Selection first, then search hits, both behind the glyphs.
-            for &(mark_start, mark_end, _) in &clip_marks(&sel_marks[row.line], row) {
+            let row_sel = sel_marks.get(row.line).map_or(&[][..], Vec::as_slice);
+            for &(mark_start, mark_end, _) in &clip_marks(row_sel, row) {
                 let x = pos.x + line_width(ui, &prefix(&text, mark_start), &mono);
                 let w = line_width(ui, &slice(&text, mark_start, mark_end), &mono);
                 painter.rect_filled(
@@ -219,7 +274,8 @@ impl CodeUi {
                     selection_fill,
                 );
             }
-            for &(mark_start, mark_end, is_current) in &clip_marks(&line_marks[row.line], row) {
+            let row_marks = line_marks.get(row.line).map_or(&[][..], Vec::as_slice);
+            for &(mark_start, mark_end, is_current) in &clip_marks(row_marks, row) {
                 let x = pos.x + line_width(ui, &prefix(&text, mark_start), &mono);
                 let w = line_width(ui, &slice(&text, mark_start, mark_end), &mono);
                 let fill = if is_current { current_fill } else { other_fill };
@@ -345,6 +401,9 @@ pub(crate) fn gutter_width(line_count: usize, cell: f32) -> f32 {
 /// Clip line-local highlight marks to one visual row and shift them to the
 /// row's own char origin. Empty intersections are dropped.
 pub(crate) fn clip_marks(marks: &[(usize, usize, bool)], row: &Row) -> Vec<(usize, usize, bool)> {
+    if marks.is_empty() {
+        return Vec::new();
+    }
     let end = row.start + row.len;
     marks
         .iter()
@@ -422,6 +481,48 @@ pub(crate) fn code_lines(text: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
+    mod cache {
+        use super::super::{prune_stale_layouts, same_layout_dims, CodeLayoutKey};
+        use std::collections::HashMap;
+
+        fn key(id: &str, column: i32, font: i32, ppp: i32) -> CodeLayoutKey {
+            (id.to_string(), column, font, ppp)
+        }
+
+        #[test]
+        fn pruning_keeps_the_current_zoom_and_drops_old_levels() {
+            let mut layouts: HashMap<CodeLayoutKey, ()> = HashMap::new();
+            let current = key("", 90_000, 1_600, 100);
+            for i in 0..MAX_ENTRIES {
+                // Old zoom levels: same column family but another font size.
+                layouts.insert(key(&format!("old{i}"), 90_000, 1_400, 100), ());
+            }
+            layouts.insert(current.clone(), ());
+            prune_stale_layouts(&mut layouts, &current);
+            assert_eq!(layouts.len(), 1);
+            assert!(layouts.contains_key(&current));
+        }
+
+        const MAX_ENTRIES: usize = super::super::MAX_LAYOUT_CACHE + 1;
+
+        #[test]
+        fn pruning_keeps_every_block_at_the_current_zoom() {
+            let mut layouts: HashMap<CodeLayoutKey, ()> = HashMap::new();
+            let current = key("", 90_000, 1_600, 100);
+            for i in 0..MAX_ENTRIES {
+                layouts.insert(key(&format!("block{i}"), 90_000, 1_600, 100), ());
+            }
+            prune_stale_layouts(&mut layouts, &current);
+            assert_eq!(layouts.len(), MAX_ENTRIES);
+        }
+
+        #[test]
+        fn dims_ignore_the_block_id() {
+            assert!(same_layout_dims(&key("a", 1, 2, 3), &key("b", 1, 2, 3)));
+            assert!(!same_layout_dims(&key("a", 1, 2, 3), &key("a", 1, 2, 4)));
+        }
+    }
+
     mod layout {
         use super::super::{
             clip_marks, code_line_spans, code_lines, code_top_pad, content_width, gutter_width,

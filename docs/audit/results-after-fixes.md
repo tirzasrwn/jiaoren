@@ -1,5 +1,7 @@
 # Audit follow-up: Critical and High fixes
 
+**Historical:** recorded against jiaoren 0.1.0 at the commit named below. Kept as-is; re-run the suite on the current version (see README) when re-scoring.
+
 Code base: `f30e668` (after the original reports at `6054524`).
 Environment: same as the reports (jiaoren 0.1.0, native egui renderer, X11 `:0`),
 Mermaid **12.3.0** after the version bump below.

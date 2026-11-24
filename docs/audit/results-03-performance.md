@@ -1,5 +1,7 @@
 # Audit 03 — Performance and Scale: Results
 
+**Historical:** recorded against jiaoren 0.1.0 at the commit named below. Kept as-is; re-run the suite on the current version (see README) when re-scoring.
+
 **Status:** completed. One critical scale defect (P3 code blocks), no crash or OOM kill.
 **Target:** `jiaoren 0.1.0` (`~/.cargo/bin/jr`), repository commit `3489862`.
 **Document:** `docs/audit/audit-03-performance.md` — 3.1 MB, 19,948 lines, 121 Mermaid blocks,

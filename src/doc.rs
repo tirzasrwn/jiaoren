@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::justify::{code_span_len, link_inner};
+
 /// Failure to load a Markdown document from disk.
 #[derive(Debug, thiserror::Error)]
 pub enum DocError {
@@ -462,15 +464,17 @@ fn is_paragraph_continuation(line: &str) -> bool {
 /// re-wrapped by the justified painter.
 /// A paragraph line with trailing CR/LF removed. Two or more trailing spaces
 /// mean a hard break: they become a backslash before the join newline, which
-/// [`crate::justify::parse_inline`] turns into a forced break.
-fn paragraph_line(line: &str) -> String {
+/// [`crate::justify::parse_inline`] turns into a forced break. `allow_break` is
+/// false for the paragraph's last line, where there is no following newline and
+/// a lone backslash would paint as text.
+fn paragraph_line(line: &str, allow_break: bool) -> String {
     let t = line.trim_end_matches(['\r', '\n']);
     let body = strip_hanging_indent(t);
     // Trailing spaces on an image-only line are layout noise, not a break.
     if parse_standalone_image(body.trim()).is_some() {
         return body.trim().to_string();
     }
-    if body.ends_with("  ") {
+    if allow_break && body.ends_with("  ") {
         format!("{}\\", body.trim_end())
     } else {
         body.to_string()
@@ -557,11 +561,11 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         quote_table_split(&lines, i)
                     {
                         for c in &mut spec.header {
-                            *c = rewrite_images(c, doc_dir);
+                            *c = rewrite_images(&expand_links(&clean_text(c), &refs), doc_dir);
                         }
                         for row in &mut spec.rows {
                             for c in row {
-                                *c = rewrite_images(c, doc_dir);
+                                *c = rewrite_images(&expand_links(&clean_text(c), &refs), doc_dir);
                             }
                         }
                         let id = table_id(&spec);
@@ -708,7 +712,8 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                             &clean_text(
                                 &lines[i..j]
                                     .iter()
-                                    .map(|l| paragraph_line(l))
+                                    .enumerate()
+                                    .map(|(k, l)| paragraph_line(l, k + 1 < j - i))
                                     .collect::<Vec<_>>()
                                     .join("\n"),
                             ),
@@ -1293,28 +1298,6 @@ fn task_suffix(rest: &str) -> Option<(bool, &str)> {
     }
 }
 
-/// Split the text after `](` into the link body and the index just past the
-/// closing `)`. Parentheses are balanced, so `x(1).png` is one target; a
-/// closing paren inside a `"title"` does not end the link.
-fn link_inner(s: &str) -> Option<(&str, usize)> {
-    let mut depth = 0usize;
-    let mut in_quote = false;
-    for (i, c) in s.char_indices() {
-        match c {
-            '"' => in_quote = !in_quote,
-            '(' if !in_quote => depth += 1,
-            ')' if !in_quote => {
-                if depth == 0 {
-                    return Some((&s[..i], i + 1));
-                }
-                depth -= 1;
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 /// True when `line` is one standalone image paragraph, allowing CommonMark's
 /// up-to-three-space paragraph indent. A leading tab is four columns, and four
 /// or more columns stay indented code.
@@ -1338,6 +1321,13 @@ fn collect_reference_definitions(
         }
         if let Some((ch, len, _)) = fence_open(line) {
             open = Some((ch, len));
+            continue;
+        }
+        // A definition can only start a block: first line, after a blank line,
+        // or directly after another definition. Otherwise it is paragraph or
+        // list text and must be rendered, not swallowed.
+        let at_block_start = i == 0 || lines[i - 1].trim().is_empty() || taken.contains(&(i - 1));
+        if !at_block_start {
             continue;
         }
         let t = line.trim();
@@ -1382,9 +1372,9 @@ fn expand_links(md: &str, refs: &std::collections::HashMap<String, String>) -> S
             break;
         };
         if c == '`' {
-            if let Some(end) = rest[1..].find('`') {
-                out.push_str(&rest[..end + 2]);
-                i += end + 2;
+            if let Some(used) = code_span_len(rest) {
+                out.push_str(&rest[..used]);
+                i += used;
             } else {
                 out.push_str(rest);
                 break;
@@ -1500,7 +1490,16 @@ fn autolink_at(s: &str) -> Option<(usize, String)> {
     let end = s
         .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"'))
         .unwrap_or(s.len());
-    let word = &s[..end];
+    let mut word = &s[..end];
+    // Same trailing punctuation as the URL branch: keep sentence punctuation
+    // out of the address, and let a sentence-final `a@b.co.` still link.
+    while word
+        .chars()
+        .last()
+        .is_some_and(|c| matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']'))
+    {
+        word = &word[..word.len() - 1];
+    }
     let at = word.find('@')?;
     let (user, domain) = (&word[..at], &word[at + 1..]);
     if user.is_empty() || !domain.contains('.') || domain.starts_with('.') || domain.ends_with('.')
@@ -1635,7 +1634,7 @@ mod tests {
             );
             assert_eq!(p.tables.len(), 1, "the quote table must be extracted");
             assert_eq!(
-                p.tables.values().next().unwrap().header,
+                p.tables.values().next().expect("table").header,
                 vec!["a".to_string(), "b".to_string()]
             );
             assert!(
@@ -1648,6 +1647,16 @@ mod tests {
                 "content after the quote must survive: {:?}",
                 p.markdown
             );
+        }
+
+        #[test]
+        fn quoted_table_cells_expand_links_like_top_level_cells() {
+            let p = prepare(
+                "> | a |\n> | - |\n> | [r] |\n\n[r]: https://example.com\n",
+                std::path::Path::new("/d"),
+            );
+            let spec = p.tables.values().next().expect("table");
+            assert_eq!(spec.rows[0][0], "[r](https://example.com)");
         }
     }
 
@@ -1685,6 +1694,14 @@ mod tests {
             let p = prepare("first line  \nsecond line\n", Path::new("/d"));
             let out = p.paragraphs.values().next().unwrap();
             assert!(out.contains("first line\\\nsecond line"), "{out:?}");
+        }
+
+        #[test]
+        fn trailing_hard_break_at_eof_leaves_no_backslash() {
+            let p = prepare("last line  \n", Path::new("/d"));
+            let out = p.paragraphs.values().next().unwrap();
+            assert!(!out.contains('\\'), "{out:?}");
+            assert_eq!(out.trim_end(), "last line", "{out:?}");
         }
     }
 
@@ -2766,6 +2783,41 @@ mod tests {
                 "{out}"
             );
             assert!(out.contains("[a@b.co](mailto:a@b.co)"), "{out}");
+        }
+
+        #[test]
+        fn email_autolinks_trim_sentence_punctuation() {
+            let md = "mail a@b.co. and c@d.co, done\n";
+            let p = prepare(md, Path::new("/d"));
+            let out = p.paragraphs.values().next().unwrap();
+            assert!(out.contains("[a@b.co](mailto:a@b.co)."), "{out}");
+            assert!(out.contains("[c@d.co](mailto:c@d.co),"), "{out}");
+        }
+
+        #[test]
+        fn definitions_need_a_block_start_and_may_follow_each_other() {
+            // Line 0 is a block start; the second definition follows the first.
+            let p = prepare(
+                "[a]: https://a\n[b]: https://b\n\nuse [a] and [b]\n",
+                Path::new("/d"),
+            );
+            let out = p.paragraphs.values().next().unwrap();
+            assert_eq!(out, "use [a](https://a) and [b](https://b)");
+            assert!(!p.markdown.contains("[a]:"), "{:?}", p.markdown);
+
+            // A definition-looking line that continues a paragraph is text.
+            let p = prepare("text\n[r]: note\n", Path::new("/d"));
+            let out = p.paragraphs.values().next().unwrap();
+            assert!(out.contains("[r]: note"), "{out}");
+        }
+
+        #[test]
+        fn code_spans_skip_reference_and_autolink_rewriting() {
+            let md = "see ``[r] https://x.test`` and [r]\n\n[r]: https://example.com\n";
+            let p = prepare(md, Path::new("/d"));
+            let out = p.paragraphs.values().next().unwrap();
+            assert!(out.contains("``[r] https://x.test``"), "{out}");
+            assert!(out.contains("[r](https://example.com)"), "{out}");
         }
     }
 

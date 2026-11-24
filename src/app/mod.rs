@@ -78,6 +78,22 @@ fn apply_theme(ctx: &egui::Context, theme: Theme) {
     ctx.set_visuals(visuals);
 }
 
+/// Text styles scaled by the document zoom. Pure so the scaling can be tested
+/// without a window; the app caches the result by zoom and DPI.
+fn scaled_text_styles(
+    base: &std::collections::BTreeMap<egui::TextStyle, egui::FontId>,
+    zoom: f32,
+) -> std::collections::BTreeMap<egui::TextStyle, egui::FontId> {
+    base.iter()
+        .map(|(kind, font)| {
+            (
+                kind.clone(),
+                egui::FontId::new(font.size * zoom, font.family.clone()),
+            )
+        })
+        .collect()
+}
+
 fn parent_dir(path: &Path) -> &Path {
     path.parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -441,6 +457,11 @@ pub(crate) struct App {
     /// Set by `G`: jump to the bottom once the next layout reveals `max_y`.
     scroll_bottom: bool,
     applied_theme: Option<Theme>,
+    /// Zoom/DPI key the cached scaled text styles were built for.
+    styles_key: Option<(u32, i32)>,
+    /// Text styles scaled by the document zoom, built only when the key changes
+    /// and swapped into the panel for the duration of a frame.
+    styles: std::collections::BTreeMap<egui::TextStyle, egui::FontId>,
     keys: KeyState,
     /// One Ctrl+C Copy event per Ctrl hold; autorepeats are ignored.
     copy_guard: CopyGuard,
@@ -650,6 +671,8 @@ impl App {
             pad: None,
             scroll_bottom: false,
             applied_theme: Some(theme),
+            styles_key: None,
+            styles: std::collections::BTreeMap::new(),
             keys: KeyState::default(),
             copy_guard: CopyGuard::default(),
             select_press: None,
@@ -701,8 +724,7 @@ impl App {
             .reset(self.prepared.headings.clone());
         self.code.borrow_mut().reset(self.prepared.code.clone());
         // Old hits point into blocks that no longer exist.
-        self.search.borrow_mut().state.clear();
-        self.search.borrow_mut().selection.clear();
+        self.search.borrow_mut().reset();
         self.toc.reset();
         self.jump_to = None;
     }
@@ -789,12 +811,16 @@ impl App {
         }
     }
 
-    /// Jump to the index's selected heading and close the overlay.
+    /// Jump to the index's selected heading and close the overlay. An empty
+    /// index (no heading visible at the index depth) makes Enter a no-op, so the
+    /// overlay stays against the blank screen instead of closing for nothing.
     fn toc_jump(&mut self) {
-        if let Some(entry) = self.toc.selected_entry(&self.prepared.toc) {
-            if let Some(block) = self.search.borrow().heading_block(&entry.id) {
-                self.jump_to = Some(block);
-            }
+        let Some(entry) = self.toc.selected_entry(&self.prepared.toc) else {
+            return;
+        };
+        let id = entry.id.clone();
+        if let Some(block) = self.search.borrow().heading_block(&id) {
+            self.jump_to = Some(block);
         }
         self.toc.close();
     }
@@ -1249,6 +1275,9 @@ impl eframe::App for App {
         // If a release/focus-loss happened while the prompt/popup blocked the
         // pointer path, do not keep SelectArea drag-panning disabled.
         if !ui.input(|i| i.pointer.primary_down()) {
+            // A missed release must also stop edge auto-scroll, or the document
+            // keeps scrolling (and repainting) under whatever is open.
+            self.autoscroll = 0.0;
             let mut s = self.search.borrow_mut();
             if s.selection.dragging {
                 s.selection.dragging = false;
@@ -1468,13 +1497,20 @@ impl eframe::App for App {
         // The reading column this frame, reused by the popup after the document.
         let mut column = 0.0;
         egui::CentralPanel::default().show(ui, |ui| {
-            // Scale text with zoom so text and diagrams stay consistent.
+            // Scale text with zoom so text and diagrams stay consistent. The
+            // scaled map is rebuilt only when the zoom or the display density
+            // changes, then swapped in and back out, so a steady view does no
+            // per-frame clone or rebuild.
             let z = self.zoom;
-            let styles = ui.style().text_styles.clone();
-            ui.style_mut().text_styles = styles
-                .into_iter()
-                .map(|(kind, font)| (kind, egui::FontId::new(font.size * z, font.family)))
-                .collect();
+            let key = (
+                z.to_bits(),
+                (ui.ctx().pixels_per_point() * 100.0).round() as i32,
+            );
+            if self.styles_key != Some(key) {
+                self.styles_key = Some(key);
+                self.styles = scaled_text_styles(&ui.style().text_styles, z);
+            }
+            std::mem::swap(&mut ui.style_mut().text_styles, &mut self.styles);
             // The document paints its own selection. egui labels are still
             // selectable by default, so a drag would also select the invisible
             // auxiliary labels around the custom blocks and paint stray chips
@@ -1553,7 +1589,7 @@ impl eframe::App for App {
                         self.paragraphs.borrow_mut().begin_frame(col);
                         self.quotes.borrow_mut().begin_frame(col);
                         self.headings.borrow_mut().begin_frame(col);
-                        self.code.borrow_mut().begin_frame(col);
+                        self.code.borrow_mut().begin_frame(ui, col);
                         self.diagrams.borrow_mut().begin_frame(col);
                         self.images.borrow_mut().begin_frame(col, z);
                         self.search.borrow_mut().begin_frame();
@@ -1590,6 +1626,8 @@ impl eframe::App for App {
                 // Re-lay out next frame at the corrected offset.
                 ui.ctx().request_repaint();
             }
+            // Hand the per-frame map back so the next frame can reuse it.
+            std::mem::swap(&mut ui.style_mut().text_styles, &mut self.styles);
         });
         // Drawn last so the foreground overlay sits above the document. Images
         // and diagrams never share the overlay: whichever opened clears the
@@ -1838,6 +1876,25 @@ mod tests {
             apply_theme(&ctx, Theme::Dark);
             assert_eq!(ctx.theme(), egui::Theme::Dark);
             assert!(ctx.global_style().visuals.dark_mode);
+        }
+    }
+
+    mod styles {
+        use super::super::scaled_text_styles;
+        use std::collections::BTreeMap;
+
+        #[test]
+        fn scaling_multiplies_every_size_and_keeps_the_family() {
+            let mut base = BTreeMap::new();
+            base.insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
+            base.insert(egui::TextStyle::Monospace, egui::FontId::monospace(11.0));
+            let scaled = scaled_text_styles(&base, 2.0);
+            let body = scaled.get(&egui::TextStyle::Body).unwrap();
+            let mono = scaled.get(&egui::TextStyle::Monospace).unwrap();
+            assert_eq!(body.size, 28.0);
+            assert_eq!(mono.size, 22.0);
+            assert_eq!(body.family, egui::FontFamily::Proportional);
+            assert_eq!(mono.family, egui::FontFamily::Monospace);
         }
     }
 }
