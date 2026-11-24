@@ -589,7 +589,10 @@ fn paint_row_fill(
     let left = ui.cursor().min.x;
     let rect = egui::Rect::from_min_size(
         egui::Pos2::new(left - 2.0, row_top - spacing_y * 0.5),
-        egui::vec2(table_width + 4.0, height + spacing_y),
+        // Slightly taller than the measured row: Grid's own advance can be a
+        // couple of points larger, and the next row (or the table edge) paints
+        // over the overlap, so no hairline gap shows at wide window sizes.
+        egui::vec2(table_width + 4.0, height + spacing_y + 6.0),
     );
     ui.painter().rect_filled(rect, 0.0, fill);
 }
