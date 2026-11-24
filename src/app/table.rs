@@ -442,7 +442,7 @@ fn plain_text(md: &str) -> String {
         let next_prev_bang =
             matches!(run.kind, crate::justify::RunKind::Text) && run.text.ends_with('!');
         let mut text = run.text;
-        if !matches!(run.kind, crate::justify::RunKind::Code) {
+        if !run.kind.is_code() {
             text = crate::justify::strip_html(&text);
         }
         // `parse_inline` has no image rule: `![alt](u)` arrives as a literal

@@ -29,12 +29,22 @@ pub enum RunKind {
     BoldItalic,
     /// Inline code span.
     Code,
+    /// Inline code inside bold emphasis; keeps the code background but uses
+    /// the bold face.
+    BoldCode,
     /// Struck-through text.
     Strike,
     /// Link text, carrying the target URL.
     Link(String),
     /// A forced line break (`  ` + newline or `\\` + newline).
     Break,
+}
+
+impl RunKind {
+    /// Whether this run is an inline code span (bold or not).
+    pub(crate) fn is_code(&self) -> bool {
+        matches!(self, RunKind::Code | RunKind::BoldCode)
+    }
 }
 
 /// Parse the inline Markdown the viewer supports. Single left-to-right scan:
@@ -387,6 +397,7 @@ fn unescape(s: &str) -> String {
 fn combine(outer: &RunKind, inner: RunKind) -> RunKind {
     match (outer, inner) {
         (RunKind::Bold, RunKind::Text) => RunKind::Bold,
+        (RunKind::Bold, RunKind::Code) | (RunKind::BoldItalic, RunKind::Code) => RunKind::BoldCode,
         (RunKind::Bold, RunKind::Italic) | (RunKind::Italic, RunKind::Bold) => RunKind::BoldItalic,
         (RunKind::Bold, RunKind::BoldItalic) | (RunKind::Italic, RunKind::BoldItalic) => {
             RunKind::BoldItalic
@@ -528,7 +539,7 @@ pub fn search_text(md: &str) -> String {
     let mut out = String::new();
     for run in parse_inline(md) {
         match run.kind {
-            RunKind::Code => out.push_str(&run.text),
+            RunKind::Code | RunKind::BoldCode => out.push_str(&run.text),
             RunKind::Break => push_collapsed(&mut out, " "),
             _ => push_collapsed(&mut out, &run.text),
         }
@@ -734,7 +745,7 @@ fn fragment_plan(runs: &[Run]) -> Vec<PlanFragment> {
             open = false;
             continue;
         }
-        if matches!(run.kind, RunKind::Code) {
+        if run.kind.is_code() {
             if run.text.is_empty() {
                 // An empty code span paints nothing and owns no word.
                 continue;
@@ -840,6 +851,13 @@ fn push_frag(
             Stroke::NONE,
         ),
         RunKind::Code => (mono.clone(), text_color, false, Stroke::NONE, Stroke::NONE),
+        RunKind::BoldCode => (
+            crate::fonts::bold_font(mono.size),
+            text_color,
+            false,
+            Stroke::NONE,
+            Stroke::NONE,
+        ),
         RunKind::Strike => (
             body.clone(),
             text_color,
@@ -1324,14 +1342,12 @@ fn paint_at(
                 selection_span = Some((lo, hi));
             }
         }
-        let has_code = placements
-            .iter()
-            .any(|(frag, _)| frag.kind == RunKind::Code);
+        let has_code = placements.iter().any(|(frag, _)| frag.kind.is_code());
         for pass in row_passes(has_code, selection_span.is_some()) {
             match pass {
                 RowPass::CodeBackgrounds => {
                     for (frag, frag_x) in &placements {
-                        if frag.kind == RunKind::Code {
+                        if frag.kind.is_code() {
                             paint_code_background(ui, &painter, Pos2::new(*frag_x, y), frag);
                         }
                     }
@@ -1741,7 +1757,7 @@ mod tests {
             assert!(runs.iter().any(|r| r.kind == RunKind::Bold));
             assert!(runs
                 .iter()
-                .any(|r| r.kind == RunKind::Code && r.text == "document_folder_id"));
+                .any(|r| r.kind.is_code() && r.text == "document_folder_id"));
             let joined = runs.iter().map(|r| r.text.as_str()).collect::<String>();
             assert!(!joined.contains("**"), "{joined:?}");
         }
@@ -1792,12 +1808,10 @@ mod tests {
                 runs.iter().map(|r| r.text.as_str()).collect::<String>(),
                 "use a**b here"
             );
-            assert!(runs
-                .iter()
-                .any(|r| r.kind == RunKind::Code && r.text == "a**b"));
+            assert!(runs.iter().any(|r| r.kind.is_code() && r.text == "a**b"));
             assert!(!runs
                 .iter()
-                .any(|r| r.kind != RunKind::Code && r.text.contains('*')));
+                .any(|r| !r.kind.is_code() && r.text.contains('*')));
         }
 
         #[test]
