@@ -853,7 +853,7 @@ fn push_frag(
         RunKind::Code => (mono.clone(), text_color, false, Stroke::NONE, Stroke::NONE),
         RunKind::BoldCode => (
             crate::fonts::bold_font(mono.size),
-            text_color,
+            strong,
             false,
             Stroke::NONE,
             Stroke::NONE,
