@@ -165,7 +165,7 @@ impl CodeUi {
         }
         let painter = ui.painter().clone();
         let content = egui::Rect::from_min_size(rect.min, egui::vec2(width, content_height));
-        painter.rect_filled(content, 2.0, ui.visuals().code_bg_color);
+        painter.rect_filled(content, 0.0, ui.visuals().code_bg_color);
         // Like a table row: only the visual code line under the pointer gets the
         // theme's hover fill, painted above the block background and below the
         // glyphs/selection.
@@ -214,7 +214,7 @@ impl CodeUi {
                 let w = line_width(ui, &slice(&text, mark_start, mark_end), &mono);
                 painter.rect_filled(
                     egui::Rect::from_min_size(egui::Pos2::new(x, pos.y), egui::vec2(w, row_h)),
-                    2.0,
+                    0.0,
                     selection_fill,
                 );
             }
@@ -224,7 +224,7 @@ impl CodeUi {
                 let fill = if is_current { current_fill } else { other_fill };
                 painter.rect_filled(
                     egui::Rect::from_min_size(egui::Pos2::new(x, pos.y), egui::vec2(w, row_h)),
-                    2.0,
+                    0.0,
                     fill,
                 );
             }

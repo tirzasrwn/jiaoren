@@ -1570,7 +1570,7 @@ fn link_spans(placements: &[(&Frag, f32)]) -> Vec<(f32, f32, Color32)> {
 fn paint_code_background(ui: &egui::Ui, painter: &egui::Painter, pos: Pos2, frag: &Frag) {
     let size = frag.galley.size();
     let bg = Rect::from_min_size(pos, size).expand2(egui::vec2(1.0, 0.0));
-    painter.rect_filled(bg, 2.0, ui.visuals().code_bg_color);
+    painter.rect_filled(bg, 0.0, ui.visuals().code_bg_color);
 }
 
 /// Schemes a link may copy to the clipboard. Everything else (javascript:,
