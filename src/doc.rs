@@ -1112,14 +1112,23 @@ fn is_block_boundary(line: &str) -> bool {
         None => true,
         Some(b'#') | Some(b'>') => true,
         // Bullets stop a run — but a delimiter row (`--- | ---`) is part of the
-        // table, not a bullet.
+        // table, not a bullet, and `**bold**` / `*italic*` are inline markup.
+        // A real list marker needs whitespace (or end of line) after it.
         Some(b'-') | Some(b'+') | Some(b'*') => {
             let cells = split_row(t);
-            !(cells.len() > 1 && cells.iter().all(|c| is_delim_cell(c)))
+            if cells.len() > 1 && cells.iter().all(|c| is_delim_cell(c)) {
+                return false;
+            }
+            let rest = &t[1..];
+            rest.is_empty() || rest.starts_with(char::is_whitespace)
         }
         Some(_) => {
             let digits = t.len() - t.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-            digits > 0 && digits < t.len() && matches!(t.as_bytes()[digits], b'.' | b')')
+            if digits == 0 || digits >= t.len() || !matches!(t.as_bytes()[digits], b'.' | b')') {
+                return false;
+            }
+            let rest = &t[digits + 1..];
+            rest.is_empty() || rest.starts_with(char::is_whitespace)
         }
     }
 }
@@ -1655,6 +1664,13 @@ mod tests {
     mod quote_lazy {
         use super::super::prepare;
         use std::path::Path;
+
+        #[test]
+        fn bold_lead_quote_uses_the_custom_renderer() {
+            let p = prepare("> **Case:** one\n> **Dokumen:** two\n", Path::new("/d"));
+            assert!(p.quotes.values().next().is_some(), "quote extracted");
+            assert!(p.markdown.contains("<mdquote"), "{:?}", p.markdown);
+        }
 
         #[test]
         fn unindented_line_stays_inside_a_quote() {
