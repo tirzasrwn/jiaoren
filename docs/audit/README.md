@@ -11,7 +11,7 @@ input), robustness (does it survive broken input), and scale (does it stay respo
 | `00-smoke-test.md` | Quick sanity check: common Markdown plus 18 Mermaid diagram types. Not an audit by itself. | ~14 KB | First, to confirm the basics work |
 | `audit-01-conformance.md` | Main audit. CommonMark and GFM conformance, Unicode, security probes, advanced Mermaid. Every test has an ID and an EXPECT line. Includes a result sheet. | ~26 KB | Core audit |
 | `audit-02-hostile.md` | Malformed and adversarial input: deep nesting, ReDoS probes, control and bidi characters, mixed line endings, DOM clobbering names, oversized and cyclic Mermaid diagrams, unclosed fences. | ~53 KB | After Part 1 passes |
-| `audit-03-performance.md` | Generated stress file: 400 sections, 2000-row table, 60 code blocks, 121 Mermaid diagrams, 3000-item list, hundreds of footnotes, links and images, a 2 MB paragraph, 400 math expressions. | ~3.2 MB | Last, with profiling on |
+| `audit-03-performance.md` | Generated stress fixture (kept in the repo, not generated at test time): 400 sections, 2000-row table, 60 code blocks, 121 Mermaid diagrams, 3000-item list, hundreds of footnotes, links and images, a 2 MB paragraph, 400 math expressions. | ~3.2 MB | Last, with profiling on |
 
 ## What each file tells you
 
@@ -50,27 +50,31 @@ of the file confirms the whole document rendered.
 
 ## How to run
 
-1. Render `00-smoke-test.md` and confirm basics and diagrams work.
-2. Open `audit-01-conformance.md`. For each test ID, compare the output with its **EXPECT** line and record
-   PASS or FAIL in the Result Sheet (Section F).
-3. Run the security check: after rendering Part 1 and Part 2, open the browser console and run
+jiaoren is a native egui window: it has no document DOM, no document JavaScript and no browser
+console. The web-oriented probes in Parts 1 and 2 therefore pass by *not* executing anywhere — the
+check is visual, not a console query.
 
-   ```js
-   Object.keys(window).filter(k => k.startsWith('__xss'))
-   ```
+1. `jr docs/audit/00-smoke-test.md` — confirm basics and diagrams render.
+2. `jr docs/audit/audit-01-conformance.md`. For each test ID, compare the output with its **EXPECT**
+   line and record PASS or FAIL in the Result Sheet (Section F).
+3. Security probes (`T-SC-*`): render Part 1 and Part 2 and confirm on screen that
+   - no dialog, popup or external window appears;
+   - no `__xss*` text is ever executed as script (the probes only exist as visible text/Markdown);
+   - `javascript:` and `data:` links do nothing when clicked (only `http(s)`/`mailto` links are
+     clickable and copy their URL);
+   - Mermaid renders inside the suspended-animation SVG (`securityLevel: strict`, HTML labels off)
+     and a hostile diagram shows a contained error box instead of running page script.
 
-   **EXPECT:** an empty array. Any entry means a probe executed, and its name tells you which one.
-4. Also check prototype pollution after Part 2:
-
-   ```js
-   ({}).polluted === undefined && ({}).polluted2 === undefined
-   ```
-
-   **EXPECT:** `true`.
-5. Render `audit-02-hostile.md`. The app must not crash or hang, and `END-OF-PART-2` must appear inside a code block.
-6. Render `audit-03-performance.md` with the profiler on. Record time to first paint, time to fully rendered,
-   scroll smoothness, memory, and whether the UI stays responsive.
-7. Switch light and dark theme and confirm all diagrams re-render (test `T-MM-095`).
+   The canary names (`__xss_*`, `polluted`) only identify the probe in the source; there is nowhere
+   for them to run in a native viewer, so prototype-pollution checks apply to the Mermaid page, not
+   the reader.
+4. Render `audit-02-hostile.md`. The app must not crash or hang; `END-OF-PART-2` must appear inside a
+   code block. Each Mermaid render is killed after a 20 s wall-clock timeout, so a pathological
+   diagram leaves an error box rather than a stuck worker.
+5. Render `audit-03-performance.md` and record time to first paint, time to fully rendered, scroll
+   smoothness, memory, and responsiveness. `JIAOREN_IMAGE_TRACE=1` prints image decode/upload
+   timings when profiling.
+6. Switch light and dark theme and confirm diagrams re-render (test `T-MM-095`).
 
 ## Important notes
 

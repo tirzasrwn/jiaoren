@@ -1,10 +1,16 @@
 //! Locate Chromium, download mermaid.js once, and cache diagram renders as SVG.
 
 use std::fs;
+use std::io::Read;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 use std::sync::Once;
+use std::time::{Duration, Instant};
+
+/// Wall-clock limit for one Chromium render. `--virtual-time-budget` bounds the
+/// page, not the process: a hung browser would otherwise burn a worker forever.
+const RENDER_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Mermaid version used for diagram renders. Shown by `jr --version`.
 pub const MERMAID_VERSION: &str = "12.3.0";
@@ -12,11 +18,21 @@ pub const MERMAID_VERSION: &str = "12.3.0";
 /// Where `ensure_mermaid_js` downloads that version from.
 pub const MERMAID_URL: &str = "https://cdn.jsdelivr.net/npm/mermaid@12.3.0/dist/mermaid.min.js";
 
+/// SHA-256 of [`MERMAID_URL`] at [`MERMAID_VERSION`]. Verified before the
+/// download is renamed into place.
+const MERMAID_SHA256: &str = "336df803d87a38b70a01e736e666c8f7601d2ce42f5e47c8fafe5d721074b9a3";
+
+/// Hard cap for the mermaid.js download (the pinned file is about 5.3 MB).
+const MAX_MERMAID_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Hard cap for the Chrome for Testing zip (the pinned archive is about 126 MB).
+const MAX_CHROMIUM_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Cache-key version: bump when the render page or mermaid version changes.
 pub const RENDER_VERSION: &str = "6-mermaid12.3.0-htmlLabelsOff-2x-strict-svg-catppuccin-firacode";
 
 /// Colour theme used for the window and diagram renders.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Theme {
     /// Light palette (Catppuccin Latte).
     Light,
@@ -88,8 +104,8 @@ fn older_than(
 
 /// Delete the jiaoren cache from the command line. `all` also removes the
 /// managed Chromium; otherwise the browser is kept so the next document does
-/// not need a 132 MB re-download. The font cache is always kept: it is an
-/// asset, not a derived render. Returns `(bytes, files)` removed.
+/// not need a 132 MB re-download. Fonts are kept for the same reason unless
+/// `all` is set, which removes everything. Returns `(bytes, files)` removed.
 pub fn clean_cache(all: bool) -> std::io::Result<(u64, usize)> {
     clean_cache_dir(&cache_root(), all)
 }
@@ -180,6 +196,74 @@ fn prune_chromium_versions(dir: &Path, now: std::time::SystemTime) {
 /// Strip the wrapper from the render page's error text and decode the HTML
 /// entities it carries, so the window shows `Parse error ...` rather than
 /// `id="out">ERR:...&gt;`.
+/// Set once Chromium reports that the OS cannot sandbox it (Ubuntu 23.10+
+/// AppArmor restricts unprivileged user namespaces), so later renders skip the
+/// doomed sandboxed attempt.
+static SANDBOX_UNAVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Headless Chromium command for one render page. The sandbox stays on unless
+/// the OS cannot provide one, or the user forces `--no-sandbox`.
+fn chromium_command(chromium: &Path, html: &Path, sandbox: bool) -> Command {
+    let mut cmd = Command::new(chromium);
+    cmd.arg("--headless")
+        .arg("--disable-gpu")
+        // No network egress from the render page; diagram source is untrusted.
+        .arg("--host-resolver-rules=MAP * ~NOTFOUND")
+        .arg("--dump-dom")
+        .arg("--virtual-time-budget=5000")
+        .arg(format!("file://{}", html.display()));
+    if !sandbox {
+        cmd.arg("--no-sandbox");
+    }
+    cmd
+}
+
+/// Run `cmd` with captured output, killing it once `limit` elapses.
+fn output_with_timeout(cmd: &mut Command, limit: Duration) -> std::io::Result<Output> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("no stdout pipe"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("no stderr pipe"))?;
+    // Drain both pipes concurrently so a chatty render cannot fill a pipe and
+    // deadlock the wait loop.
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
+        buf
+    });
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill()?;
+            child.wait()?;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "render timed out",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    Ok(Output {
+        status,
+        stdout: out_reader.join().unwrap_or_default(),
+        stderr: err_reader.join().unwrap_or_default(),
+    })
+}
+
 fn clean_error(raw: &str) -> String {
     let text = raw
         .strip_prefix("id=\"out\">ERR:")
@@ -200,7 +284,7 @@ impl Renderer {
     /// Renderer using the user cache dir, with no Chromium discovered yet.
     pub fn new() -> Self {
         let cache_dir = cache_root();
-        fs::create_dir_all(&cache_dir).ok();
+        ensure_private_dir(&cache_dir).ok();
         // Startup cleanup: renders and scripts from older Mermaid or Chromium
         // versions are never read again.
         prune_cache(&cache_dir);
@@ -269,17 +353,7 @@ impl Renderer {
         let page = build_html(&self.mermaid_js, source, theme);
         fs::write(&html, &page).map_err(|e| RenderError::HtmlWrite(e.to_string()))?;
 
-        let out = Command::new(&chromium)
-            .arg("--headless")
-            .arg("--no-sandbox")
-            .arg("--disable-gpu")
-            // No network egress from the render page; diagram source is untrusted.
-            .arg("--host-resolver-rules=MAP * ~NOTFOUND")
-            .arg("--dump-dom")
-            .arg("--virtual-time-budget=5000")
-            .arg(format!("file://{}", html.display()))
-            .output()
-            .map_err(|e| RenderError::Spawn(format!("{}: {e}", chromium.display())))?;
+        let out = self.run_chromium(&chromium, &html)?;
 
         let _ = fs::remove_file(&html);
 
@@ -316,6 +390,27 @@ impl Renderer {
         Ok(svg)
     }
 
+    /// Run Chromium on the render page, keeping its sandbox when the OS allows
+    /// it. Retries with `--no-sandbox` only when Chromium itself reports that no
+    /// usable sandbox exists.
+    fn run_chromium(&self, chromium: &Path, html: &Path) -> Result<Output, RenderError> {
+        let forced = std::env::var_os("JIAOREN_CHROMIUM_NO_SANDBOX").is_some();
+        let sandbox = !forced && !SANDBOX_UNAVAILABLE.get().copied().unwrap_or(false);
+        let mut cmd = chromium_command(chromium, html, sandbox);
+        let out = output_with_timeout(&mut cmd, RENDER_TIMEOUT)
+            .map_err(|e| RenderError::Spawn(format!("{}: {e}", chromium.display())))?;
+        if sandbox
+            && !out.status.success()
+            && String::from_utf8_lossy(&out.stderr).contains("No usable sandbox")
+        {
+            let _ = SANDBOX_UNAVAILABLE.set(true);
+            let mut cmd = chromium_command(chromium, html, false);
+            return output_with_timeout(&mut cmd, RENDER_TIMEOUT)
+                .map_err(|e| RenderError::Spawn(format!("{}: {e}", chromium.display())));
+        }
+        Ok(out)
+    }
+
     fn write_err(&self, id: &str, theme: Theme, msg: &str) {
         let p = self.err_path(id, theme);
         self.atomic_write(&p, msg.as_bytes()).ok();
@@ -349,13 +444,16 @@ impl Renderer {
             std::process::id()
         ));
         progress(&format!("mermaid: downloading 0% ({MERMAID_VERSION})…"));
-        let downloaded = crate::download::curl(MERMAID_URL, &tmp, 60, &mut |pct| {
-            progress(&format!("mermaid: downloading {pct}% ({MERMAID_VERSION})…"));
-        });
+        let downloaded =
+            crate::download::curl(MERMAID_URL, &tmp, 60, MAX_MERMAID_BYTES, &mut |pct| {
+                progress(&format!("mermaid: downloading {pct}% ({MERMAID_VERSION})…"));
+            });
         if let Err(e) = downloaded {
             let _ = fs::remove_file(&tmp);
             return Err(RenderError::MermaidJs(e));
         }
+        crate::download::verify_sha256(&tmp, MERMAID_SHA256, "mermaid.min.js")
+            .map_err(RenderError::MermaidJs)?;
         fs::rename(&tmp, &self.mermaid_js)
             .map_err(|e| RenderError::MermaidJs(format!("rename mermaid js: {e}")))?;
         progress("mermaid: ready");
@@ -369,14 +467,83 @@ pub(crate) fn cache_root() -> PathBuf {
 }
 
 fn dirs_cache() -> PathBuf {
-    std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .unwrap_or_else(std::env::temp_dir)
+    if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME") {
+        return PathBuf::from(xdg);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join(".cache");
+    }
+    private_cache_base()
+}
+
+/// Without XDG/HOME, use a per-UID directory under the system temp dir. It is
+/// created 0700 and checked for ownership, so another local user cannot plant
+/// `mermaid.min.js` or a Chromium binary in it.
+fn private_cache_base() -> PathBuf {
+    let uid = effective_uid();
+    let base = std::env::temp_dir().join(format!("jiaoren-cache-{uid}"));
+    if ensure_private_dir(&base).is_ok() {
+        return base;
+    }
+    // A pre-created/wrong-owner path is unusable. Fall back to a per-process
+    // path so a later cache error is still confined to this instance.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let fallback = std::env::temp_dir().join(format!(
+        "jiaoren-cache-{uid}-{}-{nanos}",
+        std::process::id()
+    ));
+    let _ = ensure_private_dir(&fallback);
+    fallback
+}
+
+fn effective_uid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// Create `path` (recursively, 0700) and verify it is a real directory owned by
+/// the current user, with no group/other access.
+fn ensure_private_dir(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    match builder.create(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(format!("create {}: {e}", path.display())),
+    }
+    let meta = fs::symlink_metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
+    if !meta.is_dir() {
+        return Err(format!("{} is not a directory", path.display()));
+    }
+    if meta.uid() != effective_uid() {
+        return Err(format!(
+            "{} is owned by uid {}, not {}",
+            path.display(),
+            meta.uid(),
+            effective_uid()
+        ));
+    }
+    if meta.permissions().mode() & 0o777 != 0o700 {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("chmod {}: {e}", path.display()))?;
+    }
+    let meta = fs::symlink_metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
+    if meta.permissions().mode() & 0o777 != 0o700 {
+        return Err(format!("{} is not private", path.display()));
+    }
+    Ok(())
 }
 
 /// Chrome for Testing version jiaoren downloads and manages itself.
 pub const MANAGED_VERSION: &str = "158.0.8127.36";
+
+/// SHA-256 of the `chrome-headless-shell-linux64.zip` for [`MANAGED_VERSION`].
+/// Verified before `unzip` ever sees the archive.
+const CHROMIUM_SHA256: &str = "2d3a23017323c54fd457a678e4351f895c4076d8050e39d5aa6247f93448b73a";
 
 /// PATH names tried, in order, before the managed install.
 const CHROMIUM_NAMES: [&str; 4] = [
@@ -564,12 +731,15 @@ fn install_chromium_with(
     progress(&format!(
         "chromium: downloading 0% ({MANAGED_VERSION}, 132 MB)…"
     ));
-    crate::download::curl(&url, &zip, 600, &mut |pct| {
+    crate::download::curl(&url, &zip, 600, MAX_CHROMIUM_BYTES, &mut |pct| {
         progress(&format!(
             "chromium: downloading {pct}% ({MANAGED_VERSION})…"
         ));
     })
     .map_err(|e| fail("download", e))?;
+    progress("chromium: verifying sha256…");
+    crate::download::verify_sha256(&zip, CHROMIUM_SHA256, "chrome-headless-shell zip")
+        .map_err(|e| fail("verify archive", e))?;
     progress("chromium: verifying archive…");
     let status = Command::new("unzip")
         .arg("-t")
@@ -825,6 +995,31 @@ mod tests {
                 "no <svg> in chromium output"
             );
             assert_eq!(RenderError::Raster("e".into()).to_string(), "write svg: e");
+        }
+
+        #[test]
+        fn cache_without_home_or_xdg_uses_a_private_per_uid_base() {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let _guard = env_lock();
+            let _xdg = EnvVar::unset("XDG_CACHE_HOME");
+            let _home = EnvVar::unset("HOME");
+            let root = cache_root();
+            let base = root.parent().expect("cache root has a parent");
+            assert_eq!(base, private_cache_base().as_path());
+            assert_ne!(base, std::env::temp_dir().as_path());
+            assert_ne!(base.file_name(), Some(std::ffi::OsStr::new("jiaoren")));
+            let uid = effective_uid().to_string();
+            assert!(
+                base.file_name()
+                    .is_some_and(|n| n.to_string_lossy().contains(uid.as_str())),
+                "fallback must be per-uid: {}",
+                base.display()
+            );
+            let meta = fs::symlink_metadata(base).unwrap();
+            assert!(meta.is_dir());
+            assert_eq!(meta.uid(), effective_uid());
+            assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+            let _ = fs::remove_dir_all(base);
         }
 
         #[test]

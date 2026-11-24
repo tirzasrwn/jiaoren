@@ -2,6 +2,7 @@
 //! the justify module, with the library as a fallback for images and raw HTML.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
@@ -9,6 +10,10 @@ use crate::doc::TableSpec;
 
 use super::geometry::{cap_column_widths, table_column_widths};
 use super::searchui::SearchUi;
+
+/// Cached column widths: the layout key (available width, DPI, font size) and
+/// the widths themselves.
+type WidthCache = (i32, i32, i32, Vec<f32>);
 
 /// Shared, interior-mutable state backing the `<mdtable>` render path in the
 /// html hook. Holds the parsed specs, a per-cell `CommonMarkCache` separate
@@ -19,7 +24,9 @@ pub(crate) struct TableUi {
     tables: HashMap<String, TableSpec>,
     cell_cache: CommonMarkCache,
     occurrences: HashMap<String, usize>,
-    widths: HashMap<String, (i32, i32, i32, Vec<f32>)>,
+    widths: HashMap<String, WidthCache>,
+    /// Visible text of every cell, built once per table id and shared per frame.
+    cell_texts: HashMap<String, Rc<[Rc<str>]>>,
     /// Set when a table's `copy csv` button was clicked this frame.
     copied: bool,
     /// Row under the pointer per table id and occurrence, from the previous
@@ -39,6 +46,7 @@ impl TableUi {
             cell_cache: CommonMarkCache::default(),
             occurrences: HashMap::new(),
             widths: HashMap::new(),
+            cell_texts: HashMap::new(),
             copied: false,
             hover: RowHover::default(),
             row_heights: HashMap::new(),
@@ -55,6 +63,7 @@ impl TableUi {
         self.cell_cache = CommonMarkCache::default();
         self.occurrences.clear();
         self.widths.clear();
+        self.cell_texts.clear();
         self.copied = false;
         self.hover = RowHover::default();
         self.row_heights.clear();
@@ -66,11 +75,11 @@ impl TableUi {
     }
 
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, id: &str, search: &mut SearchUi) {
-        // Clone so the spec outlives the immutable borrow while `cell_cache` is
-        // borrowed mutably below. Tables are small; the clone is the cheap fix.
-        let spec = match self.tables.get(id) {
-            Some(s) => s.clone(),
-            None => return, // unknown id: draw nothing, never panic
+        // Borrow each field separately: the spec, widths, cell texts and row
+        // heights are read here while the cell cache and hover state are written
+        // below, so no whole-table clone is needed.
+        let Some(spec) = self.tables.get(id) else {
+            return; // unknown id: draw nothing, never panic
         };
         let ncols = spec
             .header
@@ -81,119 +90,71 @@ impl TableUi {
         }
         // Right gutter kept free in the header's last cell for the copy icon.
         const COPY_INSET: f32 = 18.0;
-        let occurrence = self.occurrences.entry(id.to_string()).or_insert(0);
-        let current = *occurrence;
-        *occurrence += 1;
-        let occurrence = current;
+        let occurrence = next_occurrence(&mut self.occurrences, id);
         let available = ui.available_width();
         let spacing = ui.spacing().item_spacing.x;
-        let widths = self.column_widths(ui, id, &spec, ncols, available, spacing);
+        let widths = column_widths(&mut self.widths, ui, id, spec, ncols, available, spacing);
+        let texts = cell_texts(&mut self.cell_texts, id, spec, ncols);
         // A distinct id per occurrence so two identical tables never share state.
         let grid_id = ui.id().with(("mdtable", id, occurrence));
         let dark = ui.visuals().dark_mode;
         let height_key = (id.to_string(), occurrence);
-        let prev_heights = self
-            .row_heights
-            .get(&height_key)
-            .cloned()
-            .unwrap_or_default();
-        let mut frame_heights: Vec<f32> = Vec::new();
+        let prev_heights: &[f32] = self.row_heights.get(&height_key).map_or(&[], Vec::as_slice);
         let table_width = widths.iter().sum::<f32>() + spacing * (ncols.saturating_sub(1)) as f32;
+        // One hover fill only: a live selection owns the visual.
+        let selecting = search.selection.dragging || search.selection.is_active();
+        let hovered = if selecting {
+            None
+        } else {
+            self.hover.get(id, occurrence)
+        };
+        let mut frame_heights: Vec<f32> = Vec::new();
+        let mut row_rects: Vec<egui::Rect> = Vec::new();
         // The html hook runs in a wrapping left-to-right layout, where a bare
         // `add_space` would advance horizontally; the vertical wrapper turns the
         // padding into real space below the grid.
-        ui.vertical(|ui| {
-            // The row colour paints the full table width behind the cells, so
-            // the header reads as one bar instead of per-cell chips; data rows
-            // alternate from the first one. The row under the pointer uses the
-            // hover fill, applied from the previous frame's row rects.
-            let hovered = self.hover.get(id, occurrence);
-            let spacing_y = ui.spacing().item_spacing.y;
-            let mut row_rects: Vec<egui::Rect> = Vec::new();
-            egui::Grid::new(grid_id).show(ui, |ui| {
-                let row_top = ui.cursor().min.y;
-                paint_row_fill(
-                    ui,
-                    row_top,
-                    table_width,
-                    spacing_y,
-                    prev_heights.first().copied(),
-                    0,
-                    hovered,
-                    dark,
-                );
-                for i in 0..ncols {
-                    let cell = spec.header.get(i).map_or("", String::as_str);
-                    // One block per cell, row-major; the row top is enough
-                    // to jump to it. Cells routed to the library are not
-                    // searchable, so they are not recorded.
-                    let (ranges, current, block) = if cell_needs_library_fallback(cell) {
-                        (Vec::new(), None, None)
-                    } else {
-                        let block = search.record(ui, crate::justify::search_text(cell));
-                        let (ranges, current) = search.highlights(block);
-                        (ranges, current, Some(block))
-                    };
-                    let selection = block.and_then(|b| search.selection_range(b));
-                    // The last header cell leaves room for the overlaid copy
-                    // icon, so a long header wraps instead of running under it.
-                    let inset = if i + 1 == ncols { COPY_INSET } else { 0.0 };
-                    let painted = render_cell(
-                        ui,
-                        cell_width(&widths, i),
-                        inset,
-                        cell,
-                        &mut self.cell_cache,
-                        &ranges,
-                        current,
-                        selection,
-                    );
-                    if let Some(block) = block {
-                        search.set_height(block, painted.height);
-                        search.set_rect(block, painted.rect);
-                        search.set_char_map(block, painted.chars);
-                        for rect in painted.interactives {
-                            search.add_control(rect, egui::CursorIcon::PointingHand);
-                        }
-                    }
-                }
-                let bounds = ui.min_rect();
-                frame_heights.push((bounds.bottom() - row_top).max(0.0));
-                row_rects.push(hover_rect(
-                    egui::Rect::from_min_max(
-                        egui::pos2(bounds.left(), row_top),
-                        egui::pos2(bounds.right(), bounds.bottom()),
-                    ),
-                    spacing_y,
-                ));
-                ui.end_row();
-                for (data_index, row) in spec.rows.iter().enumerate() {
+        let copied = ui
+            .vertical(|ui| {
+                // The row colour paints the full table width behind the cells, so
+                // the header reads as one bar instead of per-cell chips; data rows
+                // alternate from the first one. The row under the pointer uses the
+                // hover fill, applied from the previous frame's row rects. While a
+                // selection is active the hover fill is suppressed so it does not
+                // paint a second colour under the selection.
+                let spacing_y = ui.spacing().item_spacing.y;
+                egui::Grid::new(grid_id).show(ui, |ui| {
                     let row_top = ui.cursor().min.y;
-                    let row_index = data_index + 1;
                     paint_row_fill(
                         ui,
                         row_top,
                         table_width,
                         spacing_y,
-                        prev_heights.get(row_index).copied(),
-                        row_index,
+                        prev_heights.first().copied(),
+                        0,
                         hovered,
                         dark,
                     );
                     for i in 0..ncols {
-                        let cell = row.get(i).map_or("", String::as_str);
+                        let cell = spec.header.get(i).map_or("", String::as_str);
+                        // One block per cell, row-major; the row top is enough
+                        // to jump to it. Cells routed to the library are not
+                        // searchable, so they are not recorded.
                         let (ranges, current, block) = if cell_needs_library_fallback(cell) {
                             (Vec::new(), None, None)
                         } else {
-                            let block = search.record(ui, crate::justify::search_text(cell));
+                            let text = texts.get(i).map_or_else(|| Rc::from(""), Rc::clone);
+                            let block = search.record(ui, text);
                             let (ranges, current) = search.highlights(block);
                             (ranges, current, Some(block))
                         };
                         let selection = block.and_then(|b| search.selection_range(b));
+                        // The last header cell leaves room for the overlaid copy
+                        // icon, so a long header wraps instead of running under it.
+                        let inset = if i + 1 == ncols { COPY_INSET } else { 0.0 };
                         let painted = render_cell(
                             ui,
-                            cell_width(&widths, i),
-                            0.0,
+                            cell_width(widths, i),
+                            inset,
                             cell,
                             &mut self.cell_cache,
                             &ranges,
@@ -219,78 +180,154 @@ impl TableUi {
                         spacing_y,
                     ));
                     ui.end_row();
+                    for (data_index, row) in spec.rows.iter().enumerate() {
+                        let row_top = ui.cursor().min.y;
+                        let row_index = data_index + 1;
+                        paint_row_fill(
+                            ui,
+                            row_top,
+                            table_width,
+                            spacing_y,
+                            prev_heights.get(row_index).copied(),
+                            row_index,
+                            hovered,
+                            dark,
+                        );
+                        for i in 0..ncols {
+                            let cell = row.get(i).map_or("", String::as_str);
+                            let (ranges, current, block) = if cell_needs_library_fallback(cell) {
+                                (Vec::new(), None, None)
+                            } else {
+                                let idx = row_index * ncols + i;
+                                let text = texts.get(idx).map_or_else(|| Rc::from(""), Rc::clone);
+                                let block = search.record(ui, text);
+                                let (ranges, current) = search.highlights(block);
+                                (ranges, current, Some(block))
+                            };
+                            let selection = block.and_then(|b| search.selection_range(b));
+                            let painted = render_cell(
+                                ui,
+                                cell_width(widths, i),
+                                0.0,
+                                cell,
+                                &mut self.cell_cache,
+                                &ranges,
+                                current,
+                                selection,
+                            );
+                            if let Some(block) = block {
+                                search.set_height(block, painted.height);
+                                search.set_rect(block, painted.rect);
+                                search.set_char_map(block, painted.chars);
+                                for rect in painted.interactives {
+                                    search.add_control(rect, egui::CursorIcon::PointingHand);
+                                }
+                            }
+                        }
+                        let bounds = ui.min_rect();
+                        frame_heights.push((bounds.bottom() - row_top).max(0.0));
+                        row_rects.push(hover_rect(
+                            egui::Rect::from_min_max(
+                                egui::pos2(bounds.left(), row_top),
+                                egui::pos2(bounds.right(), bounds.bottom()),
+                            ),
+                            spacing_y,
+                        ));
+                        ui.end_row();
+                    }
+                });
+                // Overlay the copy icon inside the table's top-right corner instead
+                // of giving it a row of its own: a button row above the grid would
+                // push the table down and make the gap above differ from the gap
+                // below. The backdrop is the header fill so the rear sheet does not
+                // cut through it.
+                let bounds = ui.min_rect();
+                let icon = egui::Rect::from_min_size(
+                    egui::pos2(bounds.right() - 16.0, bounds.top() + 2.0),
+                    egui::vec2(14.0, 14.0),
+                );
+                let (_, header_fill) = table_fills(dark);
+                let mut clicked = false;
+                let (button, control) = super::widgets::copy_button_at(
+                    ui,
+                    icon,
+                    ui.id().with(("table-copy", id, occurrence)),
+                    "Copy table as CSV",
+                    header_fill,
+                );
+                search.add_control(control, egui::CursorIcon::Default);
+                if button {
+                    ui.ctx().copy_text(table_to_csv(spec));
+                    clicked = true;
                 }
-            });
-            let changed = frame_heights.len() != prev_heights.len()
-                || frame_heights
-                    .iter()
-                    .zip(&prev_heights)
-                    .any(|(a, b)| (a - b).abs() > 0.5);
-            self.row_heights.insert(height_key, frame_heights);
-            if changed {
-                ui.ctx().request_repaint();
-            }
-            let next = ui
-                .ctx()
-                .pointer_hover_pos()
-                .and_then(|pos| hovered_row(&row_rects, pos));
-            if self.hover.get(id, occurrence) != next {
-                match next {
-                    Some(row) => self.hover.set(id, occurrence, row),
-                    None => self.hover.clear(id, occurrence),
-                }
-                ui.ctx().request_repaint();
-            }
-            // Overlay the copy icon inside the table's top-right corner instead
-            // of giving it a row of its own: a button row above the grid would
-            // push the table down and make the gap above differ from the gap
-            // below. The backdrop is the header fill so the rear sheet does not
-            // cut through it.
-            let bounds = ui.min_rect();
-            let icon = egui::Rect::from_min_size(
-                egui::pos2(bounds.right() - 16.0, bounds.top() + 2.0),
-                egui::vec2(14.0, 14.0),
-            );
-            let (_, header_fill) = table_fills(dark);
-            let (clicked, control) = super::widgets::copy_button_at(
-                ui,
-                icon,
-                ui.id().with(("table-copy", id, occurrence)),
-                "Copy table as CSV",
-                header_fill,
-            );
-            search.add_control(control, egui::CursorIcon::Default);
-            if clicked {
-                ui.ctx().copy_text(table_to_csv(&spec));
-                self.copied = true;
-            }
-            // Same bottom gap as a paragraph, so table-to-paragraph and
-            // paragraph-to-table read as one rhythm.
-            ui.add_space(crate::justify::block_gap(ui));
-        });
-    }
-
-    /// Content-proportional widths for one table, cached by id and layout so
-    /// the text measurement runs only when the column width, DPI or zoom
-    /// changes.
-    fn column_widths(
-        &mut self,
-        ui: &egui::Ui,
-        id: &str,
-        spec: &TableSpec,
-        ncols: usize,
-        available: f32,
-        spacing: f32,
-    ) -> Vec<f32> {
-        let available_key = available.round() as i32;
-        let ppp_key = (ui.ctx().pixels_per_point() * 100.0).round() as i32;
-        let body = egui::TextStyle::Body.resolve(ui.style());
-        let font_key = (body.size * 100.0).round() as i32;
-        if let Some((a, p, f, widths)) = self.widths.get(id) {
-            if *a == available_key && *p == ppp_key && *f == font_key {
-                return widths.clone();
-            }
+                // Same bottom gap as a paragraph, so table-to-paragraph and
+                // paragraph-to-table read as one rhythm.
+                ui.add_space(crate::justify::block_gap(ui));
+                clicked
+            })
+            .inner;
+        // Heights and hover seed the next frame; write them once the read
+        // borrows used by the draw have ended.
+        let changed = frame_heights.len() != prev_heights.len()
+            || frame_heights
+                .iter()
+                .zip(prev_heights)
+                .any(|(a, b)| (a - b).abs() > 0.5);
+        self.row_heights.insert(height_key, frame_heights);
+        if changed {
+            ui.ctx().request_repaint();
         }
+        let next = ui
+            .ctx()
+            .pointer_hover_pos()
+            .and_then(|pos| hovered_row(&row_rects, pos));
+        if self.hover.get(id, occurrence) != next {
+            match next {
+                Some(row) => self.hover.set(id, occurrence, row),
+                None => self.hover.clear(id, occurrence),
+            }
+            ui.ctx().request_repaint();
+        }
+        self.copied |= copied;
+    }
+}
+
+/// Next occurrence index for a table id this frame. Allocates only on the first
+/// sighting, unlike `entry(id.to_string())`.
+fn next_occurrence(occurrences: &mut HashMap<String, usize>, id: &str) -> usize {
+    match occurrences.get_mut(id) {
+        Some(count) => {
+            let occurrence = *count;
+            *count += 1;
+            occurrence
+        }
+        None => {
+            occurrences.insert(id.to_string(), 1);
+            0
+        }
+    }
+}
+
+/// Content-proportional widths for one table, cached by id and layout so the
+/// text measurement runs only when the column width, DPI or zoom changes. The
+/// cached slice is returned by reference: no per-frame `Vec` clone.
+fn column_widths<'a>(
+    widths: &'a mut HashMap<String, WidthCache>,
+    ui: &egui::Ui,
+    id: &str,
+    spec: &TableSpec,
+    ncols: usize,
+    available: f32,
+    spacing: f32,
+) -> &'a [f32] {
+    let available_key = available.round() as i32;
+    let ppp_key = (ui.ctx().pixels_per_point() * 100.0).round() as i32;
+    let body = egui::TextStyle::Body.resolve(ui.style());
+    let font_key = (body.size * 100.0).round() as i32;
+    let cached = widths
+        .get(id)
+        .is_some_and(|(a, p, f, _)| *a == available_key && *p == ppp_key && *f == font_key);
+    if !cached {
         let target = (available - spacing * (ncols - 1) as f32).max(0.0);
         let max = if ncols == 1 { target } else { 0.6 * target };
         let desired: Vec<f32> = (0..ncols)
@@ -304,14 +341,38 @@ impl TableUi {
                     .min(max)
             })
             .collect();
-        let widths = table_column_widths(&desired, available, spacing, 80.0);
-        let widths = cap_column_widths(&widths, max);
-        self.widths.insert(
-            id.to_string(),
-            (available_key, ppp_key, font_key, widths.clone()),
-        );
-        widths
+        let cols = table_column_widths(&desired, available, spacing, 80.0);
+        let cols = cap_column_widths(&cols, max);
+        widths.insert(id.to_string(), (available_key, ppp_key, font_key, cols));
     }
+    widths.get(id).map_or(&[][..], |(_, _, _, cols)| &cols[..])
+}
+
+/// Visible text of every cell of one table, row-major with the header first,
+/// built once per table id and shared per frame. Cells routed to the library
+/// keep an empty string; they are never recorded.
+fn cell_texts<'a>(
+    cache: &'a mut HashMap<String, Rc<[Rc<str>]>>,
+    id: &str,
+    spec: &TableSpec,
+    ncols: usize,
+) -> &'a [Rc<str>] {
+    if !cache.contains_key(id) {
+        let mut texts: Vec<Rc<str>> = Vec::with_capacity((spec.rows.len() + 1) * ncols);
+        for row in std::iter::once(&spec.header).chain(spec.rows.iter()) {
+            for i in 0..ncols {
+                let cell = row.get(i).map_or("", String::as_str);
+                let text = if cell_needs_library_fallback(cell) {
+                    Rc::from("")
+                } else {
+                    Rc::from(crate::justify::search_text(cell))
+                };
+                texts.push(text);
+            }
+        }
+        cache.insert(id.to_string(), Rc::from(texts));
+    }
+    cache.get(id).map_or(&[][..], |texts| &texts[..])
 }
 
 /// Vertical breathing room around a block: three quarters of a body row reads
@@ -692,8 +753,10 @@ fn render_cell(
 mod tests {
     mod table {
         use super::super::cell_needs_library_fallback;
+        use super::super::cell_texts;
         use super::super::hover_rect;
         use super::super::hovered_row;
+        use super::super::next_occurrence;
         use super::super::row_fill;
         use super::super::row_fill_hover;
         use super::super::table_fills;
@@ -702,6 +765,7 @@ mod tests {
         use super::super::visible_text;
         use super::super::RowHover;
         use crate::doc::TableSpec;
+        use std::collections::HashMap;
 
         fn spec(header: &[&str], rows: &[&[&str]]) -> TableSpec {
             TableSpec {
@@ -851,6 +915,33 @@ mod tests {
             assert!(cell_needs_library_fallback("a<br>b"));
             assert!(!cell_needs_library_fallback("**bold** and `code`"));
             assert!(!cell_needs_library_fallback("src/db/schema.ts:293-311"));
+        }
+
+        #[test]
+        fn occurrences_advance_per_id_and_reset_cheaply() {
+            let mut occurrences = HashMap::new();
+            assert_eq!(next_occurrence(&mut occurrences, "a"), 0);
+            assert_eq!(next_occurrence(&mut occurrences, "a"), 1);
+            assert_eq!(next_occurrence(&mut occurrences, "b"), 0);
+            occurrences.clear();
+            assert_eq!(next_occurrence(&mut occurrences, "a"), 0);
+        }
+
+        #[test]
+        fn cell_texts_are_row_major_and_built_once() {
+            let s = spec(&["**h1**", "h2"], &[&["`a`", "b"], &["c"]]);
+            let mut cache = HashMap::new();
+            let texts = cell_texts(&mut cache, "t", &s, 2);
+            assert_eq!(texts.len(), 6);
+            assert_eq!(&*texts[0], "h1");
+            assert_eq!(&*texts[2], "a");
+            assert_eq!(&*texts[4], "c");
+            // A missing cell keeps the row stride; the cache wins over a changed
+            // spec under the same id.
+            let changed = spec(&["changed"], &[]);
+            let again = cell_texts(&mut cache, "t", &changed, 2);
+            assert_eq!(again.len(), 6);
+            assert_eq!(&*again[1], "h2");
         }
     }
 }

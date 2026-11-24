@@ -115,7 +115,7 @@ fn slice(text: &str, start: usize, end: usize) -> String {
 /// are the anchor tail, whole intermediate blocks and the focus head, joined by
 /// newlines. Reversed drags are normalized. Empty edge segments are skipped so
 /// a selection ending exactly at a block boundary has no spurious blank line.
-pub fn selected_text(blocks: &[String], sel: &SelectionState) -> Option<String> {
+pub fn selected_text<S: AsRef<str>>(blocks: &[S], sel: &SelectionState) -> Option<String> {
     let (start, end) = sel.normalized()?;
     if start == end {
         return Some(String::new());
@@ -125,6 +125,7 @@ pub fn selected_text(blocks: &[String], sel: &SelectionState) -> Option<String> 
         if index < start.block || index > end.block {
             continue;
         }
+        let text = text.as_ref();
         let len = text.chars().count();
         let from = if index == start.block {
             start.char.min(len)
@@ -223,6 +224,15 @@ mod tests {
             assert_eq!(
                 selected_text(&b, &sel((2, 5), (0, 4))).as_deref(),
                 Some("two\nmiddle\nthree")
+            );
+        }
+
+        #[test]
+        fn shared_text_blocks_copy_the_same_way() {
+            let b: Vec<std::rc::Rc<str>> = vec!["one two".into(), "three".into()];
+            assert_eq!(
+                selected_text(&b, &sel((0, 4), (1, 2))).as_deref(),
+                Some("two\nth")
             );
         }
 

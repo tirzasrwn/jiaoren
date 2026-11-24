@@ -94,14 +94,26 @@ struct Decoded {
     target: [u32; 2],
 }
 
-/// One worker request: decode `path` and downscale it for the layout in effect
-/// when it was queued.
+/// One worker request.
+enum JobKind {
+    /// Read `path` and downscale it for the layout in effect when it was queued.
+    Decode {
+        path: PathBuf,
+        column: f32,
+        zoom: f32,
+        ppp: f32,
+    },
+    /// Re-resize an already decoded source (zoom changed); never runs on the
+    /// UI thread.
+    Resize {
+        source: Arc<RgbaImage>,
+        target: [u32; 2],
+    },
+}
+
 struct Job {
     key: ImageKey,
-    path: PathBuf,
-    column: f32,
-    zoom: f32,
-    ppp: f32,
+    kind: JobKind,
 }
 
 type WorkerMsg = (ImageKey, Result<Decoded, String>);
@@ -117,8 +129,13 @@ enum LoadState {
 pub(crate) struct ImageUi {
     images: HashMap<String, ImageSpec>,
     /// Decoded RGBA sources keyed by `(id, mtime)`, kept so popup zoom can
-    /// re-resize without re-reading the file.
+    /// re-resize without re-reading the file. Bounded by `MAX_SOURCE_BYTES`.
     sources: HashMap<ImageKey, Arc<RgbaImage>>,
+    /// Recency order for `sources`, oldest first. The front is popped when the
+    /// aggregate cap is exceeded.
+    source_order: VecDeque<ImageKey>,
+    /// Sources used this frame: the trimmer must not evict an image on screen.
+    touched_sources: HashSet<ImageKey>,
     /// Uploaded textures keyed the same way, downscaled to the display size.
     textures: HashMap<ImageKey, TextureEntry>,
     /// Decode failures, cached so the same bad file is not retried every frame.
@@ -154,6 +171,8 @@ impl ImageUi {
         ImageUi {
             images,
             sources: HashMap::new(),
+            source_order: VecDeque::new(),
+            touched_sources: HashSet::new(),
             textures: HashMap::new(),
             failures: HashMap::new(),
             pending: HashSet::new(),
@@ -175,6 +194,8 @@ impl ImageUi {
     pub(crate) fn begin_frame(&mut self, column: f32, zoom: f32) {
         self.column = column;
         self.zoom = zoom;
+        self.touched_sources.clear();
+        self.trim_sources();
     }
 
     /// Drop all per-document decode state on reload. Running workers keep their
@@ -182,6 +203,8 @@ impl ImageUi {
     pub(crate) fn reset(&mut self, images: HashMap<String, ImageSpec>) {
         self.images = images;
         self.sources.clear();
+        self.source_order.clear();
+        self.touched_sources.clear();
         self.textures.clear();
         self.failures.clear();
         lock(&self.queue).clear();
@@ -223,22 +246,14 @@ impl ImageUi {
             match result {
                 Ok(decoded) => {
                     let (iw, ih) = decoded.source.dimensions();
-                    let image = color_image(decoded.resized.as_ref().unwrap_or(&decoded.source));
-                    let handle = ctx.load_texture(
-                        texture_name(&key, decoded.target),
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    );
-                    let entry = TextureEntry {
-                        handle,
-                        tex_size: decoded.target,
-                        intrinsic: (iw as f32, ih as f32),
-                    };
+                    let pixels = decoded.resized.as_ref().unwrap_or(&decoded.source);
+                    let entry =
+                        upload_texture(ctx, &key, pixels, decoded.target, (iw as f32, ih as f32));
                     trace(format_args!(
                         "texture {} {}x{} (source {iw}x{ih})",
                         key.0, decoded.target[0], decoded.target[1]
                     ));
-                    self.sources.insert(key.clone(), decoded.source);
+                    self.remember_source(key.clone(), decoded.source);
                     self.textures.insert(key, entry);
                 }
                 Err(msg) => {
@@ -259,29 +274,35 @@ impl ImageUi {
     fn maybe_spawn(&mut self) {
         while self.active_workers < 4 {
             let job = lock(&self.queue).pop_front();
-            let Some(Job {
-                key,
-                path,
-                column,
-                zoom,
-                ppp,
-            }) = job
-            else {
+            let Some(Job { key, kind }) = job else {
                 break;
             };
             self.active_workers += 1;
             let tx = self.result_tx.clone();
             thread::spawn(move || {
                 let started = std::time::Instant::now();
-                trace(format_args!("decode start {}", path.display()));
-                let res = catch_worker("decode", || decode_and_resize(&path, column, zoom, ppp))
-                    .and_then(std::convert::identity);
+                let res = match kind {
+                    JobKind::Decode {
+                        path,
+                        column,
+                        zoom,
+                        ppp,
+                    } => {
+                        trace(format_args!("decode start {}", path.display()));
+                        catch_worker("decode", || decode_and_resize(&path, column, zoom, ppp))
+                            .and_then(std::convert::identity)
+                    }
+                    JobKind::Resize { source, target } => {
+                        catch_worker("image resize", || resize_source(source, target))
+                            .and_then(std::convert::identity)
+                    }
+                };
                 if let Err(msg) = &res {
-                    trace(format_args!("decode failed {}: {msg}", path.display()));
+                    trace(format_args!("image job failed {}: {msg}", key.0));
                 }
                 trace(format_args!(
-                    "decode done {} in {:?}",
-                    path.display(),
+                    "image job done {} in {:?}",
+                    key.0,
                     started.elapsed()
                 ));
                 let _ = tx.send((key, res));
@@ -527,7 +548,9 @@ impl ImageUi {
 
     /// Load or reuse the decode for `key`, then return a texture covering
     /// `display` (already in points). Enqueues a worker on a cache miss and
-    /// returns `Pending` instead of blocking the layout pass.
+    /// returns `Pending` instead of blocking the layout pass. Zoom-driven
+    /// re-resizes also run on a worker; the old texture stays until the new one
+    /// arrives.
     fn load_state(
         &mut self,
         ctx: &egui::Context,
@@ -543,48 +566,124 @@ impl ImageUi {
             return LoadState::Failed(msg.clone());
         }
         if let Some(entry) = self.textures.get(key).cloned() {
-            if let Some(source) = self.sources.get(key).cloned() {
-                let needed = texture_target(
-                    [source.width(), source.height()],
-                    display.unwrap_or(entry.intrinsic),
-                    ctx.pixels_per_point(),
-                );
-                if needs_resize(entry.tex_size, needed) {
-                    let entry = upload_texture(ctx, key, &source, needed);
-                    self.textures.insert(key.clone(), entry.clone());
-                    return LoadState::Ready(entry);
+            let intrinsic = self.intrinsic_for(key).unwrap_or(entry.intrinsic);
+            let needed = texture_target(
+                [intrinsic.0.max(1.0) as u32, intrinsic.1.max(1.0) as u32],
+                display.unwrap_or(entry.intrinsic),
+                ctx.pixels_per_point(),
+            );
+            if needs_resize(entry.tex_size, needed) && !self.pending.contains(key) {
+                if self.sources.contains_key(key) {
+                    self.touch_source(key);
+                    self.queue_resize(ctx, key, needed);
+                } else {
+                    // The aggregate cap evicted this source; decode it again so
+                    // the zoom step is not stuck on the small texture.
+                    self.queue_decode(ctx, key, spec);
                 }
             }
             return LoadState::Ready(entry);
         }
-        if let Some(source) = self.sources.get(key).cloned() {
+        if self.sources.contains_key(key) {
+            let intrinsic = self.intrinsic_for(key).unwrap_or((1.0, 1.0));
             let target = texture_target(
-                [source.width(), source.height()],
-                display.unwrap_or((source.width() as f32, source.height() as f32)),
+                [intrinsic.0.max(1.0) as u32, intrinsic.1.max(1.0) as u32],
+                display.unwrap_or(intrinsic),
                 ctx.pixels_per_point(),
             );
-            let entry = upload_texture(ctx, key, &source, target);
-            self.textures.insert(key.clone(), entry.clone());
-            return LoadState::Ready(entry);
+            self.touch_source(key);
+            if self.queue_resize(ctx, key, target) {
+                return LoadState::Pending;
+            }
         }
-        if !self.pending.contains(key) {
-            self.pending.insert(key.clone());
-            lock(&self.queue).push_back(Job {
-                key: key.clone(),
+        self.queue_decode(ctx, key, spec);
+        LoadState::Pending
+    }
+
+    /// Queue a resize of an already decoded source. No-op (returns false) when
+    /// the source is gone or a job for this key is already running.
+    fn queue_resize(&mut self, ctx: &egui::Context, key: &ImageKey, target: [u32; 2]) -> bool {
+        if self.pending.contains(key) {
+            return false;
+        }
+        let Some(source) = self.sources.get(key).cloned() else {
+            return false;
+        };
+        self.pending.insert(key.clone());
+        lock(&self.queue).push_back(Job {
+            key: key.clone(),
+            kind: JobKind::Resize { source, target },
+        });
+        self.maybe_spawn();
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        true
+    }
+
+    /// Queue a decode of `spec`'s file, once per key.
+    fn queue_decode(&mut self, ctx: &egui::Context, key: &ImageKey, spec: &ImageSpec) {
+        if self.pending.contains(key) {
+            return;
+        }
+        self.pending.insert(key.clone());
+        lock(&self.queue).push_back(Job {
+            key: key.clone(),
+            kind: JobKind::Decode {
                 path: PathBuf::from(&spec.src),
                 column: self.column,
                 zoom: self.zoom,
                 ppp: ctx.pixels_per_point(),
-            });
-            self.maybe_spawn();
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            },
+        });
+        self.maybe_spawn();
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+    }
+
+    /// Aggregate cap for decoded sources: individual images are bounded, a
+    /// document full of them is not.
+    const MAX_SOURCE_BYTES: usize = 192 * 1024 * 1024;
+
+    /// Store a freshly decoded source and trim the cache if the cap is over.
+    fn remember_source(&mut self, key: ImageKey, source: Arc<RgbaImage>) {
+        self.touch_source(&key);
+        self.sources.insert(key, source);
+        self.trim_sources();
+    }
+
+    /// Mark a source as recently used, so the trimmer keeps it.
+    fn touch_source(&mut self, key: &ImageKey) {
+        self.source_order.retain(|k| k != key);
+        self.source_order.push_back(key.clone());
+        self.touched_sources.insert(key.clone());
+    }
+
+    /// Drop the oldest off-screen sources until the aggregate cap holds. Their
+    /// textures stay; a later zoom re-decodes the file.
+    fn trim_sources(&mut self) {
+        let mut total: usize = self.sources.values().map(|s| s.as_raw().len()).sum();
+        while total > Self::MAX_SOURCE_BYTES {
+            let Some(index) = self
+                .source_order
+                .iter()
+                .position(|k| !self.touched_sources.contains(k))
+            else {
+                break;
+            };
+            let Some(old) = self.source_order.remove(index) else {
+                break;
+            };
+            if let Some(source) = self.sources.remove(&old) {
+                total -= source.as_raw().len();
+            }
         }
-        LoadState::Pending
     }
 
     /// Keep only `keep` for this image id: older mtimes and stale failures go.
     fn evict_other_versions(&mut self, keep: &ImageKey) {
         self.sources.retain(|key, _| key.0 != keep.0 || key == keep);
+        self.source_order
+            .retain(|key| key.0 != keep.0 || key == keep);
+        self.touched_sources
+            .retain(|key| key.0 != keep.0 || key == keep);
         self.textures
             .retain(|key, _| key.0 != keep.0 || key == keep);
         self.failures
@@ -684,27 +783,23 @@ fn color_image(rgba: &RgbaImage) -> egui::ColorImage {
     egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw())
 }
 
-/// Resize `source` to `target` and upload it. Runs on the UI thread only for a
-/// zoom-driven resize of an already decoded source; the initial decode and
-/// downscale run on a worker.
+/// Upload already-sized RGBA pixels to a texture. Resizing happens on a worker,
+/// never here.
 fn upload_texture(
     ctx: &egui::Context,
     key: &ImageKey,
-    source: &RgbaImage,
+    pixels: &RgbaImage,
     target: [u32; 2],
+    intrinsic: (f32, f32),
 ) -> TextureEntry {
     let started = std::time::Instant::now();
-    let (sw, sh) = source.dimensions();
-    let resized = (target != [sw, sh])
-        .then(|| image::imageops::resize(source, target[0], target[1], FilterType::Triangle));
-    let pixels = resized.as_ref().unwrap_or(source);
     let handle = ctx.load_texture(
         texture_name(key, target),
         color_image(pixels),
         egui::TextureOptions::LINEAR,
     );
     trace(format_args!(
-        "texture {} {}x{} (re-resize in {:?})",
+        "texture {} {}x{} (upload in {:?})",
         key.0,
         target[0],
         target[1],
@@ -713,8 +808,21 @@ fn upload_texture(
     TextureEntry {
         handle,
         tex_size: target,
-        intrinsic: (sw as f32, sh as f32),
+        intrinsic,
     }
+}
+
+/// Re-resize a decoded source on a worker thread.
+fn resize_source(source: Arc<RgbaImage>, target: [u32; 2]) -> Result<Decoded, String> {
+    let (w, h) = source.dimensions();
+    let resized = (target != [w, h]).then(|| {
+        image::imageops::resize(source.as_ref(), target[0], target[1], FilterType::Triangle)
+    });
+    Ok(Decoded {
+        source,
+        resized,
+        target,
+    })
 }
 
 /// Trace decode/upload timings when `JIAOREN_IMAGE_TRACE` is set. Kept tiny so

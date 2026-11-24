@@ -1,5 +1,7 @@
 # Audit Results — Part 2 (Hostile and Malformed Input)
 
+**Historical:** recorded against jiaoren 0.1.0 at the commit named below. Kept as-is; re-run the suite on the current version (see README) when re-scoring.
+
 **Environment:** jiaoren `6054524` (`./target/debug/jr`, `jiaoren 0.1.0`), native egui/egui_commonmark
 renderer; no document DOM and no document JavaScript. Mermaid `11.12.0` in headless Chromium
 `158.0.8127.36`, `securityLevel: strict`, render key

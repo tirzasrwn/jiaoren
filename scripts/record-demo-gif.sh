@@ -13,13 +13,19 @@ TMP_GIF="$OUT_GIF.tmp.gif"
 WIDTH=900
 HEIGHT=540
 FPS=15
-DURATION=26
+DURATION=32
 
 export DISPLAY=:0
 cd "$REPO"
 
 pkill -x jr 2>/dev/null || true
-sleep 0.6
+# Wait for any previous jiaoren window to disappear: a dying window keeps its
+# name for a moment and would be grabbed instead of the fresh one.
+for _ in $(seq 1 20); do
+  [ -z "$(xdotool search --name '^jiaoren$' 2>/dev/null || true)" ] && break
+  sleep 0.15
+done
+sleep 0.4
 
 i3-msg 'workspace 9' >/dev/null
 sleep 0.6
@@ -31,7 +37,8 @@ W=""
 for _ in $(seq 1 40); do
   for cand in $(xdotool search --pid "$JR_PID" 2>/dev/null || true) \
               $(xdotool search --name '^jiaoren$' 2>/dev/null || true); do
-    if [ "$(xdotool getwindowname "$cand" 2>/dev/null)" = "jiaoren" ]; then
+    if [ "$(xdotool getwindowname "$cand" 2>/dev/null)" = "jiaoren" ] \
+       && [ "$(xdotool getwindowpid "$cand" 2>/dev/null || true)" = "$JR_PID" ]; then
       W=$cand
       break
     fi
@@ -137,13 +144,13 @@ xdotool mousedown 1
 sleep 0.2
 for x in 140 210 280 350 420 455; do mx "$x" 112; sleep 0.1; done
 xdotool mouseup 1
-sleep 0.6
-xdotool key --clearmodifiers y
+# Releasing the drag already copies; keep the pause so the chip is visible.
 sleep 1.2
 if ! kill -0 "$JR_PID" 2>/dev/null; then
   echo "jr exited during selection" >&2
   exit 1
 fi
+# Esc clears the kept selection; a second Esc would quit.
 xdotool key --clearmodifiers Escape
 sleep 0.4
 
@@ -208,6 +215,13 @@ mx 400 201
 sleep 1.5
 xdotool key --clearmodifiers t
 sleep 1.2
+
+# 6. next/previous document in the folder
+ensure_focus
+xdotool key --clearmodifiers bracketright
+sleep 2.2
+xdotool key --clearmodifiers bracketleft
+sleep 1.6
 
 kill -INT "$REC" 2>/dev/null || true
 wait "$REC" 2>/dev/null || true

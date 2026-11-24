@@ -1,5 +1,7 @@
 # Audit Results — Part 0 (Smoke) + Part 1 (Conformance)
 
+**Historical:** recorded against jiaoren 0.1.0 at the commit named below. Kept as-is; re-run the suite on the current version (see README) when re-scoring.
+
 **Environment:** jiaoren `6054524` (`./target/debug/jr`, `jiaoren 0.1.0`), native egui renderer; Mermaid
 `11.12.0` headless Chromium, `securityLevel: strict`,
 `--host-resolver-rules=MAP * ~NOTFOUND`, render key

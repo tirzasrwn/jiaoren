@@ -122,14 +122,19 @@ impl SearchState {
     /// All hit ranges on `block`, in order, plus the index into that slice of
     /// the current match when it belongs to this block.
     pub fn block_highlights(&self, block: usize) -> (Vec<(usize, usize)>, Option<usize>) {
-        let mut ranges = Vec::new();
+        // `find_matches` emits hits in block order, so the block's hits are one
+        // contiguous run: binary-search it instead of scanning every hit.
+        let lo = self.hits.partition_point(|hit| hit.block < block);
+        let hi = lo
+            + self.hits[lo..]
+                .iter()
+                .take_while(|hit| hit.block == block)
+                .count();
+        let mut ranges = Vec::with_capacity(hi - lo);
         let mut current = None;
-        for (index, hit) in self.hits.iter().enumerate() {
-            if hit.block != block {
-                continue;
-            }
-            if index == self.current_match {
-                current = Some(ranges.len());
+        for (offset, hit) in self.hits[lo..hi].iter().enumerate() {
+            if lo + offset == self.current_match {
+                current = Some(offset);
             }
             ranges.push((hit.start, hit.end));
         }

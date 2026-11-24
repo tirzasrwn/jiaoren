@@ -62,7 +62,8 @@ impl ParagraphUi {
             });
             return;
         }
-        let block = search.record(ui, crate::justify::search_text(source));
+        let text = search.cached_text(id, || crate::justify::search_text(source));
+        let block = search.record(ui, text);
         let (ranges, current) = search.highlights(block);
         let selection = search.selection_range(block);
         let runs = crate::justify::parse_inline(source);

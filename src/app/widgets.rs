@@ -1,6 +1,6 @@
 //! Small painted controls shared by the render hooks.
 
-use egui::{Color32, CornerRadius, Id, Rect, Sense, Stroke, StrokeKind};
+use egui::{Color32, CornerRadius, Id, Key, Rect, Sense, Stroke, StrokeKind};
 
 /// The same icon at a caller-chosen rect, for overlaying a block corner without
 /// taking layout space. `id` must be unique per visible instance.
@@ -11,9 +11,19 @@ pub(crate) fn copy_button_at(
     tooltip: &str,
     backdrop: Color32,
 ) -> (bool, Rect) {
-    let response = ui.interact(rect, id, Sense::CLICK);
+    // `Sense::click()` is focusable, unlike `Sense::CLICK`, so the button can be
+    // reached with Tab and activated with Enter/Space as well as the mouse.
+    let response = ui.interact(rect, id, Sense::click());
+    // Give screen readers a button with a name; painted-only controls are
+    // otherwise invisible to the accessibility tree.
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), tooltip)
+    });
+    let activated = response.clicked()
+        || (response.has_focus()
+            && ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Space)));
     (
-        paint_copy_button(ui, rect, response, tooltip, backdrop),
+        paint_copy_button(ui, rect, response, activated, tooltip, backdrop),
         rect,
     )
 }
@@ -22,11 +32,12 @@ fn paint_copy_button(
     ui: &egui::Ui,
     rect: Rect,
     response: egui::Response,
+    activated: bool,
     tooltip: &str,
     backdrop: Color32,
 ) -> bool {
     let response = response.on_hover_text(tooltip);
-    let hovered = response.hovered();
+    let hovered = response.hovered() || response.has_focus();
     let visuals = ui.visuals();
     let hover_bg = visuals.widgets.hovered.weak_bg_fill;
     if hovered {
@@ -49,5 +60,5 @@ fn paint_copy_button(
     painter.rect_stroke(back, radius, stroke, StrokeKind::Inside);
     painter.rect_filled(front, radius, if hovered { hover_bg } else { backdrop });
     painter.rect_stroke(front, radius, stroke, StrokeKind::Inside);
-    response.clicked()
+    activated
 }

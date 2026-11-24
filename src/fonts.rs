@@ -11,6 +11,15 @@ pub const FAMILY: &str = "FiraCode Nerd Font";
 /// new cache dir and lets startup prune the old faces.
 pub const FONT_VERSION: &str = "3.4.0";
 
+/// SHA-256 of `FiraCodeNerdFont-Regular.ttf` at [`FONT_VERSION`].
+const REGULAR_SHA256: &str = "29b619655612cb273e034737408b9508a04beb63c1ddbdfaa9a6846c409c7a2e";
+
+/// SHA-256 of `FiraCodeNerdFont-Bold.ttf` at [`FONT_VERSION`].
+const BOLD_SHA256: &str = "594a51c86afb58c1160df286e45dc551eeeba4d5f0e6edb1c304fc43ab8a0a09";
+
+/// Hard cap for one font download (the pinned faces are about 2.5 MB each).
+const MAX_FONT_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Where the pinned FiraCode faces live in the nerd-fonts repository.
 fn font_base() -> String {
     format!("https://raw.githubusercontent.com/ryanoasis/nerd-fonts/v{FONT_VERSION}/patched-fonts/FiraCode")
@@ -143,13 +152,13 @@ pub fn download_cached(
         // Regular and Bold are roughly the same size: map each meter onto half
         // the bar so the second transfer never sits at a stalled 100%.
         let mut pct = |p: u8| progress(p.min(50));
-        download_face(&regular_url, &dir, &face(REGULAR), &mut pct)?;
+        download_face(&regular_url, &dir, &face(REGULAR), REGULAR_SHA256, &mut pct)?;
     }
     // Bold is optional: without it bold runs fall back to Regular.
     let bold_url = format!("{base}/Bold/{BOLD}.ttf");
     {
         let mut pct = |p: u8| progress(50 + p.min(50));
-        let _ = download_face(&bold_url, &dir, &face(BOLD), &mut pct);
+        let _ = download_face(&bold_url, &dir, &face(BOLD), BOLD_SHA256, &mut pct);
     }
     progress(100);
     let regular =
@@ -209,19 +218,23 @@ fn store_face(dir: &Path, dest: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// Download one face with `curl`, reporting the meter's percentage.
+/// Download one face with `curl`, verify its pinned hash, then atomically
+/// install it.
 fn download_face(
     url: &str,
     dir: &Path,
     name: &str,
+    expected_sha256: &str,
     progress: &mut impl FnMut(u8),
 ) -> Result<(), String> {
     let dest = dir.join(name);
     let tmp = dir.join(format!("{name}.dl-{}", std::process::id()));
-    if let Err(e) = crate::download::curl(url, &tmp, 120, &mut |pct| progress(pct)) {
+    if let Err(e) = crate::download::curl(url, &tmp, 120, MAX_FONT_BYTES, &mut |pct| progress(pct))
+    {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
+    crate::download::verify_sha256(&tmp, expected_sha256, name)?;
     let read = std::fs::read(&tmp);
     let _ = std::fs::remove_file(&tmp);
     let bytes = read.map_err(|e| format!("read download: {e}"))?;
@@ -351,6 +364,7 @@ mod tests {
         use super::super::*;
 
         #[test]
+        #[ignore = "needs local FiraCode Nerd Font + Noto CJK/Arabic installed"]
         fn finds_the_regular_face_on_this_machine() {
             let defs = fallback().expect("FiraCode Nerd Font is installed under ~/.fonts");
             assert!(defs.font_data.keys().any(|k| k.contains("FiraCode")));
@@ -367,6 +381,7 @@ mod tests {
         }
 
         #[test]
+        #[ignore = "needs local FiraCode Nerd Font + Noto CJK/Arabic installed"]
         fn fallbacks_cover_cjk_and_arabic() {
             let defs = fallback().expect("font installed");
             let proportional = &defs.families[&egui::FontFamily::Proportional];
@@ -386,6 +401,7 @@ mod tests {
         }
 
         #[test]
+        #[ignore = "needs local FiraCode Nerd Font + Noto CJK/Arabic installed"]
         fn bold_face_has_its_own_family_after_regular() {
             let defs = fallback().expect("font installed");
             let mono = &defs.families[&egui::FontFamily::Monospace];

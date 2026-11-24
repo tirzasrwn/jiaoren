@@ -6,7 +6,7 @@ fences drawn as real diagrams.
 
 Keyboard-first, almost no chrome, live-reloads when the file changes on disk.
 
-![Opening examples/demo.md: justified prose with inline code and links, dragging a phrase and `y` copying the selection, a vim-style `/` live search that highlights matches as you type with Ctrl+W erasing a word, Enter and `n` jumping between matches (spaces inside the query are highlighted), hovering a table row, clicking the table icon to copy CSV, searching for the diagram and opening it in the zoomable popup, the wrapped code block with line numbers, and the Catppuccin dark theme](docs/assets/demo.gif)
+![Opening examples/demo.md: justified prose with inline code and links, dragging a phrase and releasing it to copy, `]` opening the next note in the folder, a vim-style `/` live search that highlights matches as you type with Ctrl+W erasing a word, Enter and `n` jumping between matches (spaces inside the query are highlighted), hovering a table row, clicking the table icon to copy CSV, searching for the diagram and opening it in the zoomable popup, the wrapped code block with line numbers, and the Catppuccin dark theme](docs/assets/demo.gif)
 
 ## Why "jiaoren"?
 
@@ -38,11 +38,10 @@ jr --clean-cache --all    # also Chromium and cached fonts (~132 MB)
 
 - `--dark` — start with the dark theme.
 - `--clean-cache` — delete cached diagram renders and the downloaded
-  `mermaid.min.js`, then exit. The managed Chromium and cached fonts are kept;
-  add `--all` to remove them too. The downloaded font cache is always kept (it is an asset, not
-  a derived render). Startup prunes renders from older Mermaid/Chromium
-  versions and font versions other than the pinned one, and is safe while
-  other `jr` instances are running.
+  `mermaid.min.js`, then exit. The managed Chromium and downloaded fonts are
+  kept (a re-download is expensive); add `--all` to remove those too. Startup
+  prunes renders from older Mermaid/Chromium versions and font versions other
+  than the pinned one, and is safe while other `jr` instances are running.
 
 Colors are [Catppuccin](https://catppuccin.com/palette/): Latte for the light
 theme, Macchiato for the dark theme. Window chrome and mermaid diagrams use the
@@ -85,8 +84,10 @@ Mermaid diagram labels still need `FiraCode Nerd Font` installed system-wide.
 | `h` / `l`, `shift+←` / `shift+→` | pan left / right (for zoomed-in content) |
 | `t` | toggle light/dark theme |
 | `r` | reload from disk |
+| `]` / `[` | next / previous Markdown file in the same folder (wraps) |
+| `o` | open the link under the pointer in the browser |
 | `yy` | copy the whole document as Markdown |
-| drag | select text across blocks |
+| drag | select text across blocks; releasing the drag copies it |
 | `y` | copy the text selection; with no selection the first `y` arms `yy` |
 | `Tab` | heading index (depth 3): `j`/`k` move, `h`/`l` fold, `gg`/`G` first/last, `Enter`/`Space` jump, `t` theme |
 | `/` | search: type a pattern, `Enter` confirms and jumps to the first match |
@@ -95,6 +96,15 @@ Mermaid diagram labels still need `FiraCode Nerd Font` installed system-wide.
 | `?` | keyboard-shortcut overlay; `esc`, `q`, `?`, `ctrl+c` or a click closes it |
 | `esc` / `ctrl+c` | copy the selection, else cancel the prompt, else clear the search, else quit |
 | `q` | quit |
+
+`o` opens the hovered `http(s)`/`mailto` link with `$BROWSER`, else `xdg-open`,
+`gio open` or `sensible-browser`; other schemes stay inert. `]` and `[` step
+through the `.md`/`.markdown` files in the open document's folder, wrapping at
+both ends, and land at the top of the next file.
+
+Zoom and theme are saved to `$XDG_CONFIG_HOME/jiaoren/state.toml` (else
+`~/.config/jiaoren/state.toml`) whenever they change, so the next launch starts
+with the same view; `--dark` still wins over a saved light theme.
 
 `jr --keys` prints the same list to stdout, so the shortcuts are reachable
 without opening a document, and the in-viewer `?` overlay reads the same text.
@@ -114,8 +124,9 @@ around and scroll the current hit's block into view.
 
 Mouse: drag anywhere to pan the document in both axes (the wheel still
 scrolls, `gg` returns to the start). Dragging across text selects it; a plain
-click clears the selection. Ctrl+C and `y` both copy the selection, including
-while the drag button is still held, and the copy clears the highlight so the
+click clears the selection. Releasing a drag copies it; Ctrl+C and `y` also
+copy the selection, including while the drag button is still held, and the copy
+clears the highlight so the
 next Ctrl+C moves on to clearing the search or quitting. A plain click on a
 diagram or local image opens the zoom popup; dragging from it pans the document
 instead.
@@ -183,12 +194,14 @@ To point jiaoren at a different binary instead, set:
 export JIAOREN_CHROMIUM=/path/to/chrome
 ```
 
-There is no official hash for the pinned CfT artifact, so no artifact hash is
-verified: the pinned version only selects the download URL, and integrity is
-limited to `unzip -t` on the archive and a `--version` run of the extracted
-binary before it is published. Those are smoke checks, not a supply-chain
-guarantee. The download is validated in a temp directory and only then renamed
-into place, so a killed install leaves no half-written binary.
+jiaoren pins a SHA-256 for the Chrome for Testing zip, `mermaid.min.js`, and
+both managed font faces. Each download is hashed before it is renamed or
+unpacked; a mismatch deletes the temp file and reports the artifact and both
+digests. This is not a signature and does not vouch for the upstream host, but
+it rejects a body that differs from the pinned release. Downloads also have byte
+caps and abort if the transfer stalls. The Chromium download is validated in a
+temp directory and only then renamed into place, so a killed install leaves no
+half-written binary.
 
 If Chromium cannot be found or installed, the document still opens and a
 warning banner names the failing step; diagrams simply won't render.
@@ -242,7 +255,9 @@ line naming the path.
 
 Everything managed lives under `~/.cache/jiaoren/`: versioned FiraCode faces,
 chromium, `mermaid-<version>.min.js`, and the diagram SVGs (keyed by diagram
-content, theme and render version). Reopening a document is instant and
+content, theme and render version). If neither `XDG_CACHE_HOME` nor `HOME` is
+set, the cache goes in a per-UID directory under the system temp dir, created
+with mode `0700` and checked for ownership. Reopening a document is instant and
 diagrams stay sharp at any zoom.
 
 First-run downloads (fonts, Chromium, mermaid.js) run in the background while
@@ -254,7 +269,7 @@ Clear the cache from the CLI:
 
 ```bash
 jr --clean-cache          # diagram renders + mermaid.js
-jr --clean-cache --all    # also the managed Chromium
+jr --clean-cache --all    # also the managed Chromium and downloaded fonts
 ```
 
 Startup also prunes renders and scripts from older Mermaid/Chromium versions.

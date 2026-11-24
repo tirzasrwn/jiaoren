@@ -92,9 +92,17 @@ impl QuoteUi {
                         let line_start = start;
                         let line_len = line.chars().count();
                         start += line_len + 1;
-                        let (local_ranges, local_current) =
-                            clip_with_current(&ranges, current, line_start, line_len);
-                        let local_sel = clip(&sel_ranges, line_start, line_len);
+                        let mapped = crate::justify::local_ranges(line_start, line, &ranges);
+                        let local_ranges: Vec<(usize, usize)> =
+                            mapped.iter().map(|&(s, e, _)| (s, e)).collect();
+                        let local_current = mapped
+                            .iter()
+                            .position(|&(_, _, index)| Some(index) == current);
+                        let local_sel: Vec<(usize, usize)> =
+                            crate::justify::local_ranges(line_start, line, &sel_ranges)
+                                .into_iter()
+                                .map(|(s, e, _)| (s, e))
+                                .collect();
                         let runs = crate::justify::parse_inline(line);
                         let indent = *depth as f32 * gap;
                         let painted = ui
@@ -163,40 +171,4 @@ impl QuoteUi {
             search.set_height(block, rect.height());
         }
     }
-}
-
-/// Clip ranges to one line and report the local index of `current`.
-fn clip_with_current(
-    ranges: &[(usize, usize)],
-    current: Option<usize>,
-    start: usize,
-    len: usize,
-) -> (Vec<(usize, usize)>, Option<usize>) {
-    let end = start + len;
-    let mut out = Vec::new();
-    let mut local_current = None;
-    for (index, &(s, e)) in ranges.iter().enumerate() {
-        let s = s.max(start);
-        let e = e.min(end);
-        if s < e {
-            if current == Some(index) {
-                local_current = Some(out.len());
-            }
-            out.push((s - start, e - start));
-        }
-    }
-    (out, local_current)
-}
-
-/// Clip global highlight ranges to one line and shift them to local offsets.
-fn clip(ranges: &[(usize, usize)], start: usize, len: usize) -> Vec<(usize, usize)> {
-    let end = start + len;
-    ranges
-        .iter()
-        .filter_map(|&(s, e)| {
-            let s = s.max(start);
-            let e = e.min(end);
-            (s < e).then(|| (s - start, e - start))
-        })
-        .collect()
 }

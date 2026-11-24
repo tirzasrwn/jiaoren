@@ -27,14 +27,24 @@ pub(crate) struct RasterJob {
 /// images. Huge diagrams are scaled down instead of uploaded at full size.
 pub(crate) const MAX_TEXTURE_SIDE: u32 = 16384;
 
-/// `scale` reduced so neither side exceeds [`MAX_TEXTURE_SIDE`].
+/// Total RGBA pixels allowed per raster (32 MiB at 4 bytes per pixel). The side
+/// cap alone still allows a 16384×16384 = 1 GiB texture.
+pub(crate) const MAX_TEXTURE_PIXELS: f32 = 32_000_000.0;
+
+/// `scale` reduced so neither side exceeds [`MAX_TEXTURE_SIDE`] and the pixel
+/// budget is respected.
 pub(crate) fn capped_scale(w: f32, h: f32, scale: f32) -> f32 {
     let longest = w.max(h) * scale;
-    if longest <= MAX_TEXTURE_SIDE as f32 {
+    let mut scale = if longest <= MAX_TEXTURE_SIDE as f32 {
         scale
     } else {
         scale * (MAX_TEXTURE_SIDE as f32 / longest)
+    };
+    let pixels = w * h * scale * scale;
+    if pixels > MAX_TEXTURE_PIXELS {
+        scale *= (MAX_TEXTURE_PIXELS / pixels).sqrt();
     }
+    scale
 }
 
 /// Some SVGs (Mermaid C4/class links) use `xlink:href` without declaring the
@@ -151,5 +161,21 @@ mod tests {
             );
             let _ = std::fs::remove_file(&p);
         }
+    }
+}
+
+#[cfg(test)]
+mod pixel_budget {
+    use super::{capped_scale, MAX_TEXTURE_PIXELS};
+
+    #[test]
+    fn huge_square_is_clipped_to_the_pixel_budget() {
+        let scale = capped_scale(16384.0, 16384.0, 1.0);
+        assert!(16384.0 * 16384.0 * scale * scale <= MAX_TEXTURE_PIXELS * 1.001);
+    }
+
+    #[test]
+    fn small_diagram_keeps_its_scale() {
+        assert_eq!(capped_scale(800.0, 600.0, 2.0), 2.0);
     }
 }

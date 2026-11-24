@@ -40,6 +40,7 @@ https://example.com/autolink work too.
 | Copy document | `yy` | Markdown |
 | Theme | `t` | Catppuccin |
 | Quit | `Ctrl+C` | `q` closes the popup |
+| Next note | `]` | same folder, then `[` back |
 
 ## Image
 

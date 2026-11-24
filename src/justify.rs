@@ -2,6 +2,7 @@
 //! epaint has no justification, so each word is laid out on its own and the
 //! leftover column width is divided between the gaps of every line but the last.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use egui::text::{LayoutJob, TextFormat};
@@ -34,8 +35,9 @@ pub enum RunKind {
     BoldCode,
     /// Struck-through text.
     Strike,
-    /// Link text, carrying the target URL.
-    Link(String),
+    /// Link text, carrying the target URL. Shared so cloning a run per
+    /// painted fragment is a refcount bump, not a string copy.
+    Link(Rc<str>),
     /// A forced line break (`  ` + newline or `\\` + newline).
     Break,
 }
@@ -94,13 +96,13 @@ pub fn parse_inline(md: &str) -> Vec<Run> {
         }
 
         if c == '`' {
-            if let Some(end) = rest[1..].find('`') {
+            if let Some((start, end, used)) = code_span_at(rest) {
                 flush_text(&mut runs, &mut text);
                 runs.push(Run {
-                    text: rest[1..1 + end].to_string(),
+                    text: rest[start..end].to_string(),
                     kind: RunKind::Code,
                 });
-                i += end + 2;
+                i += used;
                 continue;
             }
             text.push('`');
@@ -273,11 +275,40 @@ fn delimiter_can_close(s: &str, at: usize, len: usize, ch: char) -> bool {
     true
 }
 
+/// Length of the backtick run at the start of `s` (0 when it starts with
+/// anything else).
+fn backtick_run(s: &str) -> usize {
+    s.bytes().take_while(|&b| b == b'`').count()
+}
+
+/// The code span at the start of `s` as `(interior_start, interior_end, used)`.
+/// The closing run must have exactly the opener's length (CommonMark), so
+/// `` ``a`b`` `` is one span and `` `a` `` does not close it.
+fn code_span_at(s: &str) -> Option<(usize, usize, usize)> {
+    let open = backtick_run(s);
+    if open == 0 {
+        return None;
+    }
+    let mut i = open;
+    while i < s.len() {
+        let rest = &s[i..];
+        let run = backtick_run(rest);
+        if run == open {
+            return Some((open, i, i + run));
+        }
+        let Some(c) = rest.chars().next() else {
+            break;
+        };
+        i += if run > 0 { run } else { c.len_utf8() };
+    }
+    None
+}
+
 /// Length of a code span at the start of `s` (`None` when `s` does not start
-/// with a backtick or the span is unterminated).
-fn code_span_len(s: &str) -> Option<usize> {
-    let rest = s.strip_prefix('`')?;
-    Some(rest.find('`')? + 2)
+/// with a backtick or the span is unterminated). Shared with the document
+/// preparser so reference/autolink rewriting also skips code spans.
+pub(crate) fn code_span_len(s: &str) -> Option<usize> {
+    code_span_at(s).map(|(_, _, used)| used)
 }
 
 /// First closing candidate for `marker` in `s`, skipping escaped markers and
@@ -343,20 +374,22 @@ fn escaped(s: &str, at: usize) -> bool {
 
 /// `[label](target)` starting at `s[0] == '['`; returns the label, the target
 /// (an optional `"title"` is dropped) and the bytes consumed.
-fn parse_link(s: &str) -> Option<(&str, String, usize)> {
+fn parse_link(s: &str) -> Option<(&str, Rc<str>, usize)> {
     let mid = s.find("](")?;
     let label = &s[1..mid];
-    let (target, end) = link_target(&s[mid + 2..])?;
+    let (target, end) = link_inner(&s[mid + 2..])?;
     let url = target.split_whitespace().next()?;
     if url.is_empty() {
         return None;
     }
-    Some((label, url.to_string(), mid + 2 + end))
+    Some((label, Rc::from(url), mid + 2 + end))
 }
 
-/// Split the text after `](` into the link target and the index just past the
-/// closing `)`, balancing parentheses so `x(1).png` is one target.
-fn link_target(s: &str) -> Option<(&str, usize)> {
+/// Split the text after `](` into the link body and the index just past the
+/// closing `)`, balancing parentheses so `x(1).png` is one target and a closing
+/// paren inside a `"title"` does not end the link. Shared with the document
+/// preparser.
+pub(crate) fn link_inner(s: &str) -> Option<(&str, usize)> {
     let mut depth = 0usize;
     let mut in_quote = false;
     for (i, c) in s.char_indices() {
@@ -659,7 +692,7 @@ fn build_words(ui: &egui::Ui, runs: &[Run], face: Option<&(FontId, Color32)>) ->
             ui,
             &mut words,
             &mut open,
-            &frag.text,
+            frag.text,
             frag.offset,
             run,
             &body,
@@ -824,7 +857,7 @@ fn push_frag(
     ui: &egui::Ui,
     words: &mut Vec<Word>,
     open: &mut bool,
-    text: &str,
+    text: String,
     offset: usize,
     run: &Run,
     body: &FontId,
@@ -884,7 +917,7 @@ fn push_frag(
         strikethrough,
         ..Default::default()
     };
-    let galley = layout(ui, text, &format);
+    let galley = layout(ui, &text, &format);
     let width = galley.size().x;
     if !*open {
         words.push(Word {
@@ -904,7 +937,7 @@ fn push_frag(
         kind: run.kind.clone(),
         color,
         format,
-        text: text.to_string(),
+        text,
         offset,
         galley,
         width,
@@ -1048,8 +1081,7 @@ fn row_passes(has_code: bool, has_selection: bool) -> Vec<RowPass> {
 
 /// Intersection of `ranges` with the char span `[start, start + text.chars())`,
 /// returned as local char offsets within `text` plus the global range index.
-/// Range ends are exclusive.
-#[cfg(test)]
+/// Range ends are exclusive. Used by the quote renderer per line.
 pub(crate) fn local_ranges(
     start: usize,
     text: &str,
@@ -1562,11 +1594,12 @@ fn link_spans(placements: &[(&Frag, f32)]) -> Vec<(f32, f32, Color32)> {
             }
             continue;
         };
+        let url: &str = url;
         let start = frag.offset;
         let end = start + frag.text.chars().count();
         let extend = open
             .as_ref()
-            .is_some_and(|(u, _, _, last, _)| *u == url.as_str() && start <= last + 1);
+            .is_some_and(|(u, _, _, last, _)| *u == url && start <= last + 1);
         if extend {
             if let Some((_, _, hi, last, _)) = open.as_mut() {
                 *hi = *x + frag.width;
@@ -1576,7 +1609,7 @@ fn link_spans(placements: &[(&Frag, f32)]) -> Vec<(f32, f32, Color32)> {
             if let Some((_, lo, hi, _, color)) = open.take() {
                 out.push((lo, hi, color));
             }
-            open = Some((url.as_str(), *x, *x + frag.width, end, frag.color));
+            open = Some((url, *x, *x + frag.width, end, frag.color));
         }
     }
     if let Some((_, lo, hi, _, color)) = open {
@@ -1601,6 +1634,9 @@ pub(crate) fn link_is_safe(url: &str) -> bool {
 /// One-frame handoff: a link click asked for the `link copied` status chip.
 pub(crate) const LINK_COPIED: &str = "jiaoren-link-copied";
 
+/// One-frame handoff: URL of the link under the pointer, read by `o`.
+pub(crate) const HOVER_LINK: &str = "jiaoren-hover-link";
+
 /// Copy a safe link and leave the status flag. Inert schemes copy nothing.
 fn click_link(ctx: &egui::Context, url: &str) -> bool {
     if !link_is_safe(url) {
@@ -1616,6 +1652,7 @@ fn paint_frag(ui: &egui::Ui, painter: &egui::Painter, pos: Pos2, frag: &Frag) {
     painter.galley(pos, frag.galley.clone(), frag.color);
 
     if let RunKind::Link(url) = &frag.kind {
+        let url: &str = url;
         let rect = Rect::from_min_size(pos, size);
         let id = Id::new(("mdpara-link", url, pos.x.to_bits(), pos.y.to_bits()));
         let safe = link_is_safe(url);
@@ -1630,6 +1667,10 @@ fn paint_frag(ui: &egui::Ui, painter: &egui::Painter, pos: Pos2, frag: &Frag) {
                     url.trim_start_matches('#').to_string(),
                 );
             });
+        }
+        if response.hovered() {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(Id::new(HOVER_LINK), url.to_string()));
         }
         // Show the destination so a homoglyph link cannot hide where it goes.
         let response = response.on_hover_text(url);
@@ -1749,6 +1790,42 @@ mod tests {
             assert!(runs
                 .iter()
                 .any(|r| r.kind == RunKind::Code && r.text == "**c**"));
+        }
+
+        #[test]
+        fn code_span_closes_on_an_equal_length_run() {
+            assert_eq!(
+                parse_inline("``a`b`` c"),
+                vec![
+                    Run {
+                        text: "a`b".into(),
+                        kind: RunKind::Code,
+                    },
+                    Run {
+                        text: " c".into(),
+                        kind: RunKind::Text,
+                    },
+                ]
+            );
+            // A shorter run cannot close a longer opener: no code run may hold
+            // the backtick that would have been its closer.
+            let runs = parse_inline("``a`b`");
+            assert!(
+                runs.iter()
+                    .filter(|r| r.kind.is_code())
+                    .all(|r| !r.text.contains('`')),
+                "{runs:?}"
+            );
+        }
+
+        #[test]
+        fn code_span_inside_emphasis_is_skipped_by_marker_search() {
+            let runs = parse_inline("**``a**b``**");
+            assert!(
+                runs.iter().any(|r| r.kind.is_code() && r.text == "a**b"),
+                "{runs:?}"
+            );
+            assert!(!runs.iter().any(|r| r.text.contains("``")), "{runs:?}");
         }
 
         #[test]
@@ -1923,7 +2000,7 @@ mod tests {
     }
 
     mod fragment_offsets {
-        use super::super::{fragment_plan, parse_inline, search_text, word_plan};
+        use super::super::{fragment_plan, parse_inline, search_text, word_plan, Run, RunKind};
 
         #[test]
         fn every_fragment_offset_matches_its_text_in_the_model() {
@@ -1935,6 +2012,7 @@ mod tests {
                 "[t](u)  z",
                 "&amp;  q",
                 "![alt](x)  z",
+                "``a`b``  z",
             ] {
                 let model: Vec<char> = search_text(source).chars().collect();
                 let mut after = 0usize;
@@ -1955,16 +2033,25 @@ mod tests {
         }
 
         #[test]
-        fn empty_code_span_adds_no_word_or_gap() {
-            let plain = word_plan(&parse_inline("a  b"));
-            let empty_code = word_plan(&parse_inline("a `` b"));
-            assert_eq!(plain, empty_code);
+        fn bare_backtick_run_is_literal_text() {
+            // One run of backticks has no equal-length closer, so CommonMark
+            // renders it literally; it is an ordinary word for wrapping.
+            let runs = parse_inline("a `` b");
             assert_eq!(
-                plain,
-                vec![(true, vec!["a".to_string()]), (true, vec!["b".to_string()]),]
+                runs,
+                vec![Run {
+                    text: "a `` b".into(),
+                    kind: RunKind::Text,
+                }]
             );
-            // Same words means the same wrap input: no extra space or line.
-            assert_eq!(fragment_plan(&parse_inline("a `` b")).len(), 2);
+            assert_eq!(
+                word_plan(&runs),
+                vec![
+                    (true, vec!["a".to_string()]),
+                    (true, vec!["``".to_string()]),
+                    (true, vec!["b".to_string()]),
+                ]
+            );
         }
     }
 
