@@ -60,7 +60,8 @@ impl QuoteUi {
         // left edge, like a callout panel.
         let bg = ui.visuals().faint_bg_color;
         let bar_color = ui.visuals().widgets.active.bg_fill;
-        let bar_w = (row_h * 0.28).clamp(3.0, 6.0);
+        let bar_w = (row_h * 0.2).clamp(2.5, 4.0);
+        let bar_inset = (row_h * 0.4).clamp(5.0, 10.0);
         let gap_after_bar = (row_h * 0.7).max(10.0);
         let left_margin = (bar_w + gap_after_bar).round().clamp(12.0, 100.0) as i8;
         let right_margin = (row_h * 0.55).round().clamp(6.0, 100.0) as i8;
@@ -70,6 +71,9 @@ impl QuoteUi {
         let mut chars = Vec::new();
         let mut start = 0usize;
         let mut frame_rect = None;
+        // One bar per nesting level, spanning the lines that still belong to
+        // that level (blank quoted lines included).
+        let mut depth_spans: Vec<(usize, f32, f32)> = Vec::new();
         // The html hook lays children out horizontally; a quote must stack.
         ui.vertical(|ui| {
             let frame = egui::Frame::new()
@@ -84,6 +88,7 @@ impl QuoteUi {
                 .show(ui, |ui| {
                     ui.set_width(inner_w);
                     for (depth, line) in lines {
+                        let line_top = ui.cursor().top();
                         let line_start = start;
                         let line_len = line.chars().count();
                         start += line_len + 1;
@@ -117,17 +122,39 @@ impl QuoteUi {
                                 rect: span.rect,
                             });
                         }
-                        if line.is_empty() {
+                        let line_bottom = if line.is_empty() {
                             ui.add_space(row_h * 0.35);
-                        }
+                            line_top + row_h * 0.35
+                        } else {
+                            painted.rect.bottom()
+                        };
+                        depth_spans.push((*depth as usize, line_top, line_bottom));
                     }
                 });
             let rect = frame.response.rect;
-            ui.painter().rect_filled(
-                egui::Rect::from_min_size(rect.min, egui::vec2(bar_w, rect.height())),
-                0.0,
-                bar_color,
-            );
+            let max_depth = depth_spans.iter().map(|&(d, ..)| d).max().unwrap_or(0);
+            for level in 0..max_depth {
+                let mut top = f32::INFINITY;
+                let mut bottom = f32::NEG_INFINITY;
+                for &(depth, line_top, line_bottom) in &depth_spans {
+                    if depth > level {
+                        top = top.min(line_top);
+                        bottom = bottom.max(line_bottom);
+                    }
+                }
+                if bottom <= top {
+                    continue;
+                }
+                let x = rect.left() + bar_inset + level as f32 * gap;
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::Pos2::new(x, top),
+                        egui::vec2(bar_w, bottom - top),
+                    ),
+                    0.0,
+                    bar_color,
+                );
+            }
             frame_rect = Some(rect);
         });
         search.set_char_map(block, chars);
