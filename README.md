@@ -6,7 +6,7 @@ fences drawn as real diagrams.
 
 Keyboard-first, almost no chrome, live-reloads when the file changes on disk.
 
-![Opening examples/demo.md: justified prose with inline code and links, dragging a phrase and `y` copying the selection, a vim-style `/` live search that highlights matches as you type with Ctrl+W erasing a word, Enter and `n` jumping between matches (spaces inside the query are highlighted), hovering a table row, clicking the table icon to copy CSV, searching for the diagram and opening it in the zoomable popup, the wrapped code block with line numbers, and the Catppuccin dark theme](docs/assets/demo.gif)
+![Opening examples/demo.md: justified prose with inline code and links, dragging a phrase and releasing it to copy, `]` opening the next note in the folder, a vim-style `/` live search that highlights matches as you type with Ctrl+W erasing a word, Enter and `n` jumping between matches (spaces inside the query are highlighted), hovering a table row, clicking the table icon to copy CSV, searching for the diagram and opening it in the zoomable popup, the wrapped code block with line numbers, and the Catppuccin dark theme](docs/assets/demo.gif)
 
 ## Why "jiaoren"?
 
@@ -84,6 +84,8 @@ Mermaid diagram labels still need `FiraCode Nerd Font` installed system-wide.
 | `h` / `l`, `shift+←` / `shift+→` | pan left / right (for zoomed-in content) |
 | `t` | toggle light/dark theme |
 | `r` | reload from disk |
+| `]` / `[` | next / previous Markdown file in the same folder (wraps) |
+| `o` | open the link under the pointer in the browser |
 | `yy` | copy the whole document as Markdown |
 | drag | select text across blocks; releasing the drag copies it |
 | `y` | copy the text selection; with no selection the first `y` arms `yy` |
@@ -94,6 +96,15 @@ Mermaid diagram labels still need `FiraCode Nerd Font` installed system-wide.
 | `?` | keyboard-shortcut overlay; `esc`, `q`, `?`, `ctrl+c` or a click closes it |
 | `esc` / `ctrl+c` | copy the selection, else cancel the prompt, else clear the search, else quit |
 | `q` | quit |
+
+`o` opens the hovered `http(s)`/`mailto` link with `$BROWSER`, else `xdg-open`,
+`gio open` or `sensible-browser`; other schemes stay inert. `]` and `[` step
+through the `.md`/`.markdown` files in the open document's folder, wrapping at
+both ends, and land at the top of the next file.
+
+Zoom and theme are saved to `$XDG_CONFIG_HOME/jiaoren/state.toml` (else
+`~/.config/jiaoren/state.toml`) whenever they change, so the next launch starts
+with the same view; `--dark` still wins over a saved light theme.
 
 `jr --keys` prints the same list to stdout, so the shortcuts are reachable
 without opening a document, and the in-viewer `?` overlay reads the same text.

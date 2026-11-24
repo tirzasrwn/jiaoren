@@ -7,6 +7,7 @@ mod download;
 mod fonts;
 mod justify;
 mod mermaid;
+mod prefs;
 mod search;
 mod theme;
 
@@ -49,6 +50,8 @@ h / l            pan left / right (shift+←/→ too)
 a / 0            reset zoom (a also pans back left)
 t                toggle light/dark theme
 r                reload from disk
+] / [            next / previous Markdown file in this folder
+o                open the link under the pointer in the browser
 ctrl+g           show the file path
 drag             select text (releasing copies; on empty space it pans)
 y                copy the selection, yy copies the whole file

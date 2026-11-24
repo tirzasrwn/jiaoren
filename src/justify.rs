@@ -1634,6 +1634,9 @@ pub(crate) fn link_is_safe(url: &str) -> bool {
 /// One-frame handoff: a link click asked for the `link copied` status chip.
 pub(crate) const LINK_COPIED: &str = "jiaoren-link-copied";
 
+/// One-frame handoff: URL of the link under the pointer, read by `o`.
+pub(crate) const HOVER_LINK: &str = "jiaoren-hover-link";
+
 /// Copy a safe link and leave the status flag. Inert schemes copy nothing.
 fn click_link(ctx: &egui::Context, url: &str) -> bool {
     if !link_is_safe(url) {
@@ -1664,6 +1667,10 @@ fn paint_frag(ui: &egui::Ui, painter: &egui::Painter, pos: Pos2, frag: &Frag) {
                     url.trim_start_matches('#').to_string(),
                 );
             });
+        }
+        if response.hovered() {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(Id::new(HOVER_LINK), url.to_string()));
         }
         // Show the destination so a homoglyph link cannot hide where it goes.
         let response = response.on_hover_text(url);

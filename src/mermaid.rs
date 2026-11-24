@@ -32,7 +32,7 @@ const MAX_CHROMIUM_BYTES: u64 = 256 * 1024 * 1024;
 pub const RENDER_VERSION: &str = "6-mermaid12.3.0-htmlLabelsOff-2x-strict-svg-catppuccin-firacode";
 
 /// Colour theme used for the window and diagram renders.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Theme {
     /// Light palette (Catppuccin Latte).
     Light,

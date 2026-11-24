@@ -39,6 +39,12 @@ pub enum Action {
     ToggleTheme,
     /// Re-read the document from disk.
     Reload,
+    /// Open the next Markdown file in the same directory (`]`).
+    NextFile,
+    /// Open the previous Markdown file in the same directory (`[`).
+    PrevFile,
+    /// Open the link under the pointer in the desktop browser (`o`).
+    OpenLink,
     /// Show the open document's path in the status line (`Ctrl+G`).
     ShowPath,
     /// Toggle the keyboard-shortcut overlay (`?`).
@@ -163,12 +169,20 @@ pub fn apply_key(
         Key::U if !modifiers.any() => Some(Action::ScrollPages(-0.5)),
         Key::Space if !modifiers.any() => Some(Action::ScrollPages(1.0)),
         Key::B if !modifiers.any() => Some(Action::ScrollPages(-1.0)),
-        Key::Plus | Key::Equals if !modifiers.any() => Some(Action::ZoomIn),
+        // `+` is Shift+= on most layouts, so it must accept the shift.
+        Key::Plus | Key::Equals
+            if modifiers.is_none() || modifiers.matches_exact(Modifiers::SHIFT) =>
+        {
+            Some(Action::ZoomIn)
+        }
         Key::Minus if !modifiers.any() => Some(Action::ZoomOut),
         Key::A if !modifiers.any() => Some(Action::Fit),
         Key::Num0 if !modifiers.any() => Some(Action::ResetZoom),
         Key::T if !modifiers.any() => Some(Action::ToggleTheme),
         Key::R if !modifiers.any() => Some(Action::Reload),
+        Key::CloseBracket if !modifiers.any() => Some(Action::NextFile),
+        Key::OpenBracket if !modifiers.any() => Some(Action::PrevFile),
+        Key::O if !modifiers.any() => Some(Action::OpenLink),
         // Ctrl+G shows the file path; a bare `g` still starts the `gg` window.
         Key::G if modifiers.command || modifiers.ctrl => Some(Action::ShowPath),
         Key::Questionmark => Some(Action::ToggleKeysHelp),
@@ -633,6 +647,19 @@ mod modifier_guard {
         ] {
             assert_eq!(apply_key(&mut s, key, modifiers, now()), None, "{key:?}");
         }
+    }
+
+    #[test]
+    fn shifted_plus_still_zooms() {
+        let mut s = KeyState::default();
+        assert_eq!(
+            apply_key(&mut s, Key::Plus, Modifiers::SHIFT, now()),
+            Some(Action::ZoomIn)
+        );
+        assert_eq!(
+            apply_key(&mut s, Key::Equals, Modifiers::NONE, now()),
+            Some(Action::ZoomIn)
+        );
     }
 
     #[test]

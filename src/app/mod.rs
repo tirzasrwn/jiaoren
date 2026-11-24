@@ -36,7 +36,7 @@ use code::CodeUi;
 use diagram::DiagramUi;
 use geometry::{
     bottom_pad, content_column, edge_scroll, home_scroll, home_target, jump_scroll_top,
-    overscroll_pad,
+    overscroll_pad, width_changed,
 };
 use heading::HeadingUi;
 use image::ImageUi;
@@ -141,6 +141,88 @@ const PATH_STATUS_DURATION: Duration = Duration::from_millis(4000);
 fn take_link_copied(ctx: &egui::Context) -> bool {
     ctx.data_mut(|d| d.remove_temp::<()>(egui::Id::new(crate::justify::LINK_COPIED)))
         .is_some()
+}
+
+/// The link under the pointer, if the document painted one in the previous
+/// pass. The pass number keeps a stale entry from firing after the pointer
+/// moved off the link.
+fn take_hovered_link(ctx: &egui::Context) -> Option<String> {
+    ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::new(crate::justify::HOVER_LINK)))
+}
+
+/// Markdown files in `dir`, sorted by name. Only plain files with a Markdown
+/// extension are offered.
+fn documents_in(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| {
+                        ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown")
+                    })
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// The file `delta` steps from `current` in `files`, wrapping at both ends.
+fn step_document(files: &[PathBuf], current: &Path, delta: isize) -> Option<PathBuf> {
+    if files.len() < 2 {
+        return None;
+    }
+    let index = files.iter().position(|file| file == current)?;
+    let len = files.len() as isize;
+    let next = (index as isize + delta).rem_euclid(len) as usize;
+    files.get(next).cloned()
+}
+
+/// Hand `url` to the desktop opener without a shell. `$BROWSER` wins, then the
+/// usual XDG helpers; the URL is always a single argument.
+fn open_external(url: &str) -> std::io::Result<()> {
+    use std::process::{Command, Stdio};
+    let spawn = |program: &str, args: &[&str]| {
+        Command::new(program)
+            .args(args)
+            .arg(url)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ())
+    };
+    if let Some(browser) = std::env::var("BROWSER")
+        .ok()
+        .filter(|b| !b.trim().is_empty())
+    {
+        let mut parts = browser.split_whitespace();
+        if let Some(program) = parts.next() {
+            let args: Vec<&str> = parts.collect();
+            if spawn(program, &args).is_ok() {
+                return Ok(());
+            }
+        }
+    }
+    for (program, args) in [
+        ("xdg-open", &[][..]),
+        ("gio", &["open"][..]),
+        ("sensible-browser", &[][..]),
+        ("x-www-browser", &[][..]),
+    ] {
+        if spawn(program, args).is_ok() {
+            return Ok(());
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "no browser opener found",
+    ))
 }
 
 /// Status text shown while the first-run font download runs.
@@ -454,6 +536,8 @@ pub(crate) struct App {
     /// `a` target it before this frame's layout has run; `Some` also tells the
     /// home/resize helper whether the view is still at the reading origin.
     pad: Option<egui::Vec2>,
+    /// Viewport width from the last frame, so a resize can re-home the column.
+    last_view_w: Option<f32>,
     /// Set by `G`: jump to the bottom once the next layout reveals `max_y`.
     scroll_bottom: bool,
     applied_theme: Option<Theme>,
@@ -506,7 +590,13 @@ impl App {
         // `+`/`-` zoom the document only. egui's own Ctrl+Plus zoom would also
         // scale overlays like the heading index, so keep it off.
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
-        let theme = if dark { Theme::Dark } else { Theme::Light };
+        // Saved zoom/theme apply to every document; `--dark` still wins.
+        let prefs = crate::prefs::load();
+        let theme = if dark {
+            Theme::Dark
+        } else {
+            prefs.theme.unwrap_or(Theme::Light)
+        };
         // The watcher, a reload and Ctrl+G all want the real file: a path typed
         // relative to the shell would otherwise be shown and re-read relative to
         // whatever directory the viewer happens to be in.
@@ -650,7 +740,7 @@ impl App {
             source: text,
             prepared,
             theme,
-            zoom: 1.0,
+            zoom: prefs.zoom,
             error: None,
             chromium_error,
             cache: CommonMarkCache::default(),
@@ -669,6 +759,7 @@ impl App {
             scroll_max: egui::Vec2::ZERO,
             jump_to: None,
             pad: None,
+            last_view_w: None,
             scroll_bottom: false,
             applied_theme: Some(theme),
             styles_key: None,
@@ -727,6 +818,61 @@ impl App {
         self.search.borrow_mut().reset();
         self.toc.reset();
         self.jump_to = None;
+    }
+
+    /// Remember the current zoom and theme for the next session.
+    fn save_prefs(&self) {
+        crate::prefs::save(self.zoom, self.theme);
+    }
+
+    /// Open the next/previous Markdown file in this document's directory,
+    /// wrapping around. The reading column is re-homed to the top.
+    fn navigate(&mut self, delta: isize) {
+        let dir = parent_dir(&self.path).to_path_buf();
+        let files = documents_in(&dir);
+        let Some(next) = step_document(&files, &self.path, delta) else {
+            self.set_status("no other markdown files in this folder");
+            return;
+        };
+        let position = files
+            .iter()
+            .position(|file| file == &next)
+            .map_or(0, |i| i + 1);
+        let name = next.file_name().map_or_else(
+            || next.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        self.path = next;
+        self.scroll_y = 0.0;
+        self.scroll_x = 0.0;
+        self.pad = None;
+        self.scroll_bottom = false;
+        self.autoscroll = 0.0;
+        self.reload();
+        self.last_mtime = std::fs::metadata(&self.path)
+            .and_then(|m| m.modified())
+            .ok();
+        self.set_status_for(
+            format!("{name} ({position}/{})", files.len()),
+            STATUS_DURATION,
+        );
+    }
+
+    /// Open the link under the pointer in the desktop browser. Only http(s) and
+    /// mailto links are accepted, the same schemes a click may copy.
+    fn open_hovered_link(&mut self, ctx: &egui::Context) {
+        let Some(url) = take_hovered_link(ctx) else {
+            self.set_status("point at a link first");
+            return;
+        };
+        if !crate::justify::link_is_safe(&url) {
+            self.set_status("only http(s) and mailto links open");
+            return;
+        }
+        match open_external(&url) {
+            Ok(()) => self.set_status("opening link"),
+            Err(e) => self.set_status(format!("cannot open link: {e}")),
+        }
     }
 
     /// Show a clipboard confirmation for [`STATUS_DURATION`].
@@ -1022,13 +1168,20 @@ impl App {
         }
         drop(s);
         if copy_on_release {
-            self.copy_selection(ui.ctx());
+            self.copy_selection_keep(ui.ctx(), true);
         }
     }
 
     /// Copy the drag selection to the clipboard and clear it, confirming in the
     /// status line. Shared by `y` and Ctrl+C so both copy the same text.
     fn copy_selection(&mut self, ctx: &egui::Context) {
+        self.copy_selection_keep(ctx, false);
+    }
+
+    /// [`Self::copy_selection`] with a choice about clearing the highlight. A
+    /// drag release copies but keeps the selection, so the next `Esc` still
+    /// clears it instead of falling through to quit.
+    fn copy_selection_keep(&mut self, ctx: &egui::Context, keep: bool) {
         let text = {
             let s = self.search.borrow();
             selected_text(s.texts(), &s.selection)
@@ -1043,7 +1196,9 @@ impl App {
         self.keys.last_y = None;
         // Clearing lets a second Ctrl+C fall through to the next rung (clear
         // search, then quit) instead of re-copying the same text forever.
-        self.search.borrow_mut().selection.clear();
+        if !keep {
+            self.search.borrow_mut().selection.clear();
+        }
         ctx.request_repaint();
     }
 
@@ -1434,19 +1589,33 @@ impl eframe::App for App {
                     self.scroll_y = home.y;
                 }
                 Action::Bottom => self.scroll_bottom = true,
-                Action::ZoomIn => self.zoom = (self.zoom * 1.1).min(3.0),
-                Action::ZoomOut => self.zoom = (self.zoom / 1.1).max(0.5),
+                Action::ZoomIn => {
+                    self.zoom = (self.zoom * 1.1).min(3.0);
+                    self.save_prefs();
+                }
+                Action::ZoomOut => {
+                    self.zoom = (self.zoom / 1.1).max(0.5);
+                    self.save_prefs();
+                }
                 Action::Fit => {
                     self.zoom = 1.0;
                     self.scroll_x = self.pad.map_or(0.0, |p| p.x);
+                    self.save_prefs();
                 }
-                Action::ResetZoom => self.zoom = 1.0,
+                Action::ResetZoom => {
+                    self.zoom = 1.0;
+                    self.save_prefs();
+                }
                 Action::ToggleTheme => {
                     self.theme = match self.theme {
                         Theme::Light => Theme::Dark,
                         Theme::Dark => Theme::Light,
-                    }
+                    };
+                    self.save_prefs();
                 }
+                Action::NextFile => self.navigate(1),
+                Action::PrevFile => self.navigate(-1),
+                Action::OpenLink => self.open_hovered_link(ui.ctx()),
                 Action::Reload => self.reload(),
                 Action::CopyDocument => {
                     ui.ctx().copy_text(self.source.clone());
@@ -1538,6 +1707,13 @@ impl eframe::App for App {
             let home = home_scroll(current, self.pad, pad);
             self.scroll_x = home.x;
             self.scroll_y = home.y;
+            // A resize re-homes the reading column horizontally even when the
+            // reader has scrolled; vertical position is kept. Without this a
+            // zoomed document stays off-centre until `a` is pressed.
+            if width_changed(self.last_view_w, viewport_w) {
+                self.scroll_x = pad.x;
+            }
+            self.last_view_w = Some(viewport_w);
             self.pad = Some(pad);
             // A confirmed or stepped search hit wins over home/resize anchoring.
             // Centre its block; the scroll area clamps to the content range
@@ -1593,6 +1769,11 @@ impl eframe::App for App {
                         self.diagrams.borrow_mut().begin_frame(col);
                         self.images.borrow_mut().begin_frame(col, z);
                         self.search.borrow_mut().begin_frame();
+                        // The document paint re-records the hovered link below;
+                        // clearing first keeps `o` from using a stale one.
+                        ui.ctx().data_mut(|d| {
+                            d.remove_temp::<String>(egui::Id::new(crate::justify::HOVER_LINK))
+                        });
                         CommonMarkViewer::new()
                             .max_image_width(Some(col as usize))
                             .render_html_fn(Some(&**html_fn))
@@ -1895,6 +2076,58 @@ mod tests {
             assert_eq!(mono.size, 22.0);
             assert_eq!(body.family, egui::FontFamily::Proportional);
             assert_eq!(mono.family, egui::FontFamily::Monospace);
+        }
+    }
+
+    mod navigation {
+        use super::super::{documents_in, step_document};
+        use std::path::{Path, PathBuf};
+
+        fn temp_dir(tag: &str) -> PathBuf {
+            let dir =
+                std::env::temp_dir().join(format!("jiaoren-nav-{tag}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        #[test]
+        fn lists_only_markdown_files_sorted() {
+            let dir = temp_dir("list");
+            for name in ["b.md", "a.MD", "note.markdown", "image.png", "noext"] {
+                std::fs::write(dir.join(name), "x").unwrap();
+            }
+            std::fs::create_dir_all(dir.join("folder.md")).unwrap();
+            let names: Vec<String> = documents_in(&dir)
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(names, ["a.MD", "b.md", "note.markdown"]);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn stepping_wraps_and_needs_a_current_file() {
+            let files = vec![
+                PathBuf::from("/d/a.md"),
+                PathBuf::from("/d/b.md"),
+                PathBuf::from("/d/c.md"),
+            ];
+            let a = Path::new("/d/a.md");
+            let c = Path::new("/d/c.md");
+            assert_eq!(
+                step_document(&files, a, 1).unwrap(),
+                PathBuf::from("/d/b.md")
+            );
+            assert_eq!(
+                step_document(&files, c, 1).unwrap(),
+                PathBuf::from("/d/a.md")
+            );
+            assert_eq!(
+                step_document(&files, a, -1).unwrap(),
+                PathBuf::from("/d/c.md")
+            );
+            assert_eq!(step_document(&files, Path::new("/elsewhere/x.md"), 1), None);
+            assert_eq!(step_document(&files[..1], a, 1), None);
         }
     }
 }

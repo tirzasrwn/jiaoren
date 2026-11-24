@@ -242,6 +242,13 @@ pub(crate) fn home_scroll(
     )
 }
 
+/// Whether the window width changed enough since the last layout to re-home the
+/// reading column. Keeps a resize from leaving a zoomed document off-centre
+/// until the reader presses `a`.
+pub(crate) fn width_changed(previous: Option<f32>, width: f32) -> bool {
+    previous.is_some_and(|last| (last - width).abs() > 0.5)
+}
+
 /// Scroll offset that centres a search hit's block: `block_top +
 /// block_height/2 - viewport_height/2`, clamped at the top of the content. A
 /// block taller than the viewport instead aligns its top with a small margin so
@@ -530,6 +537,13 @@ mod tests {
             assert_eq!(jump_scroll_top(4.0, 900.0, 800.0), 0.0);
             // Exactly viewport-sized blocks still centre.
             assert_eq!(jump_scroll_top(400.0, 800.0, 800.0), 400.0);
+        }
+
+        #[test]
+        fn a_width_change_is_detected_but_the_first_layout_is_not() {
+            assert!(!width_changed(None, 800.0));
+            assert!(!width_changed(Some(800.0), 800.4));
+            assert!(width_changed(Some(800.0), 1200.0));
         }
 
         #[test]
