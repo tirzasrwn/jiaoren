@@ -231,7 +231,9 @@ fn delimiter_can_open(md: &str, at: usize, len: usize, ch: char) -> bool {
     let Some(next) = md[at + len..].chars().next() else {
         return false;
     };
-    if next.is_whitespace() || matches!(next, '*' | '_' | '~' | '`') {
+    // A delimiter may open before a code span: `**`code`**` is bold text
+    // containing inline code. Only a bare marker or whitespace blocks it.
+    if next.is_whitespace() || matches!(next, '*' | '_' | '~') {
         return false;
     }
     if ch == '_' && prev.is_some_and(char::is_alphanumeric) && next.is_alphanumeric() {
@@ -1731,6 +1733,17 @@ mod tests {
             assert!(runs
                 .iter()
                 .any(|r| r.kind == RunKind::Code && r.text == "**c**"));
+        }
+
+        #[test]
+        fn emphasis_may_wrap_a_leading_code_span() {
+            let runs = parse_inline("**`document_folder_id` nullable**");
+            assert!(runs.iter().any(|r| r.kind == RunKind::Bold));
+            assert!(runs
+                .iter()
+                .any(|r| r.kind == RunKind::Code && r.text == "document_folder_id"));
+            let joined = runs.iter().map(|r| r.text.as_str()).collect::<String>();
+            assert!(!joined.contains("**"), "{joined:?}");
         }
 
         #[test]
