@@ -36,7 +36,7 @@ use code::CodeUi;
 use diagram::DiagramUi;
 use geometry::{
     bottom_pad, content_column, edge_scroll, home_scroll, home_target, jump_scroll_top,
-    overscroll_pad, width_changed,
+    overscroll_pad, resize_scroll_x, width_changed,
 };
 use heading::HeadingUi;
 use image::ImageUi;
@@ -1714,14 +1714,18 @@ impl eframe::App for App {
             let pad = egui::vec2(pad_x, pad_y);
             let current = egui::vec2(self.scroll_x, self.scroll_y);
             let home = home_scroll(current, self.pad, pad);
-            self.scroll_x = home.x;
             self.scroll_y = home.y;
-            // A resize re-homes the reading column horizontally even when the
-            // reader has scrolled; vertical position is kept. Without this a
-            // zoomed document stays off-centre until `a` is pressed.
-            if width_changed(self.last_view_w, viewport_w) {
-                self.scroll_x = pad.x;
-            }
+            // Keep the content that was in the middle of the viewport in the
+            // middle after a resize. Re-homing to `pad.x` would snap a zoomed
+            // column (wider than the window) to its left edge.
+            self.scroll_x = match self.last_view_w {
+                Some(last) if width_changed(Some(last), viewport_w) => {
+                    let last_pad = self.pad.map_or(0.0, |p| p.x);
+                    resize_scroll_x(current.x, last, viewport_w, current.x <= last_pad + 1.0)
+                }
+                Some(_) => current.x,
+                None => home.x,
+            };
             self.last_view_w = Some(viewport_w);
             self.pad = Some(pad);
             // A confirmed or stepped search hit wins over home/resize anchoring.

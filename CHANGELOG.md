@@ -2,6 +2,15 @@
 
 All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- A window resize keeps the content that was in the middle of the viewport in
+  the middle when the reader has panned sideways; at home the column stays
+  anchored to its left edge. Above 1× zoom the wider column is no longer
+  snapped back to its left edge.
+
 ## 0.4.1 — 2026-11-25
 
 ### Changed
@@ -70,7 +79,5 @@ All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 
 ### Known limits
 
-- Above 1× zoom the reading column is wider than the window; a resize re-homes
-  the pan to the left instead of centring.
 - Per-frame character maps are still recomputed; live search copies the block
   texts once per keystroke.

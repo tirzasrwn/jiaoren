@@ -249,6 +249,18 @@ pub(crate) fn width_changed(previous: Option<f32>, width: f32) -> bool {
     previous.is_some_and(|last| (last - width).abs() > 0.5)
 }
 
+/// Horizontal offset after a viewport resize. At home the column stays
+/// anchored to its left edge, so a wider window reveals more text instead of
+/// pushing it right; a view the reader panned keeps the content that was in the
+/// middle of the viewport in the middle. Clamped at the left edge.
+pub(crate) fn resize_scroll_x(current: f32, previous_width: f32, width: f32, at_home: bool) -> f32 {
+    if at_home {
+        overscroll_pad(width)
+    } else {
+        (current - (width - previous_width) * 0.5).max(0.0)
+    }
+}
+
 /// Scroll offset that centres a search hit's block: `block_top +
 /// block_height/2 - viewport_height/2`, clamped at the top of the content. A
 /// block taller than the viewport instead aligns its top with a small margin so
@@ -544,6 +556,20 @@ mod tests {
             assert!(!width_changed(None, 800.0));
             assert!(!width_changed(Some(800.0), 800.4));
             assert!(width_changed(Some(800.0), 1200.0));
+        }
+
+        #[test]
+        fn a_resize_keeps_the_visible_content_centred() {
+            // At home the column stays anchored to its left edge: the pad
+            // follows the wider window.
+            assert_eq!(resize_scroll_x(400.0, 800.0, 1200.0, true), 600.0);
+            // Wider window while panned: half the delta to the left keeps the
+            // middle of the viewport on the same content.
+            assert_eq!(resize_scroll_x(800.0, 800.0, 1200.0, false), 600.0);
+            // Narrower window: the offset moves right by half the delta.
+            assert_eq!(resize_scroll_x(1000.0, 1200.0, 800.0, false), 1200.0);
+            // A panned view near the left edge clamps instead of going negative.
+            assert_eq!(resize_scroll_x(4.0, 800.0, 900.0, false), 0.0);
         }
 
         #[test]
