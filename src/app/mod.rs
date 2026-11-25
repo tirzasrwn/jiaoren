@@ -35,8 +35,8 @@ mod widgets;
 use code::CodeUi;
 use diagram::DiagramUi;
 use geometry::{
-    bottom_pad, content_column, edge_scroll, home_scroll, home_target, jump_scroll_top,
-    overscroll_pad, resize_scroll_x, width_changed,
+    bottom_pad, content_column, edge_scroll, frame_scroll_x, home_scroll, home_target,
+    jump_scroll_top, overscroll_pad,
 };
 use heading::HeadingUi;
 use image::ImageUi;
@@ -1740,16 +1740,15 @@ impl eframe::App for App {
             let home = home_scroll(current, self.pad, pad);
             self.scroll_y = home.y;
             // Keep the content that was in the middle of the viewport in the
-            // middle after a resize. Re-homing to `pad.x` would snap a zoomed
-            // column (wider than the window) to its left edge.
-            self.scroll_x = match self.last_view_w {
-                Some(last) if width_changed(Some(last), viewport_w) => {
-                    let last_pad = self.pad.map_or(0.0, |p| p.x);
-                    resize_scroll_x(current.x, last, viewport_w, current.x <= last_pad + 1.0)
-                }
-                Some(_) => current.x,
-                None => home.x,
-            };
+            // middle after a resize; a fresh document homes on the pad. See
+            // [`frame_scroll_x`].
+            self.scroll_x = frame_scroll_x(
+                current.x,
+                self.pad.map(|p| p.x),
+                pad.x,
+                self.last_view_w,
+                viewport_w,
+            );
             self.last_view_w = Some(viewport_w);
             self.pad = Some(pad);
             // A confirmed or stepped search hit wins over home/resize anchoring.

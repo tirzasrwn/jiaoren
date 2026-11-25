@@ -249,6 +249,27 @@ pub(crate) fn width_changed(previous: Option<f32>, width: f32) -> bool {
     previous.is_some_and(|last| (last - width).abs() > 0.5)
 }
 
+/// Horizontal offset for one frame. A first layout after an open, navigate or
+/// reload (no last pad) homes on the pad even though the window width is
+/// already known; a resize keeps the visible content (see
+/// [`resize_scroll_x`]); any other frame keeps the reader's pan.
+pub(crate) fn frame_scroll_x(
+    current: f32,
+    last_pad: Option<f32>,
+    new_pad: f32,
+    last_width: Option<f32>,
+    width: f32,
+) -> f32 {
+    match last_pad {
+        None => new_pad,
+        Some(pad) if width_changed(last_width, width) => {
+            let last = last_width.unwrap_or(width);
+            resize_scroll_x(current, last, width, current <= pad + 1.0)
+        }
+        Some(_) => current,
+    }
+}
+
 /// Horizontal offset after a viewport resize. At home the column stays
 /// anchored to its left edge, so a wider window reveals more text instead of
 /// pushing it right; a view the reader panned keeps the content that was in the
@@ -556,6 +577,21 @@ mod tests {
             assert!(!width_changed(None, 800.0));
             assert!(!width_changed(Some(800.0), 800.4));
             assert!(width_changed(Some(800.0), 1200.0));
+        }
+
+        #[test]
+        fn a_first_layout_homes_even_when_the_width_is_known() {
+            // `]`/`[` keep `last_view_w` but reset the pad, so the column must
+            // still home instead of keeping the old offset.
+            assert_eq!(frame_scroll_x(0.0, None, 400.0, Some(800.0), 800.0), 400.0);
+        }
+
+        #[test]
+        fn a_steady_frame_keeps_the_readers_pan() {
+            assert_eq!(
+                frame_scroll_x(900.0, Some(400.0), 400.0, Some(800.0), 800.0),
+                900.0
+            );
         }
 
         #[test]
