@@ -2,6 +2,30 @@
 
 All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 
+## 0.5.2 — 2026-11-26
+
+### Changed
+
+- Scrolling units follow the rendered text: `j`/`k` move one body line and
+  `h`/`l` one monospace column at every zoom instead of a fixed 40 px. A held
+  key now repeats only scrolling; `yy`, `gg`, `G`, `r`, `t`, `]`, `[`, Tab and
+  quit wait for a fresh press.
+
+### Fixed
+
+- A document with deeply nested emphasis no longer overflows the stack; nesting
+  past 32 levels renders the markers literally.
+- `    ---` / `    ===` at four-space indent stay a paragraph instead of
+  becoming a setext heading and dropping the line.
+- Image syntax inside inline code is no longer rewritten to a `file://` URL.
+- The table copy button and table links are clickable again: controls are
+  sorted by top before the lookup.
+- Typing in `/` no longer copies the whole document per keystroke; block texts
+  are borrowed and one char buffer is reused.
+- Quote blocks no longer clone their spec and re-join their text every frame.
+- An invalid-UTF-8 SVG keeps its bytes so the parse error names the encoding.
+- Reading a document with a BOM no longer copies the whole file.
+
 ## 0.5.1 — 2026-11-26
 
 ### Fixed
