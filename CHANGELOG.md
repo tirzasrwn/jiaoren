@@ -4,12 +4,19 @@ All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 
 ## Unreleased
 
+### Changed
+
+- The heading index no longer paints the shortcut hint chip; the `?` overlay
+  still lists the keys.
+
 ### Fixed
 
 - A window resize keeps the content that was in the middle of the viewport in
   the middle when the reader has panned sideways; at home the column stays
   anchored to its left edge. Above 1× zoom the wider column is no longer
   snapped back to its left edge.
+- `t` still switches the theme while a diagram or image zoom overlay is open;
+  the overlay redraws in the other theme instead of ignoring the key.
 
 ## 0.4.1 — 2026-11-25
 

@@ -329,25 +329,6 @@ pub(crate) fn draw(
                         });
                 });
         });
-    // Same plain bottom-left chip as the search command line.
-    egui::Area::new(egui::Id::new("jiaoren-toc-help"))
-        .order(egui::Order::Tooltip)
-        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
-        .interactable(false)
-        .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(ui.visuals().faint_bg_color)
-                .inner_margin(egui::Margin::symmetric(4, 2))
-                .show(ui, |ui| {
-                    ui.add(egui::Label::new(
-                        egui::RichText::new(
-                            "tab/esc close · j/k · h/l · enter jump · gg/G · t theme",
-                        )
-                        .monospace()
-                        .color(ui.visuals().text_color()),
-                    ));
-                });
-        });
     jump
 }
 

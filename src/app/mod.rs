@@ -422,6 +422,24 @@ fn sanitize_paste(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).collect()
 }
 
+/// `t` with no modifiers while an overlay owns the keyboard. The theme drives
+/// the diagram the overlay draws, so the toggle stays live; every other
+/// document key stays suppressed.
+fn overlay_theme_toggle(events: &[egui::Event]) -> bool {
+    events.iter().any(|ev| {
+        matches!(
+            ev,
+            egui::Event::Key {
+                key: egui::Key::T,
+                modifiers,
+                pressed: true,
+                repeat: false,
+                ..
+            } if !modifiers.any()
+        )
+    })
+}
+
 fn read_search_batch(events: &[egui::Event]) -> SearchBatch {
     let mut batch = SearchBatch::default();
     let mut after_enter = false;
@@ -1517,7 +1535,13 @@ impl eframe::App for App {
                     }
                 }
             }
-        } else if !popup_open && !help_open && !toc_open {
+        } else if popup_open {
+            // The overlay owns the keys, but the theme it draws with can still
+            // be switched with `t`.
+            if ui.input(|i| overlay_theme_toggle(&i.events)) {
+                acts.push(Action::ToggleTheme);
+            }
+        } else if !help_open && !toc_open {
             // Once `/` opens the prompt in this batch, later keys are text for
             // the prompt, not viewer actions (`q`, `t`, `n`, …).
             let mut search_opened = false;
@@ -2060,7 +2084,27 @@ mod tests {
     }
 
     mod theme {
-        use super::super::{apply_theme, Theme};
+        use super::super::{apply_theme, overlay_theme_toggle, Theme};
+        use egui::{Event, Key, Modifiers};
+
+        fn key(key: Key, modifiers: Modifiers) -> Event {
+            Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }
+        }
+
+        #[test]
+        fn plain_t_toggles_while_an_overlay_owns_the_keys() {
+            assert!(overlay_theme_toggle(&[key(Key::T, Modifiers::NONE)]));
+            assert!(!overlay_theme_toggle(&[key(Key::T, Modifiers::CTRL)]));
+            assert!(!overlay_theme_toggle(&[key(Key::Y, Modifiers::NONE)]));
+            assert!(!overlay_theme_toggle(&[Event::Text("t".into())]));
+        }
+
         #[test]
         fn applying_theme_updates_active_visuals() {
             let ctx = egui::Context::default();
