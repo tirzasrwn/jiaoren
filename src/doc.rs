@@ -57,14 +57,15 @@ pub fn read_doc(path: &Path) -> Result<String, DocError> {
         path: path.to_path_buf(),
         source,
     })?;
-    let text = String::from_utf8(bytes).map_err(|_| DocError::NotUtf8 {
+    let mut text = String::from_utf8(bytes).map_err(|_| DocError::NotUtf8 {
         path: path.to_path_buf(),
     })?;
-    // A BOM would hide the first line's `#`, so strip it before parsing.
-    Ok(match text.strip_prefix('\u{feff}') {
-        Some(stripped) => stripped.to_string(),
-        None => text,
-    })
+    // A BOM would hide the first line's `#`, so strip it in place before
+    // parsing. `drain` reuses the buffer instead of copying the document.
+    if text.starts_with('\u{feff}') {
+        text.drain(..'\u{feff}'.len_utf8());
+    }
+    Ok(text)
 }
 
 /// A Markdown document split into the library-rendered text and the
@@ -464,6 +465,12 @@ fn has_content_after(last_content: Option<usize>, from: usize) -> bool {
 /// of indent). It turns the preceding line into a heading, so the library must
 /// own both lines instead of us extracting that line as a paragraph.
 fn is_setext_underline(line: &str) -> bool {
+    // Four columns is indented code (or a lazy paragraph continuation), not an
+    // underline; without this a `    ---` line would become a heading and the
+    // line itself would be dropped.
+    if indent_columns(line) > 3 {
+        return false;
+    }
     let t = line.trim();
     match t.chars().next() {
         Some('=') => t.chars().all(|c| c == '='),
@@ -1595,24 +1602,47 @@ fn file_uri(path: &Path) -> String {
     }
 }
 
-fn rewrite_images(mut rest: &str, doc_dir: &Path) -> String {
+fn rewrite_images(rest: &str, doc_dir: &Path) -> String {
     let mut out = String::with_capacity(rest.len());
-    while let Some(start) = rest.find("![") {
-        out.push_str(&rest[..start]);
-        rest = &rest[start..];
-        let mid = match rest.find("](") {
+    let mut i = 0;
+    while i < rest.len() {
+        let s = &rest[i..];
+        // Code spans win over image syntax, as in `expand_links`: an image
+        // inside inline code is literal text and must not be rewritten.
+        if s.starts_with('`') {
+            if let Some(used) = code_span_len(s) {
+                out.push_str(&s[..used]);
+                i += used;
+                continue;
+            }
+        }
+        if !s.starts_with("![") {
+            let Some(c) = s.chars().next() else {
+                break;
+            };
+            out.push(c);
+            i += c.len_utf8();
+            continue;
+        }
+        let mid = match s.find("](") {
             Some(j) => j,
-            None => break,
+            None => {
+                out.push_str(s);
+                break;
+            }
         };
-        let (inner, end) = match link_inner(&rest[mid + 2..]) {
+        let (inner, end) = match link_inner(&s[mid + 2..]) {
             Some(v) => v,
-            None => break,
+            None => {
+                out.push_str(s);
+                break;
+            }
         };
-        let alt = &rest[2..mid];
+        let alt = &s[2..mid];
         // Drop an optional `"title"` and keep a bracketed destination's spaces.
         let Some(target) = image_target(inner) else {
             out.push_str("![");
-            rest = &rest[2..];
+            i += 2;
             continue;
         };
         let skip = target.starts_with('/')
@@ -1623,13 +1653,11 @@ fn rewrite_images(mut rest: &str, doc_dir: &Path) -> String {
             // Remote/data/absolute images are never fetched. Show the alt text
             // instead of an image placeholder with no label.
             out.push_str(alt);
-            rest = &rest[mid + 2 + end..];
-            continue;
+        } else {
+            out.push_str(&format!("![{alt}]({})", file_uri(&doc_dir.join(target))));
         }
-        out.push_str(&format!("![{alt}]({})", file_uri(&doc_dir.join(target))));
-        rest = &rest[mid + 2 + end..];
+        i += mid + 2 + end;
     }
-    out.push_str(rest);
     out
 }
 
@@ -2680,6 +2708,22 @@ mod tests {
         }
 
         #[test]
+        fn four_space_indented_dash_stays_a_paragraph() {
+            let p = prepare("text\n    ---\n", Path::new("/d"));
+            assert!(p.headings.is_empty(), "{:?}", p.headings);
+            assert!(p.paragraphs.values().any(|s| s == "text"));
+            assert!(p.markdown.contains("    ---"), "{:?}", p.markdown);
+        }
+
+        #[test]
+        fn four_space_indented_equals_stays_a_paragraph() {
+            let p = prepare("text\n    ===\n", Path::new("/d"));
+            assert!(p.headings.is_empty(), "{:?}", p.headings);
+            assert!(p.paragraphs.values().any(|s| s == "text"));
+            assert!(p.markdown.contains("    ==="), "{:?}", p.markdown);
+        }
+
+        #[test]
         fn raw_html_block_keeps_hash_line_literal() {
             let p = prepare("<div>\n# not a heading\n</div>\n", Path::new("/d"));
             assert!(p.headings.is_empty());
@@ -2870,6 +2914,14 @@ mod tests {
             let out = p.paragraphs.values().next().unwrap();
             assert!(out.contains("![a](file:///docs/x(1).png)"));
             assert!(out.contains("![b](file:///docs/a#b.png)"));
+        }
+
+        #[test]
+        fn image_syntax_inside_inline_code_is_left_verbatim() {
+            let md = "use `![x](a.png)` literally\n";
+            let p = prepare(md, Path::new("/docs"));
+            let out = p.paragraphs.values().next().unwrap();
+            assert_eq!(out, "use `![x](a.png)` literally");
         }
     }
 

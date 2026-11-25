@@ -764,6 +764,7 @@ mod tests {
         use super::super::table_to_csv;
         use super::super::visible_text;
         use super::super::RowHover;
+        use super::super::SearchUi;
         use crate::doc::TableSpec;
         use std::collections::HashMap;
 
@@ -942,6 +943,24 @@ mod tests {
             let again = cell_texts(&mut cache, "t", &changed, 2);
             assert_eq!(again.len(), 6);
             assert_eq!(&*again[1], "h2");
+        }
+
+        #[test]
+        fn copy_button_is_reachable_after_out_of_order_controls() {
+            // `TableUi::show` adds the cell link controls while the grid paints,
+            // then appends the overlaid copy button whose rect sits at the
+            // table's top. The list therefore arrives out of top order.
+            let rect =
+                |y: f32| egui::Rect::from_min_size(egui::pos2(0.0, y), egui::vec2(14.0, 14.0));
+            let mut s = SearchUi::new();
+            s.add_control(rect(100.0), egui::CursorIcon::PointingHand);
+            s.add_control(rect(140.0), egui::CursorIcon::PointingHand);
+            s.add_control(rect(90.0), egui::CursorIcon::Default); // copy button
+            s.finish_frame(0.0, 0.0);
+            assert!(
+                s.pointer_on_control(egui::pos2(5.0, 95.0)),
+                "the table copy button must stay clickable"
+            );
         }
     }
 }

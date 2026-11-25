@@ -194,6 +194,31 @@ pub(crate) fn edge_scroll(pointer_y: f32, viewport_top: f32, viewport_bottom: f3
     }
 }
 
+/// Scroll offset after adding `delta`, clamped to `0..=max`. A non-finite
+/// target keeps the current offset so a bad line height or advance cannot park
+/// the view at a NaN offset.
+fn scroll_by(current: f32, delta: f32, max: f32) -> f32 {
+    let max = max.max(0.0);
+    let target = current + delta;
+    if target.is_finite() {
+        target.clamp(0.0, max)
+    } else {
+        current.clamp(0.0, max)
+    }
+}
+
+/// Vertical offset after scrolling `lines` body-text lines. Callers pass the
+/// current zoomed line height, so `j` moves one rendered line at every zoom.
+pub(crate) fn scroll_by_lines(current: f32, lines: f32, line_height: f32, max: f32) -> f32 {
+    scroll_by(current, lines * line_height, max)
+}
+
+/// Horizontal offset after panning `cols` monospace columns. Callers pass the
+/// current zoomed advance width, so `h`/`l` move whole columns.
+pub(crate) fn scroll_by_columns(current: f32, cols: f32, advance: f32, max: f32) -> f32 {
+    scroll_by(current, cols * advance, max)
+}
+
 /// Height of the top and bottom strips that auto-scroll a selection drag.
 const EDGE_SCROLL_BAND: f32 = 24.0;
 
@@ -946,6 +971,36 @@ mod tests {
                 edge_scroll(900.0, 0.0, 900.0),
                 -edge_scroll(0.0, 0.0, 900.0)
             );
+        }
+
+        #[test]
+        fn line_scroll_moves_by_the_zoomed_line_height() {
+            // 16 px body line at 1x, 32 px at 2x: one `j` is one line either way.
+            assert_eq!(scroll_by_lines(100.0, 1.0, 16.0, 1000.0), 116.0);
+            assert_eq!(scroll_by_lines(100.0, 1.0, 32.0, 1000.0), 132.0);
+            assert_eq!(scroll_by_lines(100.0, -1.0, 16.0, 1000.0), 84.0);
+            // Clamped at both ends, never negative.
+            assert_eq!(scroll_by_lines(10.0, -5.0, 16.0, 1000.0), 0.0);
+            assert_eq!(scroll_by_lines(990.0, 1.0, 16.0, 1000.0), 1000.0);
+        }
+
+        #[test]
+        fn column_scroll_moves_by_the_zoomed_advance_width() {
+            assert_eq!(scroll_by_columns(100.0, 3.0, 8.0, 1000.0), 124.0);
+            assert_eq!(scroll_by_columns(100.0, 3.0, 16.0, 1000.0), 148.0);
+            assert_eq!(scroll_by_columns(100.0, -1.0, 8.0, 1000.0), 92.0);
+            assert_eq!(scroll_by_columns(4.0, -1.0, 8.0, 1000.0), 0.0);
+            assert_eq!(scroll_by_columns(996.0, 1.0, 8.0, 1000.0), 1000.0);
+        }
+
+        #[test]
+        fn scroll_by_guards_non_finite_input() {
+            // A NaN line height must not park the view at a NaN offset.
+            assert_eq!(scroll_by_lines(50.0, 1.0, f32::NAN, 100.0), 50.0);
+            assert_eq!(scroll_by_columns(50.0, 3.0, f32::INFINITY, 100.0), 50.0);
+            // A bad current offset snaps to the valid range.
+            assert_eq!(scroll_by_lines(-5.0, f32::NAN, 16.0, 100.0), 0.0);
+            assert_eq!(scroll_by_lines(500.0, 0.0, 16.0, -1.0), 0.0);
         }
     }
 }

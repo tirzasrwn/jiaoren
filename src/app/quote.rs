@@ -9,30 +9,24 @@ use crate::doc::QuoteSpec;
 pub(crate) struct QuoteUi {
     specs: HashMap<String, QuoteSpec>,
     column: f32,
-    occurrences: HashMap<String, usize>,
 }
 
 impl QuoteUi {
     pub(crate) fn new(specs: HashMap<String, QuoteSpec>) -> Self {
-        QuoteUi {
-            specs,
-            column: 0.0,
-            occurrences: HashMap::new(),
-        }
+        QuoteUi { specs, column: 0.0 }
     }
 
     pub(crate) fn begin_frame(&mut self, column: f32) {
         self.column = column;
-        self.occurrences.clear();
     }
 
     pub(crate) fn reset(&mut self, specs: HashMap<String, QuoteSpec>) {
         self.specs = specs;
-        self.occurrences.clear();
     }
 
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, id: &str, search: &mut SearchUi) {
-        let Some(spec) = self.specs.get(id).cloned() else {
+        // Borrow the spec: nothing below mutates `self`.
+        let Some(spec) = self.specs.get(id) else {
             return;
         };
         let mut lines: &[(u8, String)] = &spec.lines;
@@ -45,11 +39,15 @@ impl QuoteUi {
         if lines.is_empty() {
             return;
         }
-        let text = lines
-            .iter()
-            .map(|(_, line)| line.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
+        // Visible text is content-hashed like every other block, so it is built
+        // once per document, not re-joined on every frame.
+        let text = search.cached_text(id, || {
+            lines
+                .iter()
+                .map(|(_, line)| line.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
         let block = search.record(ui, text);
         let (ranges, current) = search.highlights(block);
         let selection = search.selection_range(block);

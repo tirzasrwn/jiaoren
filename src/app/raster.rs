@@ -49,21 +49,22 @@ pub(crate) fn capped_scale(w: f32, h: f32, scale: f32) -> f32 {
 
 /// Some SVGs (Mermaid C4/class links) use `xlink:href` without declaring the
 /// `xlink` namespace, which `usvg` rejects. Declare it on the root `<svg>`.
+/// Invalid UTF-8 is returned unchanged, so `usvg` reports the real cause.
 fn ensure_xlink_namespace(bytes: Vec<u8>) -> Vec<u8> {
-    let Ok(text) = String::from_utf8(bytes) else {
-        return Vec::new();
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return bytes;
     };
     if !text.contains("xlink:") || text.contains("xmlns:xlink") {
-        return text.into_bytes();
+        return bytes;
     }
     let Some(start) = text.find("<svg") else {
-        return text.into_bytes();
+        return bytes;
     };
     let Some(offset) = text[start..].find('>') else {
-        return text.into_bytes();
+        return bytes;
     };
     let at = start + offset;
-    let mut out = String::with_capacity(text.len() + 44);
+    let mut out = String::with_capacity(bytes.len() + 44);
     out.push_str(&text[..at]);
     out.push_str(" xmlns:xlink=\"http://www.w3.org/1999/xlink\"");
     out.push_str(&text[at..]);
@@ -111,7 +112,16 @@ pub(crate) fn rasterize(
 #[cfg(test)]
 mod tests {
     mod raster {
+        use super::super::ensure_xlink_namespace;
         use super::super::rasterize;
+
+        #[test]
+        fn non_utf8_svg_bytes_are_returned_unchanged() {
+            // Not text, so there is no namespace to patch; passing it through
+            // lets `usvg` report the encoding instead of an empty-input parse.
+            let raw = vec![0xff, 0xfe, 0x3c, 0x73, 0x76, 0x67];
+            assert_eq!(ensure_xlink_namespace(raw.clone()), raw);
+        }
 
         #[test]
         fn undeclared_xlink_namespace_is_added() {

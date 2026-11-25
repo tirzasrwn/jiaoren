@@ -26,23 +26,54 @@ fn fold(c: char) -> char {
 /// All non-overlapping matches of `pattern`, left to right and per block in
 /// order. Case-sensitive when the pattern contains an uppercase character
 /// (smartcase), case-insensitive otherwise. An empty pattern matches nothing.
-pub fn find_matches(blocks: &[String], pattern: &str) -> Vec<Hit> {
+///
+/// Blocks are borrowed, so a caller holding `Rc<str>` texts does not copy the
+/// document: the case-sensitive path scans the source with `match_indices`
+/// (zero-copy) and the case-insensitive path reuses one char buffer per call.
+pub fn find_matches<'a>(blocks: impl IntoIterator<Item = &'a str>, pattern: &str) -> Vec<Hit> {
     if pattern.is_empty() {
         return Vec::new();
     }
-    let sensitive = pattern.chars().any(char::is_uppercase);
-    let needle: Vec<char> = if sensitive {
-        pattern.chars().collect()
+    if pattern.chars().any(char::is_uppercase) {
+        find_case_sensitive(blocks, pattern)
     } else {
-        pattern.chars().map(fold).collect()
-    };
+        find_case_insensitive(blocks, pattern)
+    }
+}
+
+/// Byte-exact matches: `match_indices` is already non-overlapping and left to
+/// right, so only the byte offsets need converting to char offsets.
+fn find_case_sensitive<'a>(blocks: impl IntoIterator<Item = &'a str>, pattern: &str) -> Vec<Hit> {
     let mut hits = Vec::new();
-    for (block, text) in blocks.iter().enumerate() {
-        let hay: Vec<char> = if sensitive {
-            text.chars().collect()
-        } else {
-            text.chars().map(fold).collect()
-        };
+    for (block, text) in blocks.into_iter().enumerate() {
+        let mut char_cursor = 0usize;
+        let mut byte_cursor = 0usize;
+        for (byte, found) in text.match_indices(pattern) {
+            // Count the chars in the skipped gap once; total work stays O(n).
+            char_cursor += text[byte_cursor..byte].chars().count();
+            byte_cursor = byte + found.len();
+            let start = char_cursor;
+            let len = found.chars().count();
+            char_cursor += len;
+            hits.push(Hit {
+                block,
+                start,
+                end: start + len,
+            });
+        }
+    }
+    hits
+}
+
+/// Folded (lowercase) matches, comparing char windows against the folded
+/// pattern. One `hay` buffer is reused across every block.
+fn find_case_insensitive<'a>(blocks: impl IntoIterator<Item = &'a str>, pattern: &str) -> Vec<Hit> {
+    let needle: Vec<char> = pattern.chars().map(fold).collect();
+    let mut hits = Vec::new();
+    let mut hay: Vec<char> = Vec::new();
+    for (block, text) in blocks.into_iter().enumerate() {
+        hay.clear();
+        hay.extend(text.chars().map(fold));
         let mut i = 0;
         // Never compare past the end; `needle` is non-empty.
         while i + needle.len() <= hay.len() {
@@ -87,7 +118,7 @@ pub struct SearchState {
 
 impl SearchState {
     /// Start a search for `pattern` over `blocks`. Empty patterns clear instead.
-    pub fn set_pattern(&mut self, blocks: &[String], pattern: &str) {
+    pub fn set_pattern<'a>(&mut self, blocks: impl IntoIterator<Item = &'a str>, pattern: &str) {
         self.hits = find_matches(blocks, pattern);
         self.current_match = 0;
         self.pattern = if pattern.is_empty() {
@@ -162,13 +193,9 @@ mod tests {
         use super::super::find_matches;
         use super::super::Hit;
 
-        fn blocks(texts: &[&str]) -> Vec<String> {
-            texts.iter().map(|s| (*s).to_string()).collect()
-        }
-
         #[test]
         fn lowercase_pattern_is_case_insensitive() {
-            let hits = find_matches(&blocks(&["Mermaid and MERMAID"]), "mermaid");
+            let hits = find_matches(["Mermaid and MERMAID"], "mermaid");
             assert_eq!(hits.len(), 2);
             assert_eq!(
                 hits[0],
@@ -190,7 +217,7 @@ mod tests {
 
         #[test]
         fn uppercase_pattern_is_case_sensitive() {
-            let hits = find_matches(&blocks(&["Mermaid and MERMAID"]), "Mermaid");
+            let hits = find_matches(["Mermaid and MERMAID"], "Mermaid");
             assert_eq!(hits.len(), 1);
             assert_eq!(
                 hits[0],
@@ -200,12 +227,12 @@ mod tests {
                     end: 7
                 }
             );
-            assert!(find_matches(&blocks(&["Mermaid"]), "MERMAID").is_empty());
+            assert!(find_matches(["Mermaid"], "MERMAID").is_empty());
         }
 
         #[test]
         fn matches_across_lines_inside_one_block() {
-            let hits = find_matches(&blocks(&["first line\nsecond line"]), "line");
+            let hits = find_matches(["first line\nsecond line"], "line");
             assert_eq!(hits.len(), 2);
             assert_eq!(hits[0].end, 10);
             assert_eq!(hits[1].start, 18);
@@ -214,7 +241,7 @@ mod tests {
         #[test]
         fn offsets_are_char_indices_for_unicode() {
             let text = "café 東京 café";
-            let hits = find_matches(&blocks(&[text]), "café");
+            let hits = find_matches([text], "café");
             assert_eq!(hits.len(), 2);
             // "café" is 4 chars, 5 bytes; the CJK block is 3 chars, 9 bytes.
             assert_eq!(
@@ -233,7 +260,7 @@ mod tests {
                     end: 12
                 }
             );
-            let cjk = find_matches(&blocks(&[text]), "東京");
+            let cjk = find_matches([text], "東京");
             assert_eq!(
                 cjk[0],
                 Hit {
@@ -246,7 +273,7 @@ mod tests {
 
         #[test]
         fn overlapping_candidates_are_not_double_counted() {
-            let hits = find_matches(&blocks(&["aaaa"]), "aaa");
+            let hits = find_matches(["aaaa"], "aaa");
             assert_eq!(hits.len(), 1);
             assert_eq!(
                 hits[0],
@@ -260,12 +287,12 @@ mod tests {
 
         #[test]
         fn empty_pattern_has_no_hits() {
-            assert!(find_matches(&blocks(&["anything"]), "").is_empty());
+            assert!(find_matches(["anything"], "").is_empty());
         }
 
         #[test]
         fn blocks_are_searched_in_order() {
-            let hits = find_matches(&blocks(&["zero", "one and one", "two"]), "one");
+            let hits = find_matches(["zero", "one and one", "two"], "one");
             assert_eq!(hits.len(), 2);
             assert_eq!(hits[0].block, 1);
             assert_eq!(hits[1].block, 1);
@@ -281,7 +308,7 @@ mod tests {
         fn soft_wrapped_paragraph_matches_its_rendered_line() {
             let block = search_text("tables and mermaid\ndiagrams render as one run");
             assert_eq!(block, "tables and mermaid diagrams render as one run");
-            let hits = find_matches(&[block], "mermaid diagrams");
+            let hits = find_matches([block.as_str()], "mermaid diagrams");
             assert_eq!(hits.len(), 1);
             assert_eq!(hits[0].start, 11);
         }
@@ -290,20 +317,17 @@ mod tests {
         fn emphasis_and_link_markup_match_visible_text_only() {
             let block = search_text("a **bold** word and [label](https://x/y)");
             assert_eq!(block, "a bold word and label");
-            assert_eq!(find_matches(std::slice::from_ref(&block), "bold").len(), 1);
-            assert_eq!(find_matches(&[block], "label").len(), 1);
+            assert_eq!(find_matches([block.as_str()], "bold").len(), 1);
+            assert_eq!(find_matches([block.as_str()], "label").len(), 1);
             // The Markdown markers themselves are not rendered, so not searchable.
-            assert!(find_matches(&[search_text("**bold**")], "**bold**").is_empty());
+            assert!(find_matches([search_text("**bold**").as_str()], "**bold**").is_empty());
         }
 
         #[test]
         fn code_text_is_matched_literally() {
             let code = "let marker = \"**bold**\";\nrun `x`;".to_string();
-            assert_eq!(
-                find_matches(std::slice::from_ref(&code), "**bold**").len(),
-                1
-            );
-            let hits = find_matches(&[code], "`x`");
+            assert_eq!(find_matches([code.as_str()], "**bold**").len(), 1);
+            let hits = find_matches([code.as_str()], "`x`");
             assert_eq!(hits.len(), 1);
             assert_eq!(hits[0].start, 29);
         }
@@ -332,14 +356,10 @@ mod tests {
     mod state {
         use super::super::SearchState;
 
-        fn blocks(texts: &[&str]) -> Vec<String> {
-            texts.iter().map(|s| (*s).to_string()).collect()
-        }
-
         #[test]
         fn status_is_one_based_and_counts_every_hit() {
             let mut s = SearchState::default();
-            s.set_pattern(&blocks(&["mermaid", "mermaid", "x"]), "mermaid");
+            s.set_pattern(["mermaid", "mermaid", "x"], "mermaid");
             assert_eq!(s.status_text().as_deref(), Some("/mermaid [1/2]"));
             s.next();
             assert_eq!(s.status_text().as_deref(), Some("/mermaid [2/2]"));
@@ -353,7 +373,7 @@ mod tests {
         #[test]
         fn empty_pattern_has_no_status() {
             let mut s = SearchState::default();
-            s.set_pattern(&blocks(&["anything"]), "");
+            s.set_pattern(["anything"], "");
             assert_eq!(s.status_text(), None);
             assert!(s.hits.is_empty());
             s.next();
@@ -363,7 +383,7 @@ mod tests {
         #[test]
         fn no_hits_reports_zero_of_zero() {
             let mut s = SearchState::default();
-            s.set_pattern(&blocks(&["anything"]), "missing");
+            s.set_pattern(["anything"], "missing");
             assert_eq!(s.status_text().as_deref(), Some("/missing [0/0]"));
             assert_eq!(s.current_block(), None);
         }
@@ -371,7 +391,7 @@ mod tests {
         #[test]
         fn clear_drops_pattern_and_hits() {
             let mut s = SearchState::default();
-            s.set_pattern(&blocks(&["mermaid"]), "mermaid");
+            s.set_pattern(["mermaid"], "mermaid");
             s.clear();
             assert!(s.pattern.is_none());
             assert!(s.hits.is_empty());
@@ -381,7 +401,7 @@ mod tests {
         #[test]
         fn block_highlights_are_local_and_mark_the_current_hit() {
             let mut s = SearchState::default();
-            s.set_pattern(&blocks(&["mermaid mermaid", "other mermaid"]), "mermaid");
+            s.set_pattern(["mermaid mermaid", "other mermaid"], "mermaid");
             // Three hits: blocks 0, 0, 1; current starts at 0.
             let (ranges, current) = s.block_highlights(0);
             assert_eq!(ranges, vec![(0, 7), (8, 15)]);

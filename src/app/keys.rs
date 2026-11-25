@@ -147,6 +147,44 @@ pub fn quit_suppressed(now: f64, closed_at: Option<f64>) -> bool {
     closed_at.is_some_and(|t| now - t < QUIT_SUPPRESS_WINDOW)
 }
 
+/// Keys whose action may repeat while held: scrolling only. Every other key
+/// (`yy`, `gg`, `G`, `r`, `t`, `]`, `[`, Tab, quit) must wait for a fresh press;
+/// otherwise holding the key copies the document, reloads it in a loop, or
+/// cycles files.
+pub(crate) fn repeats_while_held(key: Key) -> bool {
+    matches!(
+        key,
+        Key::J
+            | Key::K
+            | Key::H
+            | Key::L
+            | Key::D
+            | Key::U
+            | Key::B
+            | Key::Space
+            | Key::ArrowUp
+            | Key::ArrowDown
+            | Key::ArrowLeft
+            | Key::ArrowRight
+    )
+}
+
+/// [`apply_key`] for a raw key event. A repeat of a non-scroll key is dropped
+/// before it runs, so a held key cannot arm or complete `yy`/`gg`, reload, or
+/// toggle anything.
+pub fn apply_key_event(
+    state: &mut KeyState,
+    key: Key,
+    modifiers: Modifiers,
+    repeat: bool,
+    now: Instant,
+) -> Option<Action> {
+    if repeat && !repeats_while_held(key) {
+        return None;
+    }
+    apply_key(state, key, modifiers, now)
+}
+
 /// Map one pressed key to an [`Action`]. Pure: no egui context, no I/O.
 pub fn apply_key(
     state: &mut KeyState,
@@ -273,6 +311,101 @@ mod tests {
             // Shift+Y is not a copy chord either.
             assert_eq!(
                 apply_key(&mut s, Key::Y, Modifiers::SHIFT, std::time::Instant::now()),
+                None
+            );
+        }
+
+        #[test]
+        fn repeat_y_arms_once_but_never_copies() {
+            let mut s = KeyState::default();
+            let t0 = std::time::Instant::now();
+            // First press arms the sequence.
+            assert_eq!(
+                apply_key_event(&mut s, Key::Y, Modifiers::NONE, false, t0),
+                None
+            );
+            // Held y repeats every ~30 ms; none may complete `yy` or disturb the
+            // pending arm.
+            for _ in 0..5 {
+                assert_eq!(
+                    apply_key_event(
+                        &mut s,
+                        Key::Y,
+                        Modifiers::NONE,
+                        true,
+                        t0 + std::time::Duration::from_millis(30)
+                    ),
+                    None
+                );
+                assert!(s.last_y.is_some(), "a repeat must not consume the arm");
+            }
+            // A fresh second press still copies normally.
+            assert_eq!(
+                apply_key_event(
+                    &mut s,
+                    Key::Y,
+                    Modifiers::NONE,
+                    false,
+                    t0 + std::time::Duration::from_millis(200)
+                ),
+                Some(Action::CopyDocument)
+            );
+        }
+
+        #[test]
+        fn repeat_r_does_not_reload() {
+            let mut s = KeyState::default();
+            let now = std::time::Instant::now();
+            assert_eq!(
+                apply_key_event(&mut s, Key::R, Modifiers::NONE, false, now),
+                Some(Action::Reload)
+            );
+            assert_eq!(
+                apply_key_event(&mut s, Key::R, Modifiers::NONE, true, now),
+                None
+            );
+        }
+
+        #[test]
+        fn repeat_scroll_keys_still_scroll() {
+            let mut s = KeyState::default();
+            let now = std::time::Instant::now();
+            assert_eq!(
+                apply_key_event(&mut s, Key::J, Modifiers::NONE, true, now),
+                Some(Action::ScrollLines(1.0))
+            );
+            assert_eq!(
+                apply_key_event(&mut s, Key::ArrowDown, Modifiers::NONE, true, now),
+                Some(Action::ScrollLines(1.0))
+            );
+            assert_eq!(
+                apply_key_event(&mut s, Key::Space, Modifiers::NONE, true, now),
+                Some(Action::ScrollPages(1.0))
+            );
+        }
+
+        #[test]
+        fn repeat_g_and_bracket_keys_are_dropped() {
+            let mut s = KeyState::default();
+            let t0 = std::time::Instant::now();
+            for key in [
+                Key::G,
+                Key::CloseBracket,
+                Key::OpenBracket,
+                Key::Tab,
+                Key::T,
+            ] {
+                assert_eq!(
+                    apply_key_event(&mut s, key, Modifiers::NONE, true, t0),
+                    None,
+                    "{key:?} must not repeat"
+                );
+            }
+            // A repeated `g` must not arm the `gg` window either.
+            assert!(s.last_g.is_none());
+            // Shift+G (bottom) is a non-scroll action too.
+            assert_eq!(
+                apply_key_event(&mut s, Key::G, Modifiers::SHIFT, true, t0),
                 None
             );
         }

@@ -55,6 +55,11 @@ impl RunKind {
 /// to keep painting cheap, not to keep every block of a huge document.
 const MAX_INLINE_CACHE: usize = 2048;
 
+/// Deepest emphasis nesting [`parse_inline`] recurses into. A document is
+/// untrusted input and each level re-parses its slice, so unbounded recursion
+/// would overflow the stack; markers past the cap are emitted literally.
+const MAX_INLINE_DEPTH: u32 = 32;
+
 thread_local! {
     /// Parsed runs per source text. Every visible block parses on every frame,
     /// and the parser is quadratic on adversarial input (unclosed `[` or
@@ -86,8 +91,13 @@ pub(crate) fn clear_inline_cache() {
 /// Parse the inline Markdown the viewer supports. Single left-to-right scan:
 /// backslash escapes, code spans first (they win over emphasis), `**` before
 /// `*`, and an unbalanced marker is emitted literally instead of swallowing the
-/// rest of the paragraph.
+/// rest of the paragraph. Emphasis nesting past [`MAX_INLINE_DEPTH`] is emitted
+/// literally too, so hostile input cannot overflow the stack.
 pub fn parse_inline(md: &str) -> Vec<Run> {
+    parse_inline_at(md, 0)
+}
+
+fn parse_inline_at(md: &str, depth: u32) -> Vec<Run> {
     let mut runs = Vec::new();
     let mut text = String::new();
     let mut i = 0;
@@ -161,10 +171,10 @@ pub fn parse_inline(md: &str) -> Vec<Run> {
 
         if rest.starts_with("***") || rest.starts_with("___") {
             let m = &rest[..3];
-            if delimiter_can_open(md, i, 3, c) {
+            if depth < MAX_INLINE_DEPTH && delimiter_can_open(md, i, 3, c) {
                 if let Some(end) = find_marker(&rest[3..], m, c) {
                     flush_text(&mut runs, &mut text);
-                    let inner = parse_inline(&rest[3..3 + end]);
+                    let inner = parse_inline_at(&rest[3..3 + end], depth + 1);
                     runs.extend(inner.into_iter().map(|r| Run {
                         kind: combine(&RunKind::BoldItalic, r.kind),
                         ..r
@@ -180,10 +190,10 @@ pub fn parse_inline(md: &str) -> Vec<Run> {
 
         if rest.starts_with("**") || rest.starts_with("__") {
             let m = &rest[..2];
-            if delimiter_can_open(md, i, 2, c) {
+            if depth < MAX_INLINE_DEPTH && delimiter_can_open(md, i, 2, c) {
                 if let Some(end) = find_marker(&rest[2..], m, c) {
                     flush_text(&mut runs, &mut text);
-                    let inner = parse_inline(&rest[2..2 + end]);
+                    let inner = parse_inline_at(&rest[2..2 + end], depth + 1);
                     runs.extend(inner.into_iter().map(|r| Run {
                         kind: combine(&RunKind::Bold, r.kind),
                         ..r
@@ -198,10 +208,10 @@ pub fn parse_inline(md: &str) -> Vec<Run> {
         }
 
         if c == '*' || c == '_' {
-            if delimiter_can_open(md, i, 1, c) {
+            if depth < MAX_INLINE_DEPTH && delimiter_can_open(md, i, 1, c) {
                 if let Some(end) = find_single(&rest[1..], c) {
                     flush_text(&mut runs, &mut text);
-                    let inner = parse_inline(&rest[1..1 + end]);
+                    let inner = parse_inline_at(&rest[1..1 + end], depth + 1);
                     runs.extend(inner.into_iter().map(|r| Run {
                         kind: combine(&RunKind::Italic, r.kind),
                         ..r
@@ -1935,6 +1945,38 @@ mod tests {
                     kind: RunKind::BoldItalic,
                 }]
             );
+        }
+
+        #[test]
+        fn depth_cap_renders_the_marker_literally() {
+            let runs = parse_inline_at("***x***", MAX_INLINE_DEPTH);
+            assert_eq!(
+                runs,
+                vec![Run {
+                    text: "***x***".into(),
+                    kind: RunKind::Text,
+                }]
+            );
+        }
+
+        #[test]
+        fn deep_marker_nesting_keeps_its_text() {
+            let depth = 512;
+            let mut md = String::new();
+            for _ in 0..depth {
+                md.push_str("*a **b ***c `d` ");
+            }
+            md.push('x');
+            for _ in 0..depth {
+                md.push_str(" `d` c*** b** a*");
+            }
+            // Must return at all: recursion is capped, so no stack overflow.
+            let text: String = parse_inline(&md).iter().map(|r| r.text.as_str()).collect();
+            assert!(text.contains('x'), "sentinel lost: {text:.80}");
+            assert_eq!(text.matches('a').count(), depth * 2, "{text:.80}");
+            assert_eq!(text.matches('b').count(), depth * 2, "{text:.80}");
+            assert_eq!(text.matches('c').count(), depth * 2, "{text:.80}");
+            assert_eq!(text.matches('d').count(), depth * 2, "{text:.80}");
         }
     }
 

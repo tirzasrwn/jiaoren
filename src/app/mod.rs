@@ -36,11 +36,13 @@ use code::CodeUi;
 use diagram::DiagramUi;
 use geometry::{
     bottom_pad, content_column, edge_scroll, frame_scroll_x, home_scroll, home_target,
-    jump_scroll_top, overscroll_pad,
+    jump_scroll_top, overscroll_pad, scroll_by_columns, scroll_by_lines,
 };
 use heading::HeadingUi;
 use image::ImageUi;
-use keys::{apply_key, cancel_action, quit_suppressed, Action, CancelAction, CopyGuard, KeyState};
+use keys::{
+    apply_key_event, cancel_action, quit_suppressed, Action, CancelAction, CopyGuard, KeyState,
+};
 use list::ListUi;
 use placeholder::{parse, Placeholder};
 use searchui::SearchUi;
@@ -143,9 +145,10 @@ fn take_link_copied(ctx: &egui::Context) -> bool {
         .is_some()
 }
 
-/// The link under the pointer, if the document painted one in the previous
-/// pass. The pass number keeps a stale entry from firing after the pointer
-/// moved off the link.
+/// The link under the pointer, if the document painted one since the last
+/// frame. Stale entries cannot fire: the document paint clears this entry at the
+/// start of every frame (see the `CommonMarkViewer` block in [`App::ui`]) before
+/// anything reads it.
 fn take_hovered_link(ctx: &egui::Context) -> Option<String> {
     ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::new(crate::justify::HOVER_LINK)))
 }
@@ -1530,7 +1533,9 @@ impl eframe::App for App {
                 // Keys after Enter run through the document action path, so
                 // `Enter n` commits the pattern and then steps.
                 for (key, modifiers) in batch.after_enter {
-                    if let Some(action) = apply_key(&mut self.keys, key, modifiers, now) {
+                    if let Some(action) =
+                        apply_key_event(&mut self.keys, key, modifiers, false, now)
+                    {
                         acts.push(action);
                     }
                 }
@@ -1558,14 +1563,6 @@ impl eframe::App for App {
                         ..
                     } = ev
                     {
-                        // A held `q`/`Esc`/`Ctrl+C` keeps repeating after it
-                        // acted; only a fresh press may quit.
-                        if *repeat
-                            && (matches!(*key, egui::Key::Q | egui::Key::Escape)
-                                || (*key == egui::Key::C && (modifiers.command || modifiers.ctrl)))
-                        {
-                            continue;
-                        }
                         // The next repeat of the Ctrl+C that closed the popup
                         // must not quit either.
                         if suppress_quit
@@ -1575,15 +1572,20 @@ impl eframe::App for App {
                             continue;
                         }
                         // `y` copies an active drag selection; with none it
-                        // keeps arming `yy`.
-                        if *key == egui::Key::Y
+                        // keeps arming `yy`. A held `y` must not copy.
+                        if !*repeat
+                            && *key == egui::Key::Y
                             && !modifiers.any()
                             && self.search.borrow().selection.is_active()
                         {
                             acts.push(Action::CopySelection);
                             continue;
                         }
-                        if let Some(a) = apply_key(&mut self.keys, *key, *modifiers, now) {
+                        // A held key only repeats scrolling; `apply_key_event`
+                        // drops repeats of `yy`, `gg`, `r`, `t`, `]`, Tab, …
+                        if let Some(a) =
+                            apply_key_event(&mut self.keys, *key, *modifiers, *repeat, now)
+                        {
                             search_opened = a == Action::SearchOpen;
                             acts.push(a);
                         }
@@ -1608,13 +1610,21 @@ impl eframe::App for App {
             }
             match act {
                 Action::ScrollLines(f) => {
-                    self.scroll_y = (self.scroll_y + f * 40.0).clamp(0.0, self.scroll_max.y);
+                    // The panel style is the unscaled base; the document text is
+                    // drawn at `zoom`, so scale the line height to match.
+                    let line_h = ui.text_style_height(&egui::TextStyle::Body) * self.zoom;
+                    self.scroll_y = scroll_by_lines(self.scroll_y, f, line_h, self.scroll_max.y);
                 }
                 Action::ScrollPages(f) => {
                     self.scroll_y = (self.scroll_y + f * page_h).clamp(0.0, self.scroll_max.y);
                 }
                 Action::ScrollCols(f) => {
-                    self.scroll_x = (self.scroll_x + f * 40.0).clamp(0.0, self.scroll_max.x);
+                    let font = egui::TextStyle::Monospace.resolve(ui.style());
+                    let color = ui.visuals().text_color();
+                    let advance = ui.fonts_mut(|fonts| {
+                        fonts.layout_no_wrap("0".to_string(), font, color).size().x
+                    }) * self.zoom;
+                    self.scroll_x = scroll_by_columns(self.scroll_x, f, advance, self.scroll_max.x);
                 }
                 Action::Top => {
                     let home = home_target(self.pad);
@@ -1681,7 +1691,6 @@ impl eframe::App for App {
                 }
                 Action::ToggleToc => {
                     self.toc.toggle_open(&self.prepared.toc);
-                    ui.ctx().request_repaint();
                     ui.ctx().request_repaint();
                 }
                 // Esc/Ctrl+C: prompt, search, selection, then quit.

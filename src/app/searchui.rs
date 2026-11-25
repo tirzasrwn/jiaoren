@@ -40,7 +40,9 @@ pub(crate) struct SearchUi {
     /// Painted block rects from the last completed frame, for the text cursor.
     rects: Vec<egui::Rect>,
     /// Link/copy-control rects and their intended cursor from the last
-    /// completed frame. Presses here must not start a text selection.
+    /// completed frame. Presses here must not start a text selection. Sorted by
+    /// top in [`Self::finish_frame`]: a block that overlays its button (table,
+    /// code) appends it after its cells, so draw order is not top order.
     controls: Vec<(egui::Rect, egui::CursorIcon)>,
     /// Heading anchors painted this frame: slug → block index.
     anchors: std::collections::HashMap<String, usize>,
@@ -177,7 +179,7 @@ impl SearchUi {
     }
 
     /// True when `pos` is on a link or copy button painted last frame. Controls
-    /// are rects added in draw order, so they are sorted by top.
+    /// are sorted by top in [`Self::finish_frame`], so the prefix is searchable.
     pub(crate) fn pointer_on_control(&self, pos: egui::Pos2) -> bool {
         let above = self
             .controls
@@ -287,6 +289,11 @@ impl SearchUi {
     /// Convert this frame's screen positions into content positions:
     /// `offset + top - viewport_top`. Called once after the scroll area.
     pub(crate) fn finish_frame(&mut self, offset_y: f32, viewport_top: f32) {
+        // The control queries binary-search by top, but draw order is not top
+        // order: a table's copy button is appended after its cells while sitting
+        // at the table's top. Sort once here, before the next frame's queries.
+        self.controls
+            .sort_by(|a, b| a.0.top().total_cmp(&b.0.top()));
         self.ys.clear();
         self.ys
             .extend(self.tops.iter().map(|top| offset_y + top - viewport_top));
@@ -376,13 +383,12 @@ impl SearchUi {
     }
 
     /// Recompute the live match set from the current query. An empty query
-    /// clears hits but stays in input mode. `SearchState` works on owned
-    /// strings, so the shared block texts are copied once per edit, not once
-    /// per rendered block per frame.
+    /// clears hits but stays in input mode. The block texts are borrowed, so an
+    /// edit copies no document text.
     fn live_update(&mut self) {
         let pattern = self.query().to_string();
-        let texts: Vec<String> = self.texts.iter().map(|text| text.to_string()).collect();
-        self.state.set_pattern(&texts, &pattern);
+        self.state
+            .set_pattern(self.texts.iter().map(|text| &**text), &pattern);
     }
 
     /// Whether the command line owns the keyboard.
@@ -431,8 +437,7 @@ mod tests {
             let mut s = SearchUi::new();
             s.texts = rc(&["abc one", "abc two"]);
             // Previous committed search to restore on cancel.
-            let owned: Vec<String> = s.texts.iter().map(|t| t.to_string()).collect();
-            s.state.set_pattern(&owned, "two");
+            s.state.set_pattern(s.texts.iter().map(|t| &**t), "two");
             assert_eq!(s.state.pattern.as_deref(), Some("two"));
             s.open();
             assert!(s.is_open());
