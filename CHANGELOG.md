@@ -2,6 +2,14 @@
 
 All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 
+## 0.5.1 — 2026-11-26
+
+### Fixed
+
+- `]` / `[` home the new document's reading column again. The horizontal
+  offset only homed on the very first frame of a session, so a navigated
+  document drew its column one pad to the right.
+
 ## 0.5.0 — 2026-11-26
 
 ### Changed
