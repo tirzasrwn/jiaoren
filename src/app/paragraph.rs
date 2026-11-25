@@ -66,7 +66,7 @@ impl ParagraphUi {
         let block = search.record(ui, text);
         let (ranges, current) = search.highlights(block);
         let selection = search.selection_range(block);
-        let runs = crate::justify::parse_inline(source);
+        let runs = crate::justify::parse_inline_cached(source);
         let gap = crate::justify::block_gap(ui);
         let painted = crate::justify::draw_spaced(
             ui,

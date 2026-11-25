@@ -724,7 +724,7 @@ fn render_cell(
                 interactives: Vec::new(),
             };
         }
-        let runs = crate::justify::parse_inline(cell_md);
+        let runs = crate::justify::parse_inline_cached(cell_md);
         if runs.is_empty() {
             // Keep an all-blank row from collapsing to zero height.
             ui.add_space(ui.spacing().interact_size.y);

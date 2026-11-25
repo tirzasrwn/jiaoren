@@ -2,6 +2,26 @@
 
 All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- The release profile strips symbols and uses thin LTO, and the direct `resvg`
+  matches the version `egui_extras` already pulls in: the binary is 15.1 MiB
+  instead of 21.3 MB.
+
+### Fixed
+
+- Inline runs are memoised per block and cleared on reload, so a pathological
+  line (many unclosed `[` or backticks, dense emphasis) no longer re-parses
+  every frame and freezes the window.
+- A document larger than 32 MiB is rejected with a message instead of being
+  read into memory.
+- Opening a link reaps the browser process instead of leaving a zombie per
+  click.
+- A failed render removes its HTML scratch page and `.tmp` file, and
+  `--clean-cache` leaves another instance's fresh `.tmp` files alone.
+
 ## 0.4.0 — 2026-11-25
 
 ### Added
@@ -16,7 +36,7 @@ All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
   `--dark` still wins over a saved light theme.
 - A window resize re-homes the reading column, so a resize no longer leaves the
   document off-centre until `a` is pressed.
-- CI workflow (fmt, clippy, tests) and `tests/cli.rs` end-to-end CLI tests.
+- `tests/cli.rs` end-to-end CLI tests.
 - SHA-256 pinning for every downloaded artifact (mermaid.js, the Chromium zip,
   both FiraCode faces), verified before use; downloads have byte and stall
   caps.
@@ -52,5 +72,5 @@ All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 
 - Above 1× zoom the reading column is wider than the window; a resize re-homes
   the pan to the left instead of centring.
-- Inline layout and per-frame character maps are still recomputed; live search
-  copies the block texts once per keystroke.
+- Per-frame character maps are still recomputed; live search copies the block
+  texts once per keystroke.

@@ -41,7 +41,7 @@ impl HeadingUi {
         let size = heading_size(spec.level, body.size);
         let font = egui::FontId::new(size, body.family.clone());
         let color = ui.visuals().strong_text_color();
-        let runs = justify::parse_inline(&spec.text);
+        let runs = justify::parse_inline_cached(&spec.text);
         let row_h = ui.text_style_height(&egui::TextStyle::Body);
         // Vertical breathing room in body rows. The gap above stays at one row
         // (it matches the old `<mdspace>` spacing); the gap below is tightened

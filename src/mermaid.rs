@@ -114,11 +114,21 @@ fn clean_cache_dir(dir: &Path, all: bool) -> std::io::Result<(u64, usize)> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Ok((0, 0));
     };
+    let now = std::time::SystemTime::now();
     let mut bytes = 0u64;
     let mut files = 0usize;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if !all && (name == "chromium" || name == "fonts") {
+            continue;
+        }
+        let meta = entry.metadata().ok();
+        // A young temp may be an in-flight write of another jr instance; its
+        // rename would fail if we removed it.
+        if name.ends_with(".tmp")
+            && meta.as_ref().is_some_and(|m| m.is_file())
+            && !older_than(meta.and_then(|m| m.modified().ok()), now, TMP_GRACE)
+        {
             continue;
         }
         let path = entry.path();
@@ -353,9 +363,11 @@ impl Renderer {
         let page = build_html(&self.mermaid_js, source, theme);
         fs::write(&html, &page).map_err(|e| RenderError::HtmlWrite(e.to_string()))?;
 
-        let out = self.run_chromium(&chromium, &html)?;
-
+        let out = self.run_chromium(&chromium, &html);
+        // Drop the scratch page on every path, including a timeout or spawn
+        // failure, so the cache is not littered until the next prune.
         let _ = fs::remove_file(&html);
+        let out = out?;
 
         if !out.status.success() {
             let msg = format!(
@@ -421,8 +433,15 @@ impl Renderer {
         // same id get distinct tmp names.
         // Per-process temp: two jr instances may render the same diagram.
         let tmp = PathBuf::from(format!("{}.{}.tmp", path.display(), std::process::id()));
-        fs::write(&tmp, bytes)?;
-        fs::rename(&tmp, path)
+        if let Err(e) = fs::write(&tmp, bytes) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
+        if let Err(e) = fs::rename(&tmp, path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Download mermaid.js once, into `mermaid_js`, when it is missing.
@@ -1050,6 +1069,68 @@ mod tests {
             assert_eq!((bytes, files), (14, 2));
             assert!(!base.join("chromium").exists());
             assert!(!base.join("fonts").exists());
+            let _ = fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn clean_cache_keeps_fresh_temps_and_removes_stale_ones() {
+            let base = std::env::temp_dir().join(format!(
+                "jiaoren-clean-tmp-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&base).unwrap();
+            let fresh = base.join("fresh.svg.1.tmp");
+            let stale = base.join("stale.svg.1.tmp");
+            let normal = base.join("abc.svg");
+            fs::write(&fresh, b"new").unwrap();
+            fs::write(&stale, b"old").unwrap();
+            fs::write(&normal, b"svg").unwrap();
+            let old = std::time::SystemTime::now() - TMP_GRACE - std::time::Duration::from_secs(60);
+            let times = fs::FileTimes::new().set_modified(old);
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&stale)
+                .unwrap()
+                .set_times(times)
+                .unwrap();
+            let (_, files) = clean_cache_dir(&base, false).unwrap();
+            assert_eq!(files, 2);
+            // A fresh temp may be another running jr's in-flight write.
+            assert!(fresh.exists());
+            assert!(!stale.exists());
+            assert!(!normal.exists());
+            let _ = fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn atomic_write_leaves_no_temp_when_rename_fails() {
+            let base = std::env::temp_dir().join(format!(
+                "jiaoren-atomic-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&base).unwrap();
+            let r = test_renderer(&base);
+            // Rename over a directory fails after the temp write succeeded.
+            let dest = base.join("blocked.svg");
+            fs::create_dir_all(&dest).unwrap();
+            let tmp = PathBuf::from(format!("{}.{}.tmp", dest.display(), std::process::id()));
+            assert!(r.atomic_write(&dest, b"svg").is_err());
+            assert!(!tmp.exists(), "temp must be gone: {}", tmp.display());
+            // A failed temp write leaves nothing behind either.
+            let notdir = base.join("plain");
+            fs::write(&notdir, b"x").unwrap();
+            let dest = notdir.join("x.svg");
+            let tmp = PathBuf::from(format!("{}.{}.tmp", dest.display(), std::process::id()));
+            assert!(r.atomic_write(&dest, b"svg").is_err());
+            assert!(!tmp.exists());
             let _ = fs::remove_dir_all(&base);
         }
 

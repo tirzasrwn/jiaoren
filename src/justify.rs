@@ -2,6 +2,8 @@
 //! epaint has no justification, so each word is laid out on its own and the
 //! leftover column width is divided between the gaps of every line but the last.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -47,6 +49,38 @@ impl RunKind {
     pub(crate) fn is_code(&self) -> bool {
         matches!(self, RunKind::Code | RunKind::BoldCode)
     }
+}
+
+/// Cap on memoised inline parses. Cleared wholesale on overflow: the point is
+/// to keep painting cheap, not to keep every block of a huge document.
+const MAX_INLINE_CACHE: usize = 2048;
+
+thread_local! {
+    /// Parsed runs per source text. Every visible block parses on every frame,
+    /// and the parser is quadratic on adversarial input (unclosed `[` or
+    /// backticks, dense emphasis), so a document could otherwise freeze the UI.
+    static INLINE_CACHE: RefCell<HashMap<String, Rc<Vec<Run>>>> = RefCell::new(HashMap::new());
+}
+
+/// [`parse_inline`] memoised by source text, for the per-frame paint paths.
+pub(crate) fn parse_inline_cached(md: &str) -> Rc<Vec<Run>> {
+    INLINE_CACHE.with(|cache| {
+        if let Some(runs) = cache.borrow().get(md) {
+            return Rc::clone(runs);
+        }
+        let runs = Rc::new(parse_inline(md));
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= MAX_INLINE_CACHE {
+            cache.clear();
+        }
+        cache.insert(md.to_string(), Rc::clone(&runs));
+        runs
+    })
+}
+
+/// Drop the memoised parses; a reloaded document has different text.
+pub(crate) fn clear_inline_cache() {
+    INLINE_CACHE.with(|cache| cache.borrow_mut().clear());
 }
 
 /// Parse the inline Markdown the viewer supports. Single left-to-right scan:
@@ -2221,6 +2255,36 @@ mod tests {
             assert_eq!(parts.concat(), word);
             assert!(parts.iter().all(|p| m(p) <= 40.0), "{parts:?}");
             assert_eq!(parts[0].chars().count(), 4);
+        }
+    }
+
+    mod inline_cache {
+        use super::super::{
+            clear_inline_cache, parse_inline, parse_inline_cached, MAX_INLINE_CACHE,
+        };
+
+        #[test]
+        fn repeats_share_one_parse_and_texts_stay_distinct() {
+            clear_inline_cache();
+            let a = parse_inline_cached("**a** `b`");
+            let b = parse_inline_cached("**a** `b`");
+            assert!(std::rc::Rc::ptr_eq(&a, &b), "same text must hit the cache");
+            assert_eq!(*a, parse_inline("**a** `b`"), "cache must not change runs");
+            let c = parse_inline_cached("**a** `c`");
+            assert!(!std::rc::Rc::ptr_eq(&a, &c));
+            clear_inline_cache();
+        }
+
+        #[test]
+        fn cache_is_bounded() {
+            clear_inline_cache();
+            for i in 0..MAX_INLINE_CACHE + 10 {
+                let text = format!("word {i}");
+                assert_eq!(parse_inline_cached(&text).len(), 1);
+            }
+            let len = super::super::INLINE_CACHE.with(|c| c.borrow().len());
+            assert!(len <= MAX_INLINE_CACHE, "cache holds {len} entries");
+            clear_inline_cache();
         }
     }
 }

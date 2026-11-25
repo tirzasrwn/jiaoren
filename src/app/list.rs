@@ -72,7 +72,7 @@ impl ListUi {
                     ListKind::Ordered(n, delim) => Marker::Number(n, delim),
                     ListKind::Task { done, ordered } => Marker::Task(done, ordered),
                 };
-                let runs = justify::parse_inline(&item.text);
+                let runs = justify::parse_inline_cached(&item.text);
                 let indent = justify::list_indent(item.depth, space);
                 let painted = justify::draw_indented(ui, &runs, column, indent, marker, highlights);
                 search.set_height(block, painted.height);

@@ -185,7 +185,9 @@ fn step_document(files: &[PathBuf], current: &Path, delta: isize) -> Option<Path
 }
 
 /// Hand `url` to the desktop opener without a shell. `$BROWSER` wins, then the
-/// usual XDG helpers; the URL is always a single argument.
+/// usual XDG helpers; the URL is always a single argument. The child is reaped
+/// on a detached thread so opening a link never blocks a frame and never leaves
+/// a zombie behind.
 fn open_external(url: &str) -> std::io::Result<()> {
     use std::process::{Command, Stdio};
     let spawn = |program: &str, args: &[&str]| {
@@ -195,7 +197,13 @@ fn open_external(url: &str) -> std::io::Result<()> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map(|_| ())
+            .map(|mut child| {
+                // Reap without blocking this frame; a failed thread just leaves
+                // the child to the OS at process exit.
+                let _ = std::thread::Builder::new().spawn(move || {
+                    let _ = child.wait();
+                });
+            })
     };
     if let Some(browser) = std::env::var("BROWSER")
         .ok()
@@ -800,6 +808,7 @@ impl App {
     /// Reload the document and rebuild every placeholder cache.
     pub fn reload(&mut self) {
         self.load();
+        crate::justify::clear_inline_cache();
         self.cache = CommonMarkCache::default();
         let sources = self.prepared.diagrams.clone();
         self.diagrams.borrow_mut().reset_for_reload(sources);
@@ -2128,6 +2137,78 @@ mod tests {
             );
             assert_eq!(step_document(&files, Path::new("/elsewhere/x.md"), 1), None);
             assert_eq!(step_document(&files[..1], a, 1), None);
+        }
+    }
+
+    mod open_external {
+        use super::super::open_external;
+        use std::collections::BTreeSet;
+        use std::sync::Mutex;
+
+        /// Serialises the tests that mutate process env.
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+        /// Restores an environment variable on drop, even when a test panics.
+        struct EnvVar(&'static str, Option<std::ffi::OsString>);
+
+        impl EnvVar {
+            fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+                let saved = std::env::var_os(name);
+                std::env::set_var(name, value);
+                Self(name, saved)
+            }
+        }
+
+        impl Drop for EnvVar {
+            fn drop(&mut self) {
+                match &self.1 {
+                    Some(v) => std::env::set_var(self.0, v),
+                    None => std::env::remove_var(self.0),
+                }
+            }
+        }
+
+        /// Pids that are currently children of this process; zombies count.
+        fn child_pids() -> BTreeSet<u32> {
+            let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
+                return BTreeSet::new();
+            };
+            tasks
+                .flatten()
+                .filter_map(|task| std::fs::read_to_string(task.path().join("children")).ok())
+                .flat_map(|children| {
+                    children
+                        .split_whitespace()
+                        .filter_map(|pid| pid.parse().ok())
+                        .collect::<Vec<u32>>()
+                })
+                .collect()
+        }
+
+        #[test]
+        fn opener_is_reaped_without_blocking() {
+            if !std::path::Path::new("/proc/self/task").is_dir() {
+                return; // needs procfs to observe children
+            }
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let baseline = child_pids();
+            let browser = EnvVar::set("BROWSER", "/bin/true");
+            let opened = open_external("https://example.com");
+            drop(browser);
+            assert!(opened.is_ok(), "spawning /bin/true failed: {opened:?}");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let now = child_pids();
+                if now.is_subset(&baseline) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "opener child left unreaped: {:?}",
+                    now.difference(&baseline).collect::<Vec<_>>()
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
     }
 }

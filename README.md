@@ -28,6 +28,11 @@ cargo install --path . --locked
 
 Installs the binary `jr` to `~/.cargo/bin/jr`. No sudo needed.
 
+Requirements: the first run downloads mermaid.js, a Chromium zip and fonts, so
+it needs `curl` and `unzip` on `PATH` plus network — and a Chromium (the managed
+download or one already on the system) to render diagrams. A document larger
+than 32 MiB is rejected with a message instead of being opened.
+
 ## Usage
 
 ```bash

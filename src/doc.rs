@@ -24,10 +24,35 @@ pub enum DocError {
         /// Path that contained invalid UTF-8.
         path: PathBuf,
     },
+    /// The file is larger than [`MAX_DOC_BYTES`].
+    #[error(
+        "{} is {len} bytes; the limit is {MAX_DOC_BYTES} bytes",
+        path.display()
+    )]
+    TooLarge {
+        /// Path that is too large.
+        path: PathBuf,
+        /// Size the file reports.
+        len: u64,
+    },
 }
+
+/// Hard cap on a document read into memory. The text, its prepared blocks and
+/// every per-block parse are kept for the whole session, so an unbounded file
+/// would run a viewer out of memory before it drew anything.
+pub const MAX_DOC_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Read `path` as UTF-8 text, naming the file in every error message.
 pub fn read_doc(path: &Path) -> Result<String, DocError> {
+    // Check before reading: a huge file must never be allocated at all.
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.is_file() && meta.len() > MAX_DOC_BYTES {
+            return Err(DocError::TooLarge {
+                path: path.to_path_buf(),
+                len: meta.len(),
+            });
+        }
+    }
     let bytes = std::fs::read(path).map_err(|source| DocError::Io {
         path: path.to_path_buf(),
         source,
@@ -2990,6 +3015,33 @@ mod tests {
                 err.to_string(),
                 format!("{} is not valid UTF-8", path.display())
             );
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[test]
+        fn oversized_document_is_rejected_before_reading() {
+            let path =
+                std::env::temp_dir().join(format!("jiaoren-too-big-{}.md", std::process::id()));
+            // Sparse file: the length is a lie, which is exactly what the
+            // metadata check is for — nothing is ever allocated.
+            let file = std::fs::File::create(&path).unwrap();
+            file.set_len(MAX_DOC_BYTES + 1).unwrap();
+            drop(file);
+            let err = read_doc(&path).unwrap_err();
+            assert!(matches!(err, DocError::TooLarge { .. }), "{err:?}");
+            assert!(
+                err.to_string().contains(&MAX_DOC_BYTES.to_string()),
+                "{err}"
+            );
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[test]
+        fn document_at_the_limit_still_opens() {
+            let path =
+                std::env::temp_dir().join(format!("jiaoren-at-limit-{}.md", std::process::id()));
+            std::fs::write(&path, "# hi\n").unwrap();
+            assert_eq!(read_doc(&path).unwrap(), "# hi\n");
             let _ = std::fs::remove_file(&path);
         }
     }

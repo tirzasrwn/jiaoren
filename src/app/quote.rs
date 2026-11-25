@@ -103,7 +103,7 @@ impl QuoteUi {
                                 .into_iter()
                                 .map(|(s, e, _)| (s, e))
                                 .collect();
-                        let runs = crate::justify::parse_inline(line);
+                        let runs = crate::justify::parse_inline_cached(line);
                         let indent = *depth as f32 * gap;
                         let painted = ui
                             .horizontal(|ui| {
