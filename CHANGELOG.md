@@ -2,7 +2,7 @@
 
 All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 
-## Unreleased
+## 0.4.1 — 2026-11-25
 
 ### Changed
 
