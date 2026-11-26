@@ -1201,9 +1201,15 @@ fn has_raw_html(text: &str) -> bool {
 /// odd-indent marker ends the block.
 fn parse_list_block(lines: &[&str], start: usize) -> Option<(usize, ListSpec)> {
     let (indent, kind, text) = list_marker(lines[start])?;
-    if indent != 0 {
+    // CommonMark allows up to three spaces before a top-level marker, but this
+    // parser nests on even steps: accept 0 or 2 columns so an odd indent keeps
+    // its established library path. The base becomes the nesting origin, so a
+    // two-space YAML-style list nests at four. Claiming the block here keeps
+    // the justified mdlist painter instead of the ragged library fallback.
+    if indent > 3 || indent % 2 == 1 {
         return None;
     }
+    let base = indent;
     let mut items = Vec::new();
     let mut cur = ListItem {
         depth: 0,
@@ -1217,12 +1223,12 @@ fn parse_list_block(lines: &[&str], start: usize) -> Option<(usize, ListSpec)> {
             break;
         }
         if let Some((indent, kind, text)) = list_marker(line) {
-            // Only even indents are item markers: a 1-space (or other odd)
-            // marker ends the block and stays on the library path.
-            if indent % 2 == 1 {
+            // Only even indents relative to the base are item markers: a marker
+            // deeper by an odd count ends the block and stays on the library path.
+            if indent < base || (indent - base) % 2 == 1 {
                 break;
             }
-            let depth = (indent / 2).min(5) as u8;
+            let depth = ((indent - base) / 2).min(5) as u8;
             items.push(std::mem::replace(
                 &mut cur,
                 ListItem {
@@ -1240,7 +1246,7 @@ fn parse_list_block(lines: &[&str], start: usize) -> Option<(usize, ListSpec)> {
         if indent >= 1 && fence_open(line).is_some() {
             break;
         }
-        if indent >= 2 {
+        if indent >= base + 2 {
             if !cur.text.is_empty() {
                 cur.text.push(' ');
             }
@@ -2179,6 +2185,19 @@ mod tests {
             );
             assert_eq!(spec.items[2].depth, 1);
             assert!(matches!(spec.items[3].kind, ListKind::Ordered(1, '.')));
+            assert!(p.markdown.contains("<mdlist id="));
+            assert!(!p.markdown.contains("- satu"));
+        }
+
+        #[test]
+        fn two_space_indented_list_is_claimed_and_nests_from_its_base() {
+            let md = "  - satu\n  - dua\n    - anak\n";
+            let p = prepare(md, Path::new("/d"));
+            let spec = p.lists.values().next().unwrap();
+            assert_eq!(spec.items.len(), 3);
+            assert_eq!(spec.items[0].depth, 0);
+            assert_eq!(spec.items[2].depth, 1);
+            assert_eq!(spec.items[2].text, "anak");
             assert!(p.markdown.contains("<mdlist id="));
             assert!(!p.markdown.contains("- satu"));
         }
