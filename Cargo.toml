@@ -1,6 +1,6 @@
 [package]
 name = "jiaoren"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 rust-version = "1.95"
 description = "jiaoren (jr) — a zathura-like Markdown viewer with mermaid diagrams"

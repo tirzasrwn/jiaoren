@@ -2,6 +2,15 @@
 
 All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 
+## 0.5.3 — 2026-11-26
+
+### Changed
+
+- Refreshed `docs/assets/demo.gif`: it now also shows the heading index with
+  fold and jump, the `ctrl+g` path status, the `?` shortcut overlay, zoom and
+  pan, `yy`, and the theme switching inside the diagram overlay. The recorder
+  runs on a private Xvfb display, so it no longer needs a desktop or i3.
+
 ## 0.5.2 — 2026-11-26
 
 ### Changed
