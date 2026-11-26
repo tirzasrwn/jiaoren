@@ -1,9 +1,9 @@
 #!/bin/bash
-# Record docs/assets/demo.gif: record the demo window with ffmpeg x11grab,
-# then build a 15 fps Catppuccin GIF. Requires DISPLAY=:0, i3, ffmpeg, xdotool.
+# Record docs/assets/demo.gif: start a private Xvfb display, place one jr window,
+# record it with ffmpeg x11grab, then build a 15 fps Catppuccin GIF.
+# Requires Xvfb, ffmpeg, xdotool. No desktop or window manager needed, so it
+# never touches the real session.
 # Usage: scripts/record-demo-gif.sh
-# Fresh GIF recorder: places one jr window, verifies focus/geometry, records the
-# X11 region with ffmpeg, then builds the GIF. No reuse of older scripts.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -13,22 +13,38 @@ TMP_GIF="$OUT_GIF.tmp.gif"
 WIDTH=900
 HEIGHT=540
 FPS=15
-DURATION=32
+DURATION=55
 
-export DISPLAY=:0
 cd "$REPO"
 
-pkill -x jr 2>/dev/null || true
-# Wait for any previous jiaoren window to disappear: a dying window keeps its
-# name for a moment and would be grabbed instead of the fresh one.
-for _ in $(seq 1 20); do
-  [ -z "$(xdotool search --name '^jiaoren$' 2>/dev/null || true)" ] && break
-  sleep 0.15
+# Private headless display: -displayfd lets Xvfb pick a free number.
+DISP_FILE=$(mktemp)
+Xvfb -displayfd 3 -screen 0 1200x800x24 -nolisten tcp 3>"$DISP_FILE" \
+  >/tmp/jiaoren-xvfb.log 2>&1 &
+XVFB_PID=$!
+CFG_DIR=$(mktemp -d)
+cleanup() {
+  [ -n "${REC:-}" ] && kill -INT "$REC" 2>/dev/null || true
+  [ -n "${JR_PID:-}" ] && kill "$JR_PID" 2>/dev/null || true
+  kill "$XVFB_PID" 2>/dev/null || true
+  rm -f "$DISP_FILE"
+  rm -rf "$CFG_DIR"
+}
+trap cleanup EXIT
+for _ in $(seq 1 50); do
+  [ -s "$DISP_FILE" ] && break
+  sleep 0.1
 done
-sleep 0.4
-
-i3-msg 'workspace 9' >/dev/null
-sleep 0.6
+if [ ! -s "$DISP_FILE" ]; then
+  echo "Xvfb did not start" >&2
+  exit 1
+fi
+export DISPLAY=":$(cat "$DISP_FILE")"
+rm -f "$DISP_FILE"
+# A private config dir: the recording always starts light, at 1x zoom, no
+# matter what the real session saved.
+export XDG_CONFIG_HOME="$CFG_DIR"
+echo "display=$DISPLAY"
 
 ./target/debug/jr examples/demo.md >/tmp/jr-gif.log 2>&1 </dev/null &
 JR_PID=$!
@@ -52,13 +68,11 @@ if [ -z "$W" ] || [ "$(xdotool getwindowname "$W")" != "jiaoren" ]; then
   exit 1
 fi
 
-# Give i3 time to manage the new window before changing its state.
+# No window manager: place and size the window directly.
 sleep 2
 for _ in $(seq 1 12); do
-  i3-msg "[id=$W] floating enable" >/dev/null 2>&1 || true
-  sleep 0.3
   xdotool windowsize "$W" 900 540
-  xdotool windowmove "$W" 120 120
+  xdotool windowmove "$W" 0 0
   sleep 0.5
   GEO=$(xdotool getwindowgeometry --shell "$W")
   GW=$(printf '%s\n' "$GEO" | sed -n 's/^WIDTH=//p')
@@ -81,28 +95,25 @@ echo "window=$W at ${GX},${GY} ${GW}x${GH} scale=${SX}x${SY}"
 
 focused=""
 for _ in $(seq 1 20); do
-  xdotool windowactivate --sync "$W" 2>/dev/null || true
-  focused=$(xdotool getactivewindow 2>/dev/null || true)
+  xdotool windowfocus --sync "$W" 2>/dev/null || true
+  focused=$(xdotool getwindowfocus 2>/dev/null || true)
   [ "$focused" = "$W" ] && break
   sleep 0.2
 done
 if [ "$focused" != "$W" ]; then
-  echo "window did not take focus (active=$focused)" >&2
-  kill "$JR_PID" 2>/dev/null || true
+  echo "window did not take focus (focused=$focused)" >&2
   exit 1
 fi
 xdotool windowraise "$W"
-xdotool windowactivate --sync "$W"
+xdotool windowfocus --sync "$W"
 sleep 0.8
 
 ensure_focus() {
   xdotool windowraise "$W"
-  xdotool windowactivate --sync "$W" 2>/dev/null || true
-  active=$(xdotool getactivewindow 2>/dev/null || true)
-  if [ "$active" != "$W" ]; then
-    echo "focus moved away from jr (active=$active); aborting" >&2
-    kill "$REC" 2>/dev/null || true
-    kill "$JR_PID" 2>/dev/null || true
+  xdotool windowfocus --sync "$W" 2>/dev/null || true
+  focused=$(xdotool getwindowfocus 2>/dev/null || true)
+  if [ "$focused" != "$W" ]; then
+    echo "focus moved away from jr (focused=$focused); aborting" >&2
     exit 1
   fi
 }
@@ -120,7 +131,7 @@ REC=""
 for attempt in 1 2 3; do
   rm -f "$OUT_MKV"
   ffmpeg -y -loglevel error \
-    -f x11grab -draw_mouse 0 -framerate "$FPS" -video_size "${GW}x${GH}" -i ":0.0+${GX},${GY}" \
+    -f x11grab -draw_mouse 0 -framerate "$FPS" -video_size "${GW}x${GH}" -i "${DISPLAY}.0+${GX},${GY}" \
     -t "$DURATION" -c:v libx264 -qp 0 -pix_fmt yuv444p "$OUT_MKV" &
   REC=$!
   sleep 0.6
@@ -202,6 +213,9 @@ sleep 0.9
 mx 430 395
 xdotool click 1
 sleep 0.8
+# Theme toggle stays live inside the overlay (0.5.0), then zoom.
+xdotool key --clearmodifiers t
+sleep 1.2
 xdotool click 4; sleep 0.25; xdotool click 4; sleep 0.25; xdotool click 4
 sleep 1.2
 xdotool key --clearmodifiers q
@@ -213,8 +227,6 @@ xdotool key --clearmodifiers G
 sleep 1.0
 mx 400 201
 sleep 1.5
-xdotool key --clearmodifiers t
-sleep 1.2
 
 # 6. next/previous document in the folder
 ensure_focus
@@ -223,11 +235,65 @@ sleep 2.2
 xdotool key --clearmodifiers bracketleft
 sleep 1.6
 
+# 7. heading index: fold, unfold and jump
+ensure_focus
+xdotool key --clearmodifiers Tab
+sleep 1.0
+xdotool key --clearmodifiers g g
+sleep 0.5
+xdotool key --clearmodifiers h
+sleep 1.8
+xdotool key --clearmodifiers l
+sleep 1.8
+for _ in 1 2 3; do xdotool key --clearmodifiers j; sleep 0.25; done
+sleep 0.6
+xdotool key Return
+sleep 1.2
+
+# 8. file path / progress status line
+ensure_focus
+xdotool key --clearmodifiers ctrl+g
+sleep 2.4
+
+# 9. keyboard-shortcut overlay
+ensure_focus
+xdotool key --clearmodifiers shift+slash
+sleep 2.4
+xdotool key --clearmodifiers Escape
+sleep 0.6
+
+# 10. zoom and horizontal pan
+ensure_focus
+xdotool key --clearmodifiers plus
+sleep 0.3
+xdotool key --clearmodifiers plus
+sleep 0.3
+xdotool key --clearmodifiers plus
+sleep 1.2
+xdotool key --clearmodifiers h
+sleep 0.25
+xdotool key --clearmodifiers h
+sleep 1.0
+xdotool key --clearmodifiers l
+sleep 0.25
+xdotool key --clearmodifiers l
+sleep 1.0
+xdotool key --clearmodifiers a
+sleep 1.0
+
+# 11. yy copies the whole document
+ensure_focus
+xdotool key --clearmodifiers y
+sleep 0.2
+xdotool key --clearmodifiers y
+sleep 2.4
+
+# 12. back to the light theme
+xdotool key --clearmodifiers t
+sleep 2.2
+
 kill -INT "$REC" 2>/dev/null || true
 wait "$REC" 2>/dev/null || true
-xdotool key --clearmodifiers q
-sleep 0.4
-pkill -x jr 2>/dev/null || true
 
 test -s "$OUT_MKV" || { echo "capture missing" >&2; exit 1; }
 ffmpeg -v error -y -i "$OUT_MKV" -vf "fps=15,scale=900:540:flags=lanczos" -c:v libx264 -qp 0 -pix_fmt yuv444p /tmp/jiaoren-scaled.mkv

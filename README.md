@@ -6,7 +6,7 @@ fences drawn as real diagrams.
 
 Keyboard-first, almost no chrome, live-reloads when the file changes on disk.
 
-![Opening examples/demo.md: justified prose with inline code and links, dragging a phrase and releasing it to copy, `]` opening the next note in the folder, a vim-style `/` live search that highlights matches as you type with Ctrl+W erasing a word, Enter and `n` jumping between matches (spaces inside the query are highlighted), hovering a table row, clicking the table icon to copy CSV, searching for the diagram and opening it in the zoomable popup, the wrapped code block with line numbers, and the Catppuccin dark theme](docs/assets/demo.gif)
+![Opening examples/demo.md: justified prose with inline code and links, dragging a phrase and releasing it to copy, a vim-style `/` live search that highlights matches as you type with Enter and `n` jumping between matches, hovering a table row and clicking the table icon to copy CSV, opening the diagram in the zoomable popup and switching its theme with `t` while it is open, the heading index with `h`/`l` folding and Enter jumping, the `ctrl+g` path status and the `?` shortcut overlay, zooming and panning with `+` and `h`/`l`, `yy` copying the document, `]` opening the next note, and the Catppuccin dark and light themes](docs/assets/demo.gif)
 
 ## Why "jiaoren"?
 
