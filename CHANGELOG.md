@@ -2,6 +2,14 @@
 
 All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 
+## 0.5.4 — 2026-11-26
+
+### Fixed
+
+- A list whose markers are indented by two spaces (common in YAML-shaped
+  Markdown) is claimed by the justified list painter again instead of falling
+  back to the ragged library renderer. Odd indents keep the library path.
+
 ## 0.5.3 — 2026-11-26
 
 ### Changed
