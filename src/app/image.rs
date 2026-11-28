@@ -451,7 +451,7 @@ impl ImageUi {
         let key = key_for(&id, &spec);
         let (iw, ih) = self.intrinsic_for(&key).unwrap_or((640.0, 320.0));
         let screen = ctx.content_rect();
-        let margin = 24.0;
+        let margin = 10.0;
         let avail =
             (screen.size() - egui::vec2(2.0 * margin, 2.0 * margin)).max(egui::vec2(64.0, 64.0));
         let pad = 10.0;
