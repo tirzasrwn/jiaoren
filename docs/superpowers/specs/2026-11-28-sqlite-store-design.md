@@ -42,8 +42,8 @@ rescans the cache and rebuilds the index; no cached render is invalidated.
 ### Location and schema
 
 Database: `$XDG_DATA_HOME/jiaoren/jiaoren.db`, else
-`~/.local/share/jiaoren/jiaoren.db`. Without either variable, use the same
-private per-UID fallback as the cache. The cache root stays
+`~/.local/share/jiaoren/jiaoren.db`; without either variable, state is not
+persisted (the same rule the old TOML store used). The cache root stays
 `$XDG_CACHE_HOME/jiaoren` (or its existing fallback).
 
 Schema version 1, applied on open:

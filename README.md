@@ -113,8 +113,8 @@ both ends, and land at the top of the next file.
 
 Zoom, theme and per-document reading positions are saved in one SQLite database
 at `$XDG_DATA_HOME/jiaoren/jiaoren.db` (else
-`~/.local/share/jiaoren/jiaoren.db`, or a private per-UID directory when neither
-`XDG_DATA_HOME` nor `HOME` is set) whenever they change, so the next launch
+`~/.local/share/jiaoren/jiaoren.db`; without either, state is not persisted)
+whenever they change, so the next launch
 starts with the same view; `--dark` still wins over a saved light theme. Every
 document's scroll position is saved on quit and when stepping with `]`/`[`, so
 switching back to a file returns to where you left it (the 32 most recent files
