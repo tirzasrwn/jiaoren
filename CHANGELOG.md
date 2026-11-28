@@ -2,6 +2,32 @@
 
 All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 
+## 0.6.0 — 2026-11-28
+
+### Added
+
+- `}` / `{` jump to the next / previous block start, repeating while held.
+- `ctrl+o` / `ctrl+i` walk a bounded jump list populated by index, anchor,
+  search and block jumps.
+- Reading positions are saved per document (32 most recent) and restored on
+  reopen, `]` and `[`.
+- Live reload keeps the heading at the top of the viewport in place when text
+  above it changes, plus the committed search pattern and index folds.
+- The heading index opens at the section being read.
+- `/` starts matching from the block under the viewport and wraps; `↑`/`↓`
+  browse the last 20 committed queries.
+- A bottom-right chip shows reading progress while scrolled.
+- Standalone images draw their Markdown title, falling back to alt text, as a
+  caption.
+- Inline images are capped to 75% of the viewport height, keeping their aspect
+  ratio.
+
+### Changed
+
+- Table columns stay flush left by design; alignment markers are documented as
+  intentionally ignored.
+- The demo GIF now covers the full feature tour.
+
 ## 0.5.4 — 2026-11-26
 
 ### Fixed
