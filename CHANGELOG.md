@@ -2,18 +2,7 @@
 
 All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 
-## 0.7.0 — 2026-11-28
-
-### Added
-
-- `0` resets the zoom overlay to 1× and `a` resets and centres the picture, for
-  both diagrams and images.
-- Persisted state and cache metadata in one SQLite database at
-  `$XDG_DATA_HOME/jiaoren/jiaoren.db` (else
-  `~/.local/share/jiaoren/jiaoren.db`): zoom, theme, per-document positions and
-  an index of cached SVG renders, `mermaid.min.js`, fonts and Chromium.
-- One-time import of the legacy `state.toml` zoom, theme and positions on first
-  launch; the file is deleted after a successful import.
+## 0.7.1 — 2026-11-28
 
 ### Fixed
 
@@ -26,6 +15,19 @@ All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
   the dim background outside the panel still closes it.
 - Holding `}` at the end of the document no longer pushes the scroll offset past
   its limit and fights the clamp.
+
+## 0.7.0 — 2026-11-28
+
+### Added
+
+- `0` resets the zoom overlay to 1× and `a` resets and centres the picture, for
+  both diagrams and images.
+- Persisted state and cache metadata in one SQLite database at
+  `$XDG_DATA_HOME/jiaoren/jiaoren.db` (else
+  `~/.local/share/jiaoren/jiaoren.db`): zoom, theme, per-document positions and
+  an index of cached SVG renders, `mermaid.min.js`, fonts and Chromium.
+- One-time import of the legacy `state.toml` zoom, theme and positions on first
+  launch; the file is deleted after a successful import.
 
 ### Changed
 
