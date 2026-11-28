@@ -1673,6 +1673,7 @@ impl eframe::App for App {
                             SearchEdit::HistoryOlder => s.history_older(),
                             SearchEdit::HistoryNewer => s.history_newer(),
                             _ => {
+                                s.history_abandon();
                                 let Some(query) = s.input.as_mut() else {
                                     continue;
                                 };

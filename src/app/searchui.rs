@@ -447,6 +447,12 @@ impl SearchUi {
         }
     }
 
+    /// Leaving a recalled history entry for a typed edit ends history browsing.
+    pub(crate) fn history_abandon(&mut self) {
+        self.history_index = None;
+        self.history_draft.clear();
+    }
+
     /// Walk to a newer history entry (`Down`); past the newest, restore the draft.
     pub(crate) fn history_newer(&mut self) {
         let Some(input) = self.input.as_mut() else {
@@ -765,6 +771,21 @@ mod tests {
             // Back on the draft, Down is a no-op.
             s.history_newer();
             assert_eq!(s.query(), "draft");
+        }
+
+        #[test]
+        fn typing_after_a_recalled_query_ends_history_browsing() {
+            let mut s = SearchUi::new();
+            s.texts = rc(&["alpha"]);
+            commit(&mut s, "alpha");
+            s.open_from(None);
+            s.history_older();
+            assert_eq!(s.query(), "alpha");
+            s.history_abandon();
+            s.type_text("x");
+            assert_eq!(s.query(), "alphax");
+            s.history_newer();
+            assert_eq!(s.query(), "alphax");
         }
 
         #[test]
