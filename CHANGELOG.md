@@ -2,6 +2,24 @@
 
 All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- Persisted state and cache metadata in one SQLite database at
+  `$XDG_DATA_HOME/jiaoren/jiaoren.db` (else
+  `~/.local/share/jiaoren/jiaoren.db`): zoom, theme, per-document positions and
+  an index of cached SVG renders, `mermaid.min.js`, fonts and Chromium.
+- One-time import of the legacy `state.toml` zoom, theme and positions on first
+  launch; the file is deleted after a successful import.
+
+### Changed
+
+- State is no longer written to `state.toml`; the database is the only store.
+- `--clean-cache` and startup pruning update the cache index, while cache
+  payload files (SVG, `mermaid.min.js`, fonts, Chromium) stay on disk. The
+  state database is never removed, and the 32 most recent positions are kept.
+
 ## 0.6.0 — 2026-11-28
 
 ### Added
