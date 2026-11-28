@@ -49,6 +49,10 @@ pub enum Action {
     PrevFile,
     /// Open the link under the pointer in the desktop browser (`o`).
     OpenLink,
+    /// Restore the previous jump position (`Ctrl+O`).
+    JumpBack,
+    /// Restore the next jump position (`Ctrl+I`).
+    JumpForward,
     /// Show the open document's path in the status line (`Ctrl+G`).
     ShowPath,
     /// Toggle the keyboard-shortcut overlay (`?`).
@@ -236,6 +240,10 @@ pub fn apply_key(
         Key::CloseBracket if !modifiers.any() => Some(Action::NextFile),
         Key::OpenBracket if !modifiers.any() => Some(Action::PrevFile),
         Key::O if !modifiers.any() => Some(Action::OpenLink),
+        // Vim jumplist keys. `Ctrl+I` is the letter I, not Tab, so the `Tab`
+        // heading index keeps its binding.
+        Key::O if modifiers.command || modifiers.ctrl => Some(Action::JumpBack),
+        Key::I if modifiers.command || modifiers.ctrl => Some(Action::JumpForward),
         // Ctrl+G shows the file path; a bare `g` still starts the `gg` window.
         Key::G if modifiers.command || modifiers.ctrl => Some(Action::ShowPath),
         Key::Questionmark => Some(Action::ToggleKeysHelp),
@@ -697,6 +705,31 @@ mod tests {
             assert!(!guard.accept());
             guard.observe_modifiers(true);
             assert!(guard.accept());
+        }
+
+        #[test]
+        fn ctrl_o_and_ctrl_i_walk_the_jump_history() {
+            let mut s = KeyState::default();
+            let now = std::time::Instant::now();
+            assert_eq!(
+                apply_key(&mut s, Key::O, Modifiers::CTRL, now),
+                Some(Action::JumpBack)
+            );
+            assert_eq!(
+                apply_key(&mut s, Key::I, Modifiers::CTRL, now),
+                Some(Action::JumpForward)
+            );
+            // Plain `o` still opens the hovered link and plain `i` does nothing.
+            assert_eq!(
+                apply_key(&mut s, Key::O, Modifiers::NONE, now),
+                Some(Action::OpenLink)
+            );
+            assert_eq!(apply_key(&mut s, Key::I, Modifiers::NONE, now), None);
+            // Ctrl+I is Key::I, not Tab, which keeps the heading index.
+            assert_eq!(
+                apply_key(&mut s, Key::Tab, Modifiers::NONE, now),
+                Some(Action::ToggleToc)
+            );
         }
 
         #[test]

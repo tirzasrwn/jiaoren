@@ -20,6 +20,7 @@ mod diagram;
 mod geometry;
 mod heading;
 mod image;
+mod jumplist;
 mod keys;
 mod list;
 mod paragraph;
@@ -40,6 +41,7 @@ use geometry::{
 };
 use heading::HeadingUi;
 use image::ImageUi;
+use jumplist::JumpList;
 use keys::{
     apply_key_event, cancel_action, quit_suppressed, Action, CancelAction, CopyGuard, KeyState,
 };
@@ -576,6 +578,11 @@ pub(crate) struct App {
     /// and swapped into the panel for the duration of a frame.
     styles: std::collections::BTreeMap<egui::TextStyle, egui::FontId>,
     keys: KeyState,
+    /// Vim jumplist for `Ctrl+O` / `Ctrl+I`.
+    jumps: JumpList,
+    /// Scroll position when `/` opened, so Enter records the pre-search place
+    /// rather than the live-preview position it already jumped to.
+    search_origin: Option<f32>,
     /// One Ctrl+C Copy event per Ctrl hold; autorepeats are ignored.
     copy_guard: CopyGuard,
     /// Screen position where a selection drag started, for plain-click detection.
@@ -794,6 +801,8 @@ impl App {
             styles_key: None,
             styles: std::collections::BTreeMap::new(),
             keys: KeyState::default(),
+            jumps: JumpList::default(),
+            search_origin: None,
             copy_guard: CopyGuard::default(),
             select_press: None,
             select_moved: false,
@@ -996,6 +1005,7 @@ impl App {
         };
         let id = entry.id.clone();
         if let Some(block) = self.search.borrow().heading_block(&id) {
+            self.jumps.record(self.scroll_y);
             self.jump_to = Some(block);
         }
         self.toc.close();
@@ -1268,6 +1278,7 @@ impl App {
         let target = s.state.current_block();
         self.jump_to = target;
         if target.is_some() {
+            self.jumps.record(self.scroll_y);
             ctx.request_repaint();
         }
     }
@@ -1398,6 +1409,7 @@ impl eframe::App for App {
             .data_mut(|d| d.remove_temp::<String>(egui::Id::new("jiaoren-anchor")))
         {
             if let Some(block) = self.search.borrow().anchor_block(&slug) {
+                self.jumps.record(self.scroll_y);
                 self.jump_to = Some(block);
                 ui.ctx().request_repaint();
             }
@@ -1541,6 +1553,12 @@ impl eframe::App for App {
                         s.commit();
                     }
                     drop(s);
+                    // Enter confirms the jump that live editing already made:
+                    // remember where the search started, not the preview.
+                    if batch.enter && target.is_some() {
+                        self.jumps
+                            .record(self.search_origin.take().unwrap_or(self.scroll_y));
+                    }
                     // A live edit jumps to its match; Enter keeps it. Cancelling
                     // already returned through cancel_search above.
                     self.jump_to = target;
@@ -1677,12 +1695,31 @@ impl eframe::App for App {
                 Action::NextFile => self.navigate(1),
                 Action::PrevFile => self.navigate(-1),
                 Action::OpenLink => self.open_hovered_link(ui.ctx()),
+                Action::JumpBack => {
+                    if let Some(y) = self.jumps.take_back(self.scroll_y) {
+                        self.jump_to = None;
+                        self.scroll_y = y;
+                        ui.ctx().request_repaint();
+                    } else {
+                        self.set_status("no earlier position");
+                    }
+                }
+                Action::JumpForward => {
+                    if let Some(y) = self.jumps.take_forward(self.scroll_y) {
+                        self.jump_to = None;
+                        self.scroll_y = y;
+                        ui.ctx().request_repaint();
+                    } else {
+                        self.set_status("no later position");
+                    }
+                }
                 Action::Reload => self.reload(),
                 Action::CopyDocument => {
                     ui.ctx().copy_text(self.source.clone());
                     self.set_status("copied markdown");
                 }
                 Action::SearchOpen => {
+                    self.search_origin = Some(self.scroll_y);
                     self.search.borrow_mut().open();
                     ui.ctx().request_repaint();
                 }
