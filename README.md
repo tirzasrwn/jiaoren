@@ -111,10 +111,11 @@ both ends, and land at the top of the next file.
 
 Zoom and theme are saved to `$XDG_CONFIG_HOME/jiaoren/state.toml` (else
 `~/.config/jiaoren/state.toml`) whenever they change, so the next launch starts
-with the same view; `--dark` still wins over a saved light theme. The last
-document's scroll position is saved on quit and when stepping with `]`/`[`, and
-restored only when that same file is opened again. A live reload (`r`, or an
-external save) keeps the committed search pattern and the heading index's folds.
+with the same view; `--dark` still wins over a saved light theme. Every
+document's scroll position is saved on quit and when stepping with `]`/`[`, so
+switching back to a file returns to where you left it (the 32 most recent files
+are kept). A live reload (`r`, or an external save) keeps the committed search
+pattern and the heading index's folds.
 
 `jr --keys` prints the same list to stdout, so the shortcuts are reachable
 without opening a document, and the in-viewer `?` overlay reads the same text.

@@ -141,6 +141,10 @@ const STATUS_DURATION: Duration = Duration::from_millis(1500);
 /// than a one-word clipboard confirmation.
 const PATH_STATUS_DURATION: Duration = Duration::from_millis(4000);
 
+/// How many document positions the state file remembers. `]`/`[` restores the
+/// files it has seen, oldest entries fall off first.
+pub(crate) const MAX_POSITIONS: usize = 32;
+
 /// Whether a link click this frame asked for the `link copied` chip.
 fn take_link_copied(ctx: &egui::Context) -> bool {
     ctx.data_mut(|d| d.remove_temp::<()>(egui::Id::new(crate::justify::LINK_COPIED)))
@@ -573,9 +577,11 @@ pub(crate) struct App {
     html_fn: HtmlFn,
     scroll_y: f32,
     scroll_x: f32,
-    /// Vertical offset to apply once after the first layout, from the last
-    /// session when this document was open.
+    /// Vertical offset to apply once after the first layout, from a saved
+    /// position or from stepping to another document with `]`/`[`.
     restore_scroll: Option<f32>,
+    /// Remembered scroll offsets per document, most recent first.
+    positions: Vec<(std::path::PathBuf, f32)>,
     /// Content scroll limits from the last layout. Key scrolls clamp to these
     /// first, so pressing down at the bottom cannot hand egui an offset past
     /// the end for one bouncing frame.
@@ -659,6 +665,7 @@ impl App {
         // whatever directory the viewer happens to be in.
         let path = std::fs::canonicalize(&path).unwrap_or(path);
         let restore_scroll = prefs.resume_scroll(&path);
+        let positions = prefs.positions;
         // A cached FiraCode is installed before the first frame. On a fresh
         // cache, start with the system font (or egui's defaults) and download
         // in the background so the window still opens immediately.
@@ -815,6 +822,7 @@ impl App {
             scroll_y: 0.0,
             scroll_x: 0.0,
             restore_scroll,
+            positions,
             scroll_max: egui::Vec2::ZERO,
             jump_to: None,
             pad: None,
@@ -885,9 +893,12 @@ impl App {
         self.jump_to = None;
     }
 
-    /// Remember the current zoom, theme and reading position for the next session.
-    fn save_prefs(&self) {
-        crate::prefs::save(self.zoom, self.theme, Some(&self.path), self.scroll_y);
+    /// Remember the current zoom, theme and this document's reading position.
+    fn save_prefs(&mut self) {
+        self.positions.retain(|(path, _)| path != &self.path);
+        self.positions.insert(0, (self.path.clone(), self.scroll_y));
+        self.positions.truncate(MAX_POSITIONS);
+        crate::prefs::save(self.zoom, self.theme, &self.positions);
     }
 
     /// Open the next/previous Markdown file in this document's directory,
@@ -912,6 +923,14 @@ impl App {
         self.path = next;
         self.scroll_y = 0.0;
         self.scroll_x = 0.0;
+        // `]`/`[` returns to a document where it was left; a first visit starts
+        // at the top. `restore_scroll` overrides the first-frame home anchoring.
+        self.restore_scroll = Some(
+            self.positions
+                .iter()
+                .find(|(path, _)| path == &self.path)
+                .map_or(0.0, |(_, scroll)| *scroll),
+        );
         self.pad = None;
         self.scroll_bottom = false;
         self.autoscroll = 0.0;
