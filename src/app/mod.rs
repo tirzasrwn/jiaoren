@@ -1902,7 +1902,11 @@ impl eframe::App for App {
                             })
                             .collect()
                     };
-                    self.toc.toggle_open(&self.prepared.toc, &ys, self.scroll_y);
+                    // "Section being read" is the one at the vertical middle:
+                    // a jump centres its heading, so the heading the reader
+                    // just asked for still counts as the current section.
+                    let center = self.scroll_y + ui.ctx().content_rect().height() * 0.5;
+                    self.toc.toggle_open(&self.prepared.toc, &ys, center);
                     ui.ctx().request_repaint();
                 }
                 // Esc/Ctrl+C: prompt, search, selection, then quit.

@@ -27,9 +27,10 @@ pub(crate) struct TocState {
 
 impl TocState {
     /// Open or close the index. `ys` holds the content y of each TOC entry's
-    /// heading block, parallel to `toc`; `top` is the viewport's content
-    /// offset. Every open selects the section being read, not the last one.
-    pub(crate) fn toggle_open(&mut self, toc: &[TocEntry], ys: &[Option<f32>], top: f32) {
+    /// heading block, parallel to `toc`; `anchor` is the viewport's vertical
+    /// middle in content coordinates. Every open selects the section being
+    /// read, not the last one.
+    pub(crate) fn toggle_open(&mut self, toc: &[TocEntry], ys: &[Option<f32>], anchor: f32) {
         self.open = !self.open;
         if self.open {
             self.last_g = None;
@@ -43,7 +44,7 @@ impl TocState {
                     })
                     .collect();
             }
-            self.select_current(toc, ys, top);
+            self.select_current(toc, ys, anchor);
             // Keep the choice on screen: unfold only the ancestors that hide it.
             self.reveal_selected(toc);
             self.clamp_selected(toc);
@@ -51,16 +52,16 @@ impl TocState {
         }
     }
 
-    /// Select the nearest visible heading at or above `top`; when the viewport
-    /// starts before every heading, the first visible one.
-    fn select_current(&mut self, toc: &[TocEntry], ys: &[Option<f32>], top: f32) {
+    /// Select the nearest visible heading at or above `anchor`; before every
+    /// heading, the first visible one.
+    fn select_current(&mut self, toc: &[TocEntry], ys: &[Option<f32>], anchor: f32) {
         let current = toc
             .iter()
             .enumerate()
             .filter(|(_, entry)| entry.level <= MAX_DEPTH)
             .filter_map(|(index, _)| {
                 let y = ys.get(index).copied().flatten()?;
-                (y <= top).then_some((index, y))
+                (y <= anchor).then_some((index, y))
             })
             .max_by(|a, b| a.1.total_cmp(&b.1));
         self.selected = current

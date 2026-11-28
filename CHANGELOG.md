@@ -22,6 +22,11 @@ All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 - Inline images and mermaid diagrams are capped to 75% of the viewport height,
   keeping their aspect ratio; click opens the full picture.
 
+### Fixed
+
+- The heading index now reads the section at the viewport's vertical middle, so
+  jumping to a heading and reopening the index keeps that heading selected.
+
 ### Changed
 
 - Table columns stay flush left by design; alignment markers are documented as
