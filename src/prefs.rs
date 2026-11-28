@@ -4,7 +4,7 @@
 //! malformed values are ignored, and a missing or unreadable file just means
 //! defaults.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::mermaid::Theme;
 
@@ -13,11 +13,15 @@ const MIN_ZOOM: f32 = 0.5;
 const MAX_ZOOM: f32 = 3.0;
 
 /// What a document opens with.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Prefs {
     pub zoom: f32,
     /// `None` when the file has no usable theme line.
     pub theme: Option<Theme>,
+    /// Last document that was open, for resuming the reading position.
+    pub last_path: Option<PathBuf>,
+    /// Scroll offset saved with [`Self::last_path`].
+    pub last_scroll: f32,
 }
 
 impl Default for Prefs {
@@ -25,7 +29,16 @@ impl Default for Prefs {
         Self {
             zoom: 1.0,
             theme: None,
+            last_path: None,
+            last_scroll: 0.0,
         }
+    }
+}
+
+impl Prefs {
+    /// Saved vertical offset when `path` is the document that was last open.
+    pub fn resume_scroll(&self, path: &Path) -> Option<f32> {
+        (self.last_path.as_deref() == Some(path)).then_some(self.last_scroll)
     }
 }
 
@@ -51,9 +64,9 @@ pub fn load() -> Prefs {
     }
 }
 
-/// Persist `zoom` and `theme`. Best effort: a read-only config dir must never
-/// break the viewer.
-pub fn save(zoom: f32, theme: Theme) {
+/// Persist `zoom` and `theme`, plus the document and scroll to resume.
+/// Best effort: a read-only config dir must never break the viewer.
+pub fn save(zoom: f32, theme: Theme, last_path: Option<&Path>, last_scroll: f32) {
     let Some(path) = state_path() else {
         return;
     };
@@ -63,7 +76,7 @@ pub fn save(zoom: f32, theme: Theme) {
         }
     }
     let tmp = PathBuf::from(format!("{}.{}.tmp", path.display(), std::process::id()));
-    if std::fs::write(&tmp, render(zoom, theme)).is_err() {
+    if std::fs::write(&tmp, render(zoom, theme, last_path, last_scroll)).is_err() {
         let _ = std::fs::remove_file(&tmp);
         return;
     }
@@ -94,18 +107,38 @@ fn parse(text: &str) -> Prefs {
                     _ => prefs.theme,
                 };
             }
+            "last_path" => {
+                if !value.is_empty() {
+                    prefs.last_path = Some(PathBuf::from(value));
+                }
+            }
+            "last_scroll" => {
+                if let Ok(scroll) = value.parse::<f32>() {
+                    if scroll.is_finite() && scroll >= 0.0 {
+                        prefs.last_scroll = scroll;
+                    }
+                }
+            }
             _ => {}
         }
     }
     prefs
 }
 
-fn render(zoom: f32, theme: Theme) -> String {
-    format!(
+fn render(zoom: f32, theme: Theme, last_path: Option<&Path>, last_scroll: f32) -> String {
+    let mut text = format!(
         "zoom = {:.3}\ntheme = {}\n",
         zoom.clamp(MIN_ZOOM, MAX_ZOOM),
         theme.as_str()
-    )
+    );
+    if let Some(path) = last_path {
+        text.push_str(&format!(
+            "last_path = {}\nlast_scroll = {:.1}\n",
+            path.to_string_lossy(),
+            last_scroll.max(0.0)
+        ));
+    }
+    text
 }
 
 #[cfg(test)]
@@ -115,11 +148,51 @@ mod tests {
 
     #[test]
     fn round_trips_zoom_and_theme() {
-        let text = render(1.25, Theme::Dark);
+        let text = render(1.25, Theme::Dark, None, 0.0);
         let prefs = parse(&text);
         assert_eq!(prefs.zoom, 1.25);
         assert_eq!(prefs.theme, Some(Theme::Dark));
-        assert_eq!(parse(&render(0.8, Theme::Light)).theme, Some(Theme::Light));
+        assert_eq!(
+            parse(&render(0.8, Theme::Light, None, 0.0)).theme,
+            Some(Theme::Light)
+        );
+    }
+
+    #[test]
+    fn round_trips_last_document_and_scroll() {
+        let path = std::path::Path::new("/tmp/notes.md");
+        let prefs = parse(&render(1.0, Theme::Dark, Some(path), 123.5));
+        assert_eq!(prefs.last_path.as_deref(), Some(path));
+        assert_eq!(prefs.last_scroll, 123.5);
+        assert_eq!(prefs.resume_scroll(path), Some(123.5));
+        assert_eq!(
+            prefs.resume_scroll(std::path::Path::new("/tmp/other.md")),
+            None
+        );
+    }
+
+    #[test]
+    fn old_file_without_a_document_keeps_defaults() {
+        let prefs = parse("zoom = 1.5\ntheme = dark\n");
+        assert_eq!(prefs.zoom, 1.5);
+        assert_eq!(prefs.last_path, None);
+        assert_eq!(
+            prefs.resume_scroll(std::path::Path::new("/tmp/notes.md")),
+            None
+        );
+    }
+
+    #[test]
+    fn malformed_document_lines_are_ignored() {
+        let prefs = parse("last_path = \nlast_scroll = NaN\n");
+        assert_eq!(prefs.last_path, None);
+        assert_eq!(prefs.last_scroll, 0.0);
+        let prefs = parse("last_path = /tmp/notes.md\nlast_scroll = -3\n");
+        assert_eq!(
+            prefs.last_path.as_deref(),
+            Some(std::path::Path::new("/tmp/notes.md"))
+        );
+        assert_eq!(prefs.last_scroll, 0.0, "a bad scroll only drops the scroll");
     }
 
     #[test]
