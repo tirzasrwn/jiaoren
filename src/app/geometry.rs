@@ -330,6 +330,22 @@ pub(crate) fn home_target(pad: Option<egui::Vec2>) -> egui::Vec2 {
     pad.unwrap_or(egui::Vec2::ZERO)
 }
 
+/// Integer reading progress for the bottom-left chip: the scrollable range is
+/// `pad..=max`, so the top (including the overscroll pad) and any document that
+/// does not scroll report `None`. Non-finite input is also `None`.
+pub(crate) fn reading_progress(scroll_y: f32, scroll_max_y: f32, pad_y: f32) -> Option<u8> {
+    if !scroll_y.is_finite() || !scroll_max_y.is_finite() || !pad_y.is_finite() {
+        return None;
+    }
+    let pad = pad_y.max(0.0);
+    let max = scroll_max_y.max(0.0);
+    if max <= pad || scroll_y <= pad {
+        return None;
+    }
+    let ratio = ((scroll_y - pad) / (max - pad)).clamp(0.0, 1.0);
+    Some((ratio * 100.0).round() as u8)
+}
+
 /// Displayed size of a diagram: small diagrams keep their intrinsic size
 /// (times app zoom) and are centred in the column; wide ones are capped to the
 /// column. Height always follows the intrinsic aspect ratio. A non-finite or
@@ -342,6 +358,24 @@ pub(crate) fn diagram_display_size(intrinsic: (f32, f32), column: f32, zoom: f32
     }
     let w = (iw * zoom).min(column);
     (w, w * ih / iw)
+}
+
+/// Inline image size: the diagram rule (intrinsic × zoom, capped to the column)
+/// with an extra cap to 75% of the viewport height. The height cap preserves the
+/// aspect ratio and never upscales a small image. The zoom popup does not use
+/// this: it fits and zooms against its own viewport.
+pub(crate) fn image_display_size(
+    intrinsic: (f32, f32),
+    column: f32,
+    zoom: f32,
+    viewport_h: f32,
+) -> (f32, f32) {
+    let (w, h) = diagram_display_size(intrinsic, column, zoom);
+    let max_h = viewport_h * 0.75;
+    if !max_h.is_finite() || max_h <= 0.0 || !h.is_finite() || h <= max_h {
+        return (w, h);
+    }
+    (w * max_h / h, max_h)
 }
 
 /// Resolution bucket that covers `scale` ([`diagram_display_size`]'s width in
@@ -750,6 +784,70 @@ mod tests {
                 diagram_display_size((0.0, 160.0), 100.0, 1.0),
                 (100.0, 50.0)
             );
+        }
+
+        #[test]
+        fn reading_progress_is_hidden_at_the_top_and_reports_the_bottom() {
+            assert_eq!(reading_progress(400.0, 800.0, 400.0), None);
+            assert_eq!(reading_progress(200.0, 800.0, 400.0), None);
+            assert_eq!(reading_progress(600.0, 800.0, 400.0), Some(50));
+            assert_eq!(reading_progress(800.0, 800.0, 400.0), Some(100));
+        }
+
+        #[test]
+        fn reading_progress_needs_a_scrollable_range() {
+            // A document that fits (or barely fills) the viewport never shows a
+            // progress chip: the whole range is the top.
+            assert_eq!(reading_progress(400.0, 400.0, 400.0), None);
+            assert_eq!(reading_progress(400.0, 500.0, 500.0), None);
+            assert_eq!(reading_progress(400.0, 100.0, 400.0), None);
+        }
+
+        #[test]
+        fn reading_progress_guards_non_finite_input() {
+            assert_eq!(reading_progress(f32::NAN, 800.0, 400.0), None);
+            assert_eq!(reading_progress(600.0, f32::NAN, 400.0), None);
+            assert_eq!(reading_progress(600.0, 800.0, f32::NAN), None);
+            assert_eq!(reading_progress(600.0, f32::INFINITY, 400.0), None);
+        }
+
+        #[test]
+        fn image_display_caps_tall_images_to_three_quarters_of_the_viewport() {
+            let (w, h) = image_display_size((300.0, 1000.0), 900.0, 1.0, 600.0);
+            assert_eq!(h, 450.0);
+            assert!((w - 300.0 * 450.0 / 1000.0).abs() < 0.01);
+        }
+
+        #[test]
+        fn image_display_still_caps_width_and_keeps_small_images() {
+            let (w, h) = image_display_size((1400.0, 300.0), 900.0, 1.0, 600.0);
+            assert_eq!(w, 900.0);
+            assert!((h - 900.0 * 300.0 / 1400.0).abs() < 0.01);
+            // Nothing smaller than its intrinsic size is ever upscaled by the
+            // height cap.
+            assert_eq!(
+                image_display_size((64.0, 64.0), 900.0, 1.0, 600.0),
+                (64.0, 64.0)
+            );
+        }
+
+        #[test]
+        fn image_display_handles_a_tiny_viewport_and_non_finite_input() {
+            let (w, h) = image_display_size((100.0, 1000.0), 900.0, 1.0, 1.0);
+            assert_eq!(h, 0.75);
+            assert!((w - 0.075).abs() < 0.001);
+            // A bad viewport must not shrink the image to nothing.
+            assert_eq!(
+                image_display_size((100.0, 100.0), 900.0, 1.0, f32::NAN),
+                (100.0, 100.0)
+            );
+            assert_eq!(
+                image_display_size((100.0, 100.0), 900.0, 1.0, f32::INFINITY),
+                (100.0, 100.0)
+            );
+            // The intrinsic fallback still applies.
+            let (w, h) = image_display_size((0.0, f32::NAN), 900.0, 1.0, 600.0);
+            assert_eq!((w, h), (320.0, 160.0));
         }
 
         #[test]

@@ -134,6 +134,8 @@ pub struct ImageSpec {
     pub src: String,
     /// Alt text exactly as written between the brackets.
     pub alt: String,
+    /// Optional `"title"` from the image destination, empty when absent.
+    pub title: String,
 }
 
 /// A blockquote block: each line with its nesting depth and inline Markdown.
@@ -257,6 +259,27 @@ pub fn image_id(src: &str, alt: &str) -> String {
     canon.push_str(src.trim());
     canon.push('\u{1f}');
     canon.push_str(alt.trim());
+    hash_image(&canon)
+}
+
+/// Stable id with the title appended only when present, so title-less images
+/// keep the id [`image_id`] gives them while two images differing only in title
+/// get distinct ids and both render.
+fn image_id_with_title(src: &str, alt: &str, title: &str) -> String {
+    let title = title.trim();
+    if title.is_empty() {
+        return image_id(src, alt);
+    }
+    let mut canon = String::with_capacity(src.len() + alt.len() + title.len() + 2);
+    canon.push_str(src.trim());
+    canon.push('\u{1f}');
+    canon.push_str(alt.trim());
+    canon.push('\u{1f}');
+    canon.push_str(title);
+    hash_image(&canon)
+}
+
+fn hash_image(canon: &str) -> String {
     let hex = blake3::hash(canon.as_bytes()).to_hex();
     hex.as_str()[..16].to_string()
 }
@@ -755,11 +778,11 @@ pub fn prepare(md: &str, doc_dir: &Path) -> Prepared {
                         // placeholder, like a mermaid fence. Inline images,
                         // remote/data URIs and images inside tables, lists or
                         // quotes stay on the library path.
-                        if let Some((alt, target)) = parse_standalone_image(&joined) {
+                        if let Some((alt, target, title)) = parse_standalone_image(&joined) {
                             if is_local_image(&target) {
                                 let src = doc_dir.join(target).to_string_lossy().into_owned();
-                                let id = image_id(&src, &alt);
-                                images.insert(id.clone(), ImageSpec { src, alt });
+                                let id = image_id_with_title(&src, &alt, &title);
+                                images.insert(id.clone(), ImageSpec { src, alt, title });
                                 if !out.is_empty() && !out.ends_with("\n\n") {
                                     out.push('\n');
                                 }
@@ -1554,24 +1577,42 @@ fn is_standalone_image_start(line: &str) -> bool {
     !lead.contains('\t') && lead.len() <= 3 && parse_standalone_image(body).is_some()
 }
 
-/// The destination of an image/link body: `<a b.png>` keeps its spaces, an
-/// unbracketed destination ends at the first whitespace. Returns `None` for an
-/// empty destination.
-fn image_target(inner: &str) -> Option<&str> {
+/// The destination and remaining inline title of an image/link body:
+/// `<a b.png>` keeps its spaces, an unbracketed destination ends at the first
+/// whitespace. Returns `None` for an empty destination.
+fn image_parts(inner: &str) -> Option<(&str, &str)> {
     let s = inner.trim();
     if let Some(rest) = s.strip_prefix('<') {
         let end = rest.find('>')?;
         let target = &rest[..end];
-        return (!target.is_empty()).then_some(target);
+        return (!target.is_empty()).then(|| (target, rest[end + 1..].trim()));
     }
     let target = s.split_whitespace().next()?;
-    (!target.is_empty()).then_some(target)
+    (!target.is_empty()).then(|| (target, s[target.len()..].trim()))
+}
+
+fn image_target(inner: &str) -> Option<&str> {
+    image_parts(inner).map(|(target, _)| target)
+}
+
+/// A Markdown title (`"…"`, `'…'` or `(…)`) from the text after the
+/// destination. Empty or malformed titles are dropped.
+fn image_title(rest: &str) -> Option<String> {
+    let r = rest.trim();
+    let close = match r.chars().next()? {
+        '"' => '"',
+        '\'' => '\'',
+        '(' => ')',
+        _ => return None,
+    };
+    let inner = r.strip_prefix(close)?.strip_suffix(close)?.trim();
+    (!inner.is_empty()).then(|| inner.to_string())
 }
 
 /// Parse `source` as exactly one Markdown image, optionally wrapped in
-/// whitespace/newlines. Returns its alt text and link target with any
-/// `"title"` stripped; text outside the image makes this return `None`.
-pub(crate) fn parse_standalone_image(source: &str) -> Option<(String, String)> {
+/// whitespace/newlines. Returns its alt text, link target and optional title;
+/// text outside the image makes this return `None`.
+pub(crate) fn parse_standalone_image(source: &str) -> Option<(String, String, String)> {
     let s = source.trim();
     let rest = s.strip_prefix("![")?;
     let mid = rest.find("](")?;
@@ -1581,8 +1622,12 @@ pub(crate) fn parse_standalone_image(source: &str) -> Option<(String, String)> {
     if !tail[consumed..].trim().is_empty() {
         return None;
     }
-    let target = image_target(inner)?;
-    Some((alt.to_string(), target.to_string()))
+    let (target, title) = image_parts(inner)?;
+    Some((
+        alt.to_string(),
+        target.to_string(),
+        image_title(title).unwrap_or_default(),
+    ))
 }
 
 /// Whether an image target is a relative local path. Remote (`http(s)://`,
@@ -2955,7 +3000,7 @@ mod tests {
             let spec = p.images.values().next().unwrap();
             assert_eq!(spec.src, "/docs/pics/cat.png");
             assert_eq!(spec.alt, "the cat");
-            let id = image_id("/docs/pics/cat.png", "the cat");
+            let id = image_id_with_title("/docs/pics/cat.png", "the cat", "A cat");
             assert!(p.markdown.contains(&format!("<mdimg id=\"{id}\">\n\n")));
             assert!(!p.markdown.contains("![the cat]"));
             assert!(p.paragraphs.values().any(|s| s == "intro"));
@@ -3000,6 +3045,27 @@ mod tests {
             let spec = p.images.values().next().unwrap();
             assert_eq!(spec.src, "/d/x.png");
             assert_eq!(spec.alt, "a *b*");
+            assert_eq!(spec.title, "title here");
+        }
+
+        #[test]
+        fn single_quoted_title_parses_and_titleless_is_empty() {
+            let p = prepare("![x](a.png 'quoted')\n", Path::new("/d"));
+            let spec = p.images.values().next().unwrap();
+            assert_eq!(spec.title, "quoted");
+            let p = prepare("![x](a.png)\n", Path::new("/d"));
+            let spec = p.images.values().next().unwrap();
+            assert_eq!(spec.title, "");
+        }
+
+        #[test]
+        fn images_differing_only_in_title_both_survive() {
+            let md = "![same](a.png \"first\")\n\n![same](a.png \"second\")\n";
+            let p = prepare(md, Path::new("/d"));
+            assert_eq!(p.images.len(), 2);
+            let mut titles: Vec<&str> = p.images.values().map(|s| s.title.as_str()).collect();
+            titles.sort_unstable();
+            assert_eq!(titles, ["first", "second"]);
         }
 
         #[test]
@@ -3049,6 +3115,7 @@ mod tests {
             let spec = p.images.values().next().unwrap();
             assert_eq!(spec.src, "/docs/a b.png");
             assert_eq!(spec.alt, "x");
+            assert_eq!(spec.title, "title");
             assert!(p.markdown.contains("<mdimg id="));
         }
 

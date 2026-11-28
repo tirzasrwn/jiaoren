@@ -16,7 +16,7 @@ use image::RgbaImage;
 use crate::doc::ImageSpec;
 
 use super::geometry::{
-    clamp_pan, diagram_display_size, popup_fit_size, popup_zoom_step, zoom_anchored,
+    clamp_pan, image_display_size, popup_fit_size, popup_zoom_step, zoom_anchored,
 };
 use super::table::table_pad;
 use super::{catch_worker, lock};
@@ -101,6 +101,7 @@ enum JobKind {
         path: PathBuf,
         column: f32,
         zoom: f32,
+        viewport_h: f32,
         ppp: f32,
     },
     /// Re-resize an already decoded source (zoom changed); never runs on the
@@ -149,6 +150,9 @@ pub(crate) struct ImageUi {
     /// Reading column in effect this frame, set from the same `col` the viewer
     /// is given via `ui.set_width(col)`.
     column: f32,
+    /// Viewport height in effect this frame: inline images cap their display
+    /// height to 75% of it.
+    viewport_h: f32,
     /// Document zoom, so images scale with text exactly like diagrams.
     zoom: f32,
     /// The zoom overlay, when an image was clicked open.
@@ -181,6 +185,7 @@ impl ImageUi {
             result_rx: rx,
             active_workers: 0,
             column: 0.0,
+            viewport_h: 0.0,
             zoom: 1.0,
             popup: None,
             popup_fresh: false,
@@ -189,11 +194,12 @@ impl ImageUi {
         }
     }
 
-    /// Record the document's reading column and zoom once per frame, before the
-    /// viewer runs.
-    pub(crate) fn begin_frame(&mut self, column: f32, zoom: f32) {
+    /// Record the document's reading column, zoom and viewport height once per
+    /// frame, before the viewer runs.
+    pub(crate) fn begin_frame(&mut self, column: f32, zoom: f32, viewport_h: f32) {
         self.column = column;
         self.zoom = zoom;
+        self.viewport_h = viewport_h;
         self.touched_sources.clear();
         self.trim_sources();
     }
@@ -286,11 +292,14 @@ impl ImageUi {
                         path,
                         column,
                         zoom,
+                        viewport_h,
                         ppp,
                     } => {
                         trace(format_args!("decode start {}", path.display()));
-                        catch_worker("decode", || decode_and_resize(&path, column, zoom, ppp))
-                            .and_then(std::convert::identity)
+                        catch_worker("decode", || {
+                            decode_and_resize(&path, column, zoom, viewport_h, ppp)
+                        })
+                        .and_then(std::convert::identity)
                     }
                     JobKind::Resize { source, target } => {
                         catch_worker("image resize", || resize_source(source, target))
@@ -332,7 +341,8 @@ impl ImageUi {
         };
         let key = key_for(id, &spec);
         let intrinsic = self.intrinsic_for(&key);
-        let display = intrinsic.map(|size| diagram_display_size(size, self.column, self.zoom));
+        let display =
+            intrinsic.map(|size| image_display_size(size, self.column, self.zoom, self.viewport_h));
         match self.load_state(ui.ctx(), &key, &spec, display) {
             LoadState::Ready(entry) => {
                 let (dw, dh) = display.unwrap_or_else(|| self.placeholder_size());
@@ -341,11 +351,18 @@ impl ImageUi {
                         egui::vec2(self.column, dh),
                         egui::Layout::top_down(egui::Align::Center),
                         |ui| {
-                            ui.add(
+                            let response = ui.add(
                                 egui::Image::from_texture(&entry.handle)
                                     .fit_to_exact_size(egui::vec2(dw, dh))
                                     .sense(egui::Sense::click()),
-                            )
+                            );
+                            if let Some(caption) = caption_text(&spec.title, &spec.alt) {
+                                ui.add(
+                                    egui::Label::new(egui::RichText::new(caption).weak())
+                                        .wrap_mode(egui::TextWrapMode::Wrap),
+                                );
+                            }
+                            response
                         },
                     )
                     .inner;
@@ -631,6 +648,7 @@ impl ImageUi {
                 path: PathBuf::from(&spec.src),
                 column: self.column,
                 zoom: self.zoom,
+                viewport_h: self.viewport_h,
                 ppp: ctx.pixels_per_point(),
             },
         });
@@ -699,7 +717,7 @@ impl ImageUi {
     }
 
     fn placeholder_size(&self) -> (f32, f32) {
-        diagram_display_size((640.0, 320.0), self.column, self.zoom)
+        image_display_size((640.0, 320.0), self.column, self.zoom, self.viewport_h)
     }
 
     fn draw_loading(&self, ui: &mut egui::Ui, (dw, dh): (f32, f32)) {
@@ -721,6 +739,17 @@ impl ImageUi {
             format!("image error: {}: {msg}", spec.src),
         );
     }
+}
+
+/// One weak line under an inline image: the title when present, else the alt
+/// text, else nothing. Both are author text, never app chrome.
+fn caption_text<'a>(title: &'a str, alt: &'a str) -> Option<&'a str> {
+    let title = title.trim();
+    if !title.is_empty() {
+        return Some(title);
+    }
+    let alt = alt.trim();
+    (!alt.is_empty()).then_some(alt)
 }
 
 /// Cache key for `id` at `mtime`. Pure: the `mtime` change is what forces a
@@ -847,10 +876,16 @@ fn draw_loading_rect(painter: &egui::Painter, rect: egui::Rect) {
 
 /// Decode and resize on a worker thread: read, bound, decode, then downscale to
 /// the display size in physical pixels.
-fn decode_and_resize(path: &Path, column: f32, zoom: f32, ppp: f32) -> Result<Decoded, String> {
+fn decode_and_resize(
+    path: &Path,
+    column: f32,
+    zoom: f32,
+    viewport_h: f32,
+    ppp: f32,
+) -> Result<Decoded, String> {
     let source = Arc::new(decode_source(path)?);
     let (w, h) = source.dimensions();
-    let display = diagram_display_size((w as f32, h as f32), column, zoom);
+    let display = image_display_size((w as f32, h as f32), column, zoom, viewport_h);
     let target = texture_target([w, h], display, ppp);
     let resized = (target != [w, h]).then(|| {
         image::imageops::resize(source.as_ref(), target[0], target[1], FilterType::Triangle)
@@ -912,7 +947,7 @@ mod tests {
         use std::time::{Duration, UNIX_EPOCH};
 
         use super::super::*;
-        use crate::app::geometry::diagram_display_size;
+        use crate::app::geometry::{diagram_display_size, image_display_size};
 
         fn close_with(event: egui::Event) -> (Option<bool>, usize, bool) {
             let ctx = egui::Context::default();
@@ -983,6 +1018,21 @@ mod tests {
                 (128.0, 128.0)
             );
             assert_eq!(diagram_display_size((1600.0, 300.0), 900.0, 2.0).0, 900.0);
+        }
+
+        #[test]
+        fn inline_decode_target_honours_the_viewport_height_cap() {
+            let display = image_display_size((1000.0, 3000.0), 900.0, 1.0, 600.0);
+            assert_eq!(display, (150.0, 450.0));
+            assert_eq!(texture_target([1000, 3000], display, 1.0), [150, 450]);
+        }
+
+        #[test]
+        fn caption_prefers_the_title_then_the_alt_then_nothing() {
+            assert_eq!(caption_text("title", "alt"), Some("title"));
+            assert_eq!(caption_text("", "alt"), Some("alt"));
+            assert_eq!(caption_text("  ", "  "), None);
+            assert_eq!(caption_text("", ""), None);
         }
 
         #[test]
@@ -1064,10 +1114,11 @@ mod tests {
             let spec = ImageSpec {
                 src: path.to_string_lossy().into_owned(),
                 alt: String::new(),
+                title: String::new(),
             };
             let images = HashMap::from([("abc".to_string(), spec.clone())]);
             let mut ui = ImageUi::new(images);
-            ui.begin_frame(900.0, 1.0);
+            ui.begin_frame(900.0, 1.0, 600.0);
             let ctx = egui::Context::default();
             let key = key_for("abc", &spec);
             // Layout never blocks on decode: the first frame only queues work.
@@ -1097,6 +1148,7 @@ mod tests {
                 ImageSpec {
                     src: "/d/a.png".to_string(),
                     alt: String::new(),
+                    title: String::new(),
                 },
             )]);
             let mut ui = ImageUi::new(images.clone());

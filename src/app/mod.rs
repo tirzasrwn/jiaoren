@@ -37,7 +37,7 @@ use code::CodeUi;
 use diagram::DiagramUi;
 use geometry::{
     bottom_pad, content_column, edge_scroll, frame_scroll_x, home_scroll, home_target,
-    jump_scroll_top, overscroll_pad, scroll_by_columns, scroll_by_lines,
+    jump_scroll_top, overscroll_pad, reading_progress, scroll_by_columns, scroll_by_lines,
 };
 use heading::HeadingUi;
 use image::ImageUi;
@@ -1005,7 +1005,19 @@ impl App {
             } else {
                 show_status(ctx, &status.message);
                 ctx.request_repaint_after(remaining);
+                return;
             }
+        }
+        // Final fallback: reading progress. Anything above (search prompt or
+        // status, downloads, font progress, a live transient message) owns the
+        // chip; the top of the document and a non-scrolling document stay
+        // blank.
+        if let Some(pct) = reading_progress(
+            self.scroll_y,
+            self.scroll_max.y,
+            self.pad.map_or(0.0, |p| p.y),
+        ) {
+            show_status(ctx, &format!("{pct}%"));
         }
     }
 
@@ -1890,7 +1902,7 @@ impl eframe::App for App {
                         self.headings.borrow_mut().begin_frame(col);
                         self.code.borrow_mut().begin_frame(ui, col);
                         self.diagrams.borrow_mut().begin_frame(col);
-                        self.images.borrow_mut().begin_frame(col, z);
+                        self.images.borrow_mut().begin_frame(col, z, viewport_h);
                         self.search.borrow_mut().begin_frame();
                         // The document paint re-records the hovered link below;
                         // clearing first keeps `o` from using a stale one.
