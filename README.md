@@ -6,7 +6,7 @@ fences drawn as real diagrams.
 
 Keyboard-first, almost no chrome, live-reloads when the file changes on disk.
 
-![Opening examples/demo.md: justified prose with inline code and links, dragging a phrase and releasing it to copy, a vim-style `/` live search that highlights matches as you type with Enter and `n` jumping between matches, hovering a table row and clicking the table icon to copy CSV, opening the diagram in the zoomable popup and switching its theme with `t` while it is open, the heading index with `h`/`l` folding and Enter jumping, the `ctrl+g` path status and the `?` shortcut overlay, zooming and panning with `+` and `h`/`l`, `yy` copying the document, `]` opening the next note, and the Catppuccin dark and light themes](docs/assets/demo.gif)
+![Opening examples/demo.md: justified prose with inline code and links, dragging a phrase and releasing it to copy, hovering a link for its destination tooltip, a vim-style `/` search starting at the current section with `n`/`N` and `↑`/`↓` history, hovering a table row and clicking the table icon to copy CSV, opening the diagram in the zoomable popup and switching its theme with `t`, holding `}` and pressing `{` to step blocks, `ctrl+o`/`ctrl+i` walking the jump list, the heading index opening at the current section with `h`/`l` folding and Enter jumping, a live reload holding that section while text is inserted above it, image captions and a tall image capped to the viewport, the bottom-right reading progress, `]` then `G` then `[` returning to the previous file's position, the `ctrl+g` path status and the `?` overlay, zooming and panning with `+` and `h`/`l`, `yy` copying the document, and the Catppuccin dark and light themes](docs/assets/demo.gif)
 
 ## Why "jiaoren"?
 
