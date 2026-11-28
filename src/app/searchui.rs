@@ -10,6 +10,9 @@ use crate::search::SearchState;
 
 use super::selection::{hit_test_distance, SelPoint, SelectionState};
 
+/// Committed queries kept for Up/Down browsing.
+const HISTORY_MAX: usize = 20;
+
 /// Search state backing the `/` command line, the status line and `n`/`N`.
 pub(crate) struct SearchUi {
     /// Confirmed pattern and its hits.
@@ -18,6 +21,12 @@ pub(crate) struct SearchUi {
     pub(crate) selection: SelectionState,
     /// `Some(query)` while the command line is open.
     pub(crate) input: Option<String>,
+    /// Committed non-empty queries, newest first.
+    history: Vec<String>,
+    /// Index into `history` while Up/Down browses it; `None` is the draft.
+    history_index: Option<usize>,
+    /// The draft saved when history browsing began.
+    history_draft: String,
     /// State to restore when `/` input is cancelled with Esc/Ctrl+C.
     backup: Option<SearchState>,
     /// Block under the viewport when `/` opened; live matches start here so a
@@ -62,6 +71,9 @@ impl SearchUi {
             state: SearchState::default(),
             selection: SelectionState::default(),
             input: None,
+            history: Vec::new(),
+            history_index: None,
+            history_draft: String::new(),
             backup: None,
             origin: None,
             cache: HashMap::new(),
@@ -382,6 +394,8 @@ impl SearchUi {
     pub(crate) fn open_from(&mut self, origin: Option<usize>) {
         self.backup = Some(self.state.clone());
         self.input = Some(String::new());
+        self.history_index = None;
+        self.history_draft.clear();
         self.state.clear();
         self.origin = origin;
     }
@@ -394,14 +408,61 @@ impl SearchUi {
         }
         self.input = None;
         self.origin = None;
+        self.history_index = None;
+        self.history_draft.clear();
         self.state.current_block()
     }
 
-    /// Keep the live search and leave input mode.
+    /// Keep the live search and leave input mode. A non-empty query joins the
+    /// history; only Enter commits, so live previews are not remembered.
     pub(crate) fn commit(&mut self) {
-        self.input = None;
+        if let Some(query) = self.input.take() {
+            if !query.is_empty() && self.history.first() != Some(&query) {
+                self.history.insert(0, query);
+                self.history.truncate(HISTORY_MAX);
+            }
+        }
         self.backup = None;
         self.origin = None;
+        self.history_index = None;
+        self.history_draft.clear();
+    }
+
+    /// Walk to an older history entry (`Up`), saving the draft first.
+    pub(crate) fn history_older(&mut self) {
+        let Some(input) = self.input.as_mut() else {
+            return;
+        };
+        match self.history_index {
+            None if !self.history.is_empty() => {
+                self.history_draft = std::mem::take(input);
+                self.history_index = Some(0);
+                *input = self.history[0].clone();
+            }
+            Some(index) if index + 1 < self.history.len() => {
+                self.history_index = Some(index + 1);
+                *input = self.history[index + 1].clone();
+            }
+            _ => {}
+        }
+    }
+
+    /// Walk to a newer history entry (`Down`); past the newest, restore the draft.
+    pub(crate) fn history_newer(&mut self) {
+        let Some(input) = self.input.as_mut() else {
+            return;
+        };
+        match self.history_index {
+            Some(0) => {
+                self.history_index = None;
+                *input = std::mem::take(&mut self.history_draft);
+            }
+            Some(index) => {
+                self.history_index = Some(index - 1);
+                *input = self.history[index - 1].clone();
+            }
+            None => {}
+        }
     }
 
     /// Current query text while input mode is open.
@@ -634,6 +695,91 @@ mod tests {
             assert_eq!(s.query(), "");
             s.backspace();
             assert_eq!(s.query(), "");
+        }
+    }
+
+    mod history {
+        use super::super::SearchUi;
+        use std::rc::Rc;
+
+        fn rc(texts: &[&str]) -> Vec<Rc<str>> {
+            texts.iter().map(|text| Rc::from(*text)).collect()
+        }
+
+        fn commit(s: &mut SearchUi, query: &str) {
+            s.open_from(None);
+            s.type_text(query);
+            s.commit();
+        }
+
+        #[test]
+        fn commit_remembers_non_empty_queries_newest_first() {
+            let mut s = SearchUi::new();
+            s.texts = rc(&["one two"]);
+            commit(&mut s, "one");
+            commit(&mut s, "two");
+            assert_eq!(s.history, vec!["two".to_string(), "one".to_string()]);
+        }
+
+        #[test]
+        fn consecutive_duplicates_and_empty_queries_are_not_stored() {
+            let mut s = SearchUi::new();
+            s.texts = rc(&["one two"]);
+            commit(&mut s, "one");
+            commit(&mut s, "one");
+            commit(&mut s, "");
+            assert_eq!(s.history, vec!["one".to_string()]);
+        }
+
+        #[test]
+        fn history_is_capped_at_twenty() {
+            let mut s = SearchUi::new();
+            s.texts = rc(&["one two"]);
+            for i in 0..25 {
+                commit(&mut s, &format!("q{i}"));
+            }
+            assert_eq!(s.history.len(), 20);
+            assert_eq!(s.history.first().map(String::as_str), Some("q24"));
+            assert_eq!(s.history.last().map(String::as_str), Some("q5"));
+        }
+
+        #[test]
+        fn up_and_down_walk_history_and_restore_the_draft() {
+            let mut s = SearchUi::new();
+            s.texts = rc(&["alpha beta gamma"]);
+            commit(&mut s, "alpha");
+            commit(&mut s, "beta");
+            s.open_from(None);
+            s.type_text("draft");
+            s.history_older();
+            assert_eq!(s.query(), "beta");
+            s.history_older();
+            assert_eq!(s.query(), "alpha");
+            // At the oldest entry Up stays put.
+            s.history_older();
+            assert_eq!(s.query(), "alpha");
+            s.history_newer();
+            assert_eq!(s.query(), "beta");
+            s.history_newer();
+            assert_eq!(s.query(), "draft");
+            // Back on the draft, Down is a no-op.
+            s.history_newer();
+            assert_eq!(s.query(), "draft");
+        }
+
+        #[test]
+        fn opening_slash_starts_a_fresh_draft_after_a_cancel() {
+            let mut s = SearchUi::new();
+            s.texts = rc(&["alpha"]);
+            commit(&mut s, "alpha");
+            s.open_from(None);
+            s.type_text("draft");
+            s.history_older();
+            s.cancel();
+            s.open_from(None);
+            assert_eq!(s.query(), "");
+            s.history_older();
+            assert_eq!(s.query(), "alpha");
         }
     }
 
