@@ -38,6 +38,7 @@ use diagram::DiagramUi;
 use geometry::{
     bottom_pad, content_column, edge_scroll, frame_scroll_x, home_scroll, home_target,
     jump_scroll_top, overscroll_pad, reading_progress, scroll_by_columns, scroll_by_lines,
+    step_target,
 };
 use heading::HeadingUi;
 use image::ImageUi;
@@ -1429,8 +1430,10 @@ impl App {
                 .and_then(|block| search.block_y(block))
         };
         if let Some(y) = target {
-            self.jump_to = None;
-            self.scroll_y = y;
+            if let Some(y) = step_target(self.scroll_y, y, self.scroll_max.y) {
+                self.jump_to = None;
+                self.scroll_y = y;
+            }
         }
     }
 

@@ -24,6 +24,8 @@ All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 - The zoom overlay keeps its window panel but drops the inner padding, so a
   picture reaches the panel edges and is clipped there when zoomed. A click on
   the dim background outside the panel still closes it.
+- Holding `}` at the end of the document no longer pushes the scroll offset past
+  its limit and fights the clamp.
 
 ### Changed
 

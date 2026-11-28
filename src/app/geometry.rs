@@ -194,6 +194,15 @@ pub(crate) fn edge_scroll(pointer_y: f32, viewport_top: f32, viewport_bottom: f3
     }
 }
 
+/// A step target clamped to the scroll range, or `None` when it cannot move.
+/// Holding `}` at the end must not park the offset past `max` and fight the
+/// scroll area every repeat.
+pub(crate) fn step_target(current: f32, target: f32, max: f32) -> Option<f32> {
+    let max = max.max(0.0);
+    let target = target.clamp(0.0, max);
+    ((target - current).abs() > 0.5).then_some(target)
+}
+
 /// Scroll offset after adding `delta`, clamped to `0..=max`. A non-finite
 /// target keeps the current offset so a bad line height or advance cannot park
 /// the view at a NaN offset.
@@ -886,6 +895,15 @@ mod tests {
                 diagram_inline_size((87.0, 160.0), 900.0, 1.0, 600.0),
                 (87.0, 160.0)
             );
+        }
+
+        #[test]
+        fn step_target_never_moves_past_the_end_or_by_a_sub_pixel() {
+            assert_eq!(step_target(100.0, 400.0, 500.0), Some(400.0));
+            assert_eq!(step_target(500.0, 900.0, 500.0), None);
+            assert_eq!(step_target(500.0, 500.2, 500.0), None);
+            assert_eq!(step_target(0.0, -10.0, 500.0), None);
+            assert_eq!(step_target(400.0, 300.0, 500.0), Some(300.0));
         }
 
         #[test]
