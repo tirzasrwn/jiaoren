@@ -496,14 +496,9 @@ impl ImageUi {
                 let painter = ui.painter().clone();
                 painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(160));
                 // An explicit rect each frame: an auto-sized `Area` would keep
-                // the first frame's panel size and clip a zoomed image.
-                painter.rect(
-                    panel,
-                    0.0,
-                    ui.visuals().window_fill,
-                    ui.visuals().window_stroke,
-                    egui::StrokeKind::Inside,
-                );
+                // the first frame's panel size and clip a zoomed image. No
+                // border: the dimmed page already frames the panel.
+                painter.rect_filled(panel, 0.0, ui.visuals().window_fill);
                 let drag = ui.interact(
                     view_rect,
                     egui::Id::new("jiaoren-image-popup-drag"),

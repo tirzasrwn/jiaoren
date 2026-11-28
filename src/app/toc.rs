@@ -264,10 +264,6 @@ pub(crate) fn draw(
             ui.painter().rect_filled(screen, 0.0, base);
             egui::Frame::new()
                 .fill(base)
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    ui.visuals().widgets.noninteractive.bg_stroke.color,
-                ))
                 // No side margin: the selection bar spans the full window.
                 .inner_margin(egui::Margin {
                     left: 0,

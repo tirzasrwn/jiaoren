@@ -13,8 +13,8 @@ All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 
 - All overlays, chips and tooltips appear immediately: egui's animation time
   is zero and every overlay sets `fade_in(false)`.
-- Tooltips and the `?` shortcut overlay are plain square boxes: no rounded
-  corners, border or shadow.
+- Tooltips, the `?` shortcut overlay, the heading index and the zoom panels are
+  plain square surfaces: no rounded corners, border or shadow.
 - Persisted state and cache metadata in one SQLite database at
   `$XDG_DATA_HOME/jiaoren/jiaoren.db` (else
   `~/.local/share/jiaoren/jiaoren.db`): zoom, theme, per-document positions and
