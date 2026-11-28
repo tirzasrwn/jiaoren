@@ -454,9 +454,11 @@ impl ImageUi {
         let key = key_for(&id, &spec);
         let (iw, ih) = self.intrinsic_for(&key).unwrap_or((640.0, 320.0));
         let screen = ctx.content_rect();
-        // The overlay uses the whole window: no outer margin and no inner
-        // padding, so a zoomed picture reaches every edge.
-        let avail = screen.size().max(egui::vec2(64.0, 64.0));
+        let margin = 10.0;
+        let avail =
+            (screen.size() - egui::vec2(2.0 * margin, 2.0 * margin)).max(egui::vec2(64.0, 64.0));
+        // Keep the popup panel, but no inner padding: the picture reaches its
+        // edges and is clipped there when zoomed.
         let pad = 0.0;
         let view = (avail - egui::vec2(2.0 * pad, 2.0 * pad)).max(egui::vec2(1.0, 1.0));
         let (base_w, base_h) = popup_fit_size((iw, ih), self.zoom, column, view);
@@ -493,8 +495,9 @@ impl ImageUi {
                 let response = ui.allocate_rect(screen, egui::Sense::click());
                 let painter = ui.painter().clone();
                 painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(160));
-                // No panel fill: the picture sits directly on the dimmed page,
-                // so there is no white frame around it at any zoom.
+                // The popup panel stays; only the inner padding is gone. No
+                // border: the panel fill alone frames the picture.
+                painter.rect_filled(panel, 0.0, ui.visuals().window_fill);
                 let drag = ui.interact(
                     view_rect,
                     egui::Id::new("jiaoren-image-popup-drag"),
@@ -537,13 +540,11 @@ impl ImageUi {
 
         pan = clamp_pan(pan, image, view);
         self.popup = Some(PopupState { id, zoom, pan });
-        // Only a click on the dim letterbox around the picture closes; the
-        // panel now fills the window, so the picture itself is the hit area.
-        let image_rect = egui::Rect::from_min_size(view_rect.min + pan, image);
-        let inside_image = ctx
+        // A click on the dim background outside the popup window closes it.
+        let inside_panel = ctx
             .input(|i| i.pointer.interact_pos())
-            .is_some_and(|pos| image_rect.contains(pos));
-        if dimmed && !fresh && !inside_image {
+            .is_some_and(|pos| panel.contains(pos));
+        if dimmed && !fresh && !inside_panel {
             self.note_popup_closed(ctx, false);
         }
     }

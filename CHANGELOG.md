@@ -21,9 +21,9 @@ All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
   is zero and every overlay sets `fade_in(false)`.
 - Tooltips, the `?` shortcut overlay, the heading index and the zoom overlay are
   plain square surfaces: no rounded corners, border or shadow.
-- The zoom overlay fills the window with zero margin and padding, so a picture
-  is clipped only at the window edges with no white frame behind it. A click on
-  the dim letterbox still closes it.
+- The zoom overlay keeps its window panel but drops the inner padding, so a
+  picture reaches the panel edges and is clipped there when zoomed. A click on
+  the dim background outside the panel still closes it.
 
 ### Changed
 
