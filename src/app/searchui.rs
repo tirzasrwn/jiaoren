@@ -376,13 +376,9 @@ impl SearchUi {
     }
 
     /// Open the command line with an empty query, remembering the committed
-    /// search so Esc/Ctrl+C can restore it.
-    pub(crate) fn open(&mut self) {
-        self.open_from(None);
-    }
-
-    /// [`Self::open`] with the block under the viewport, so the first match is
-    /// searched forward from where the reader is.
+    /// search so Esc/Ctrl+C can restore it. `origin` is the block under the
+    /// viewport, so the first match is searched forward from where the reader
+    /// is; `None` starts from the top.
     pub(crate) fn open_from(&mut self, origin: Option<usize>) {
         self.backup = Some(self.state.clone());
         self.input = Some(String::new());
@@ -543,7 +539,7 @@ mod tests {
             // Previous committed search to restore on cancel.
             s.state.set_pattern(s.texts.iter().map(|t| &**t), "two");
             assert_eq!(s.state.pattern.as_deref(), Some("two"));
-            s.open();
+            s.open_from(None);
             assert!(s.is_open());
             assert_eq!(s.query(), "");
             assert!(s.state.pattern.is_none(), "opening clears live state");
@@ -569,14 +565,14 @@ mod tests {
         fn enter_commit_keeps_live_search_and_empty_query_clears_hits() {
             let mut s = SearchUi::new();
             s.texts = rc(&["hello world"]);
-            s.open();
+            s.open_from(None);
             s.type_text("world");
             assert_eq!(s.state.status_text().as_deref(), Some("/world [1/1]"));
             s.commit();
             assert!(!s.is_open());
             assert_eq!(s.state.pattern.as_deref(), Some("world"));
 
-            s.open();
+            s.open_from(None);
             s.type_text("x");
             s.backspace();
             assert_eq!(s.query(), "");
@@ -619,7 +615,7 @@ mod tests {
         fn cancel_without_prior_search_has_no_jump_target() {
             let mut s = SearchUi::new();
             s.texts = rc(&["abc"]);
-            s.open();
+            s.open_from(None);
             s.type_text("abc");
             assert_eq!(s.cancel(), None);
             assert!(s.state.pattern.is_none());
@@ -629,7 +625,7 @@ mod tests {
         fn backspace_is_one_unicode_char() {
             let mut s = SearchUi::new();
             s.texts = rc(&["é東"]);
-            s.open();
+            s.open_from(None);
             s.type_text("é東");
             assert_eq!(s.query(), "é東");
             s.backspace();
