@@ -20,6 +20,9 @@ pub(crate) struct SearchUi {
     pub(crate) input: Option<String>,
     /// State to restore when `/` input is cancelled with Esc/Ctrl+C.
     backup: Option<SearchState>,
+    /// Block under the viewport when `/` opened; live matches start here so a
+    /// search never jumps backwards to the top of the document.
+    origin: Option<usize>,
     /// Visible text per placeholder id, shared with every frame. The renderers
     /// build it once (markdown is stripped inline-wise, which is expensive) and
     /// `texts` then only clones the `Rc`.
@@ -60,6 +63,7 @@ impl SearchUi {
             selection: SelectionState::default(),
             input: None,
             backup: None,
+            origin: None,
             cache: HashMap::new(),
             texts: Vec::new(),
             tops: Vec::new(),
@@ -104,6 +108,7 @@ impl SearchUi {
         self.controls.clear();
         self.anchors.clear();
         self.heading_blocks.clear();
+        self.origin = None;
         self.recompute_after_frame = false;
     }
 
@@ -338,6 +343,15 @@ impl SearchUi {
         self.hs.get(index).copied()
     }
 
+    /// Block under content offset `y`, or the next one when `y` falls in a gap.
+    /// `None` past the last block (the search then wraps).
+    pub(crate) fn block_at(&self, y: f32) -> Option<usize> {
+        self.ys
+            .iter()
+            .zip(&self.hs)
+            .position(|(&top, &height)| top + height.max(0.0) > y)
+    }
+
     /// Block index at the next (`dir > 0`) or previous block start relative to
     /// content offset `from`. One-point slack keeps the block the viewport is
     /// already showing from counting as the next one.
@@ -364,9 +378,16 @@ impl SearchUi {
     /// Open the command line with an empty query, remembering the committed
     /// search so Esc/Ctrl+C can restore it.
     pub(crate) fn open(&mut self) {
+        self.open_from(None);
+    }
+
+    /// [`Self::open`] with the block under the viewport, so the first match is
+    /// searched forward from where the reader is.
+    pub(crate) fn open_from(&mut self, origin: Option<usize>) {
         self.backup = Some(self.state.clone());
         self.input = Some(String::new());
         self.state.clear();
+        self.origin = origin;
     }
 
     /// Close the command line and restore the pre-`/` search state. Returns the
@@ -376,6 +397,7 @@ impl SearchUi {
             self.state = state;
         }
         self.input = None;
+        self.origin = None;
         self.state.current_block()
     }
 
@@ -383,6 +405,7 @@ impl SearchUi {
     pub(crate) fn commit(&mut self) {
         self.input = None;
         self.backup = None;
+        self.origin = None;
     }
 
     /// Current query text while input mode is open.
@@ -422,6 +445,9 @@ impl SearchUi {
         let pattern = self.query().to_string();
         self.state
             .set_pattern(self.texts.iter().map(|text| &**text), &pattern);
+        if let Some(origin) = self.origin {
+            self.state.start_at(origin);
+        }
     }
 
     /// Whether the command line owns the keyboard.
@@ -453,6 +479,38 @@ mod tests {
             assert_eq!(s.block_height(0), Some(32.0));
             assert_eq!(s.block_height(1), Some(10.0));
             assert_eq!(s.block_height(2), None);
+        }
+
+        #[test]
+        fn block_at_finds_the_block_under_the_viewport_top() {
+            let mut s = SearchUi::new();
+            s.ys = vec![100.0, 200.0, 300.0];
+            s.hs = vec![50.0, 50.0, 50.0];
+            assert_eq!(s.block_at(100.0), Some(0));
+            assert_eq!(s.block_at(149.0), Some(0));
+            assert_eq!(s.block_at(150.0), Some(1));
+            assert_eq!(s.block_at(310.0), Some(2));
+            assert_eq!(s.block_at(400.0), None);
+        }
+
+        #[test]
+        fn open_from_searches_forward_from_the_viewport() {
+            let mut s = SearchUi::new();
+            s.texts = rc(&["alpha", "beta", "alpha"]);
+            s.ys = vec![100.0, 200.0, 300.0];
+            s.hs = vec![50.0, 50.0, 50.0];
+            s.open_from(Some(1));
+            s.type_text("alpha");
+            // The hit in block 0 is above the reader; block 2 is the next one.
+            assert_eq!(s.state.current_block(), Some(2));
+            // Past the last match, the search wraps to the first one.
+            s.open_from(Some(2));
+            s.type_text("beta");
+            assert_eq!(s.state.current_block(), Some(1));
+            // Without an origin (a direct open) the first match still wins.
+            s.open_from(None);
+            s.type_text("alpha");
+            assert_eq!(s.state.current_block(), Some(0));
         }
 
         #[test]

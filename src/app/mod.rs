@@ -1784,7 +1784,8 @@ impl eframe::App for App {
                 }
                 Action::SearchOpen => {
                     self.search_origin = Some(self.scroll_y);
-                    self.search.borrow_mut().open();
+                    let origin = self.search.borrow().block_at(self.scroll_y);
+                    self.search.borrow_mut().open_from(origin);
                     ui.ctx().request_repaint();
                 }
                 Action::SearchNext => self.step_search(1, ui.ctx()),

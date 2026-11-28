@@ -104,7 +104,8 @@ Mermaid diagram labels still need `FiraCode Nerd Font` installed system-wide.
 | `esc` / `ctrl+c` | copy the selection, else cancel the prompt, else clear the search, else quit |
 | `q` | quit |
 
-`o` opens the hovered `http(s)`/`mailto` link with `$BROWSER`, else `xdg-open`,
+Hovering a link shows its destination in a tooltip. `o` opens the hovered
+`http(s)`/`mailto` link with `$BROWSER`, else `xdg-open`,
 `gio open` or `sensible-browser`; other schemes stay inert. `]` and `[` step
 through the `.md`/`.markdown` files in the open document's folder, wrapping at
 both ends, and land at the top of the next file.
@@ -299,6 +300,9 @@ document cannot exfiltrate data or load remote resources during rendering.
 
 ## Known limitations
 
+- Table columns are always left-aligned. `:---:`, `---:` and `:---` alignment
+  markers are accepted and intentionally ignored; the flush-left grid is the
+  owner's design choice, not a rendering gap.
 - Wide tables wrap instead of getting a horizontal scrollbar, and code lines
   wrap at the reading column (a long token breaks at any character). Use `+` to
   zoom in when the text is hard to read.

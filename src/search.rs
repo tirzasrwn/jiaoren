@@ -128,6 +128,19 @@ impl SearchState {
         };
     }
 
+    /// Move the current match to the first hit at or after `block`, wrapping to
+    /// the first hit when none is left. No-op without hits.
+    pub fn start_at(&mut self, block: usize) {
+        if self.hits.is_empty() {
+            return;
+        }
+        self.current_match = self
+            .hits
+            .iter()
+            .position(|hit| hit.block >= block)
+            .unwrap_or(0);
+    }
+
     /// Drop the pattern and every hit.
     pub fn clear(&mut self) {
         self.pattern = None;
@@ -396,6 +409,22 @@ mod tests {
             assert!(s.pattern.is_none());
             assert!(s.hits.is_empty());
             assert_eq!(s.status_text(), None);
+        }
+
+        #[test]
+        fn start_at_picks_the_first_hit_at_or_after_the_block() {
+            let mut s = SearchState::default();
+            s.set_pattern(["alpha", "beta", "alpha"], "alpha");
+            assert_eq!(s.current_block(), Some(0));
+            s.start_at(1);
+            assert_eq!(s.current_block(), Some(2));
+            // No hit at or after the block: wrap to the first one.
+            s.start_at(3);
+            assert_eq!(s.current_block(), Some(0));
+            // No hits at all stays harmless.
+            s.set_pattern(["nothing"], "missing");
+            s.start_at(2);
+            assert_eq!(s.current_block(), None);
         }
 
         #[test]
