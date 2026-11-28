@@ -229,7 +229,8 @@ column), capped to the column width when wider and to 75% of the window height
 when taller, keeping its aspect ratio, with the same vertical spacing above and
 below as a table. A tall diagram therefore shrinks inline; click it to see the
 whole picture in the overlay. Click a diagram to open it in a dimmed
-overlay: `+`/`-` or the wheel zoom (1×–3×), `h`/`l`/`j`/`k` and mouse drag pan
+overlay: `+`/`-` or the wheel zoom (1×–3×), `0` resets the zoom and `a` resets
+and centres the picture, `h`/`l`/`j`/`k` and mouse drag pan
 (both axes, with half a frame of overscroll past every edge), `t` switches the
 theme and redraws the diagram in it, and `Esc`, `q`,
 `Ctrl+C` or a click outside closes it. Zoom is anchored at the pointer when it is over the diagram, so the
@@ -269,8 +270,8 @@ The zoom popup re-resizes from the decoded source when zooming in, so `+` stays
 sharp.
 
 Click an image to open the same dimmed overlay as a diagram: `+`/`-` or the
-wheel zoom (1×–3×), `h`/`l`/`j`/`k` and mouse drag pan, and `Esc`, `q`, `Ctrl+C`
-or a click outside closes it. A changed file reloads automatically (the texture
+wheel zoom (1×–3×), `0` resets the zoom, `a` resets and centres it, `h`/`l`/`j`/`k`
+and mouse drag pan, and `Esc`, `q`, `Ctrl+C` or a click outside closes it. A changed file reloads automatically (the texture
 is keyed by the file's mtime); a missing or undecodable file draws a red error
 line naming the path.
 

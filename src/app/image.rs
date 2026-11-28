@@ -16,7 +16,7 @@ use image::RgbaImage;
 use crate::doc::ImageSpec;
 
 use super::geometry::{
-    clamp_pan, image_display_size, popup_fit_size, popup_zoom_step, zoom_anchored,
+    clamp_pan, image_display_size, popup_fit_size, popup_zoom_after_keys, zoom_anchored,
 };
 use super::table::table_pad;
 use super::{catch_worker, lock};
@@ -407,7 +407,7 @@ impl ImageUi {
             self.note_popup_closed(ctx, ctrl_c);
             return;
         }
-        let (plus, minus, wheel_up, wheel_down, h, l, j, k) = ctx.input(|i| {
+        let (plus, minus, wheel_up, wheel_down, h, l, j, k, zero, fit) = ctx.input(|i| {
             // Read wheel notches, not `smooth_scroll_delta`: the smoothed value
             // spans many frames and would multiply one notch into many steps.
             let (mut up, mut down) = (false, false);
@@ -426,11 +426,14 @@ impl ImageUi {
                 i.key_pressed(egui::Key::L),
                 i.key_pressed(egui::Key::J),
                 i.key_pressed(egui::Key::K),
+                i.key_pressed(egui::Key::Num0),
+                i.key_pressed(egui::Key::A),
             )
         });
         let steps = i32::from(plus || wheel_up) - i32::from(minus || wheel_down);
         let zoom_before = zoom;
-        zoom = popup_zoom_step(zoom, steps);
+        let reset = zero || fit;
+        zoom = popup_zoom_after_keys(zoom, steps, reset);
         pan += egui::vec2(
             if l {
                 40.0
@@ -467,12 +470,14 @@ impl ImageUi {
         let image = egui::vec2(dw, dh);
         // A new popup opens centred. Without this the clamp would push a small
         // image to its edge-at-the-middle bound instead.
-        if fresh {
+        // `a` fits the whole picture again, like opening it fresh; `0` only
+        // resets the scale and leaves the current pan to the clamp.
+        if fresh || fit {
             pan = (view - image) * 0.5;
         }
         // Anchor a zoom step at the pointer: the image point under it must stay
         // put. Outside the viewport, zoom around the centre instead.
-        if zoom != zoom_before {
+        if !reset && zoom != zoom_before {
             let anchor = ctx
                 .input(|i| i.pointer.hover_pos())
                 .filter(|pos| view_rect.contains(*pos))

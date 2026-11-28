@@ -433,6 +433,16 @@ pub(crate) fn popup_zoom_step(zoom: f32, delta: i32) -> f32 {
     (zoom + delta as f32 * 0.25).clamp(1.0, 3.0)
 }
 
+/// Popup zoom after a key frame: `0` and `a` both reset to 1×, while the
+/// wheel/`+`/`-` steps still apply otherwise.
+pub(crate) fn popup_zoom_after_keys(zoom: f32, steps: i32, reset: bool) -> f32 {
+    if reset {
+        1.0
+    } else {
+        popup_zoom_step(zoom, steps)
+    }
+}
+
 /// New pan that keeps the image point under `anchor` fixed while the image
 /// scales from `old_size` to `new_size`.
 ///
@@ -941,6 +951,15 @@ mod tests {
             assert_eq!(popup_zoom_step(2.0, -2), 1.5);
             assert_eq!(popup_zoom_step(2.875, 1), 3.0);
             assert_eq!(popup_zoom_step(f32::NAN, 1), 1.0);
+        }
+
+        #[test]
+        fn popup_zero_and_a_reset_zoom_before_steps() {
+            assert_eq!(popup_zoom_after_keys(2.5, 1, true), 1.0);
+            assert_eq!(popup_zoom_after_keys(1.0, 0, true), 1.0);
+            assert_eq!(popup_zoom_after_keys(2.0, 1, false), 2.25);
+            assert_eq!(popup_zoom_after_keys(3.0, -2, false), 2.5);
+            assert_eq!(popup_zoom_after_keys(f32::NAN, 0, false), 1.0);
         }
 
         #[test]
