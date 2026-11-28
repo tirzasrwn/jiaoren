@@ -23,6 +23,10 @@ pub enum Action {
     ScrollPages(f32),
     /// Scroll horizontally by that many columns.
     ScrollCols(f32),
+    /// Jump to the next block start (`}`).
+    NextParagraph,
+    /// Jump to the previous block start (`{`).
+    PrevParagraph,
     /// Jump to the top of the document.
     Top,
     /// Jump to the bottom of the document.
@@ -45,6 +49,10 @@ pub enum Action {
     PrevFile,
     /// Open the link under the pointer in the desktop browser (`o`).
     OpenLink,
+    /// Restore the previous jump position (`Ctrl+O`).
+    JumpBack,
+    /// Restore the next jump position (`Ctrl+I`).
+    JumpForward,
     /// Show the open document's path in the status line (`Ctrl+G`).
     ShowPath,
     /// Toggle the keyboard-shortcut overlay (`?`).
@@ -147,10 +155,10 @@ pub fn quit_suppressed(now: f64, closed_at: Option<f64>) -> bool {
     closed_at.is_some_and(|t| now - t < QUIT_SUPPRESS_WINDOW)
 }
 
-/// Keys whose action may repeat while held: scrolling only. Every other key
-/// (`yy`, `gg`, `G`, `r`, `t`, `]`, `[`, Tab, quit) must wait for a fresh press;
-/// otherwise holding the key copies the document, reloads it in a loop, or
-/// cycles files.
+/// Keys whose action may repeat while held: scrolling and the vim `}`/`{` block
+/// motions. Every other key (`yy`, `gg`, `G`, `r`, `t`, `]`, `[`, Tab, quit)
+/// must wait for a fresh press; otherwise holding the key copies the document,
+/// reloads it in a loop, or cycles files.
 pub(crate) fn repeats_while_held(key: Key) -> bool {
     matches!(
         key,
@@ -162,6 +170,8 @@ pub(crate) fn repeats_while_held(key: Key) -> bool {
             | Key::U
             | Key::B
             | Key::Space
+            | Key::OpenCurlyBracket
+            | Key::CloseCurlyBracket
             | Key::ArrowUp
             | Key::ArrowDown
             | Key::ArrowLeft
@@ -218,9 +228,24 @@ pub fn apply_key(
         Key::Num0 if !modifiers.any() => Some(Action::ResetZoom),
         Key::T if !modifiers.any() => Some(Action::ToggleTheme),
         Key::R if !modifiers.any() => Some(Action::Reload),
+        // `}` / `{` are Shift+]/[ on most layouts, so accept the shift.
+        Key::CloseCurlyBracket
+            if modifiers.is_none() || modifiers.matches_exact(Modifiers::SHIFT) =>
+        {
+            Some(Action::NextParagraph)
+        }
+        Key::OpenCurlyBracket
+            if modifiers.is_none() || modifiers.matches_exact(Modifiers::SHIFT) =>
+        {
+            Some(Action::PrevParagraph)
+        }
         Key::CloseBracket if !modifiers.any() => Some(Action::NextFile),
         Key::OpenBracket if !modifiers.any() => Some(Action::PrevFile),
         Key::O if !modifiers.any() => Some(Action::OpenLink),
+        // Vim jumplist keys. `Ctrl+I` is the letter I, not Tab, so the `Tab`
+        // heading index keeps its binding.
+        Key::O if modifiers.command || modifiers.ctrl => Some(Action::JumpBack),
+        Key::I if modifiers.command || modifiers.ctrl => Some(Action::JumpForward),
         // Ctrl+G shows the file path; a bare `g` still starts the `gg` window.
         Key::G if modifiers.command || modifiers.ctrl => Some(Action::ShowPath),
         Key::Questionmark => Some(Action::ToggleKeysHelp),
@@ -685,6 +710,31 @@ mod tests {
         }
 
         #[test]
+        fn ctrl_o_and_ctrl_i_walk_the_jump_history() {
+            let mut s = KeyState::default();
+            let now = std::time::Instant::now();
+            assert_eq!(
+                apply_key(&mut s, Key::O, Modifiers::CTRL, now),
+                Some(Action::JumpBack)
+            );
+            assert_eq!(
+                apply_key(&mut s, Key::I, Modifiers::CTRL, now),
+                Some(Action::JumpForward)
+            );
+            // Plain `o` still opens the hovered link and plain `i` does nothing.
+            assert_eq!(
+                apply_key(&mut s, Key::O, Modifiers::NONE, now),
+                Some(Action::OpenLink)
+            );
+            assert_eq!(apply_key(&mut s, Key::I, Modifiers::NONE, now), None);
+            // Ctrl+I is Key::I, not Tab, which keeps the heading index.
+            assert_eq!(
+                apply_key(&mut s, Key::Tab, Modifiers::NONE, now),
+                Some(Action::ToggleToc)
+            );
+        }
+
+        #[test]
         fn t_r_q_map_to_actions() {
             let mut s = KeyState::default();
             let now = std::time::Instant::now();
@@ -792,6 +842,32 @@ mod modifier_guard {
         assert_eq!(
             apply_key(&mut s, Key::Equals, Modifiers::NONE, now()),
             Some(Action::ZoomIn)
+        );
+    }
+
+    #[test]
+    fn curly_braces_jump_paragraphs() {
+        let mut s = KeyState::default();
+        assert_eq!(
+            apply_key(&mut s, Key::CloseCurlyBracket, Modifiers::SHIFT, now()),
+            Some(Action::NextParagraph)
+        );
+        assert_eq!(
+            apply_key(&mut s, Key::OpenCurlyBracket, Modifiers::SHIFT, now()),
+            Some(Action::PrevParagraph)
+        );
+        assert_eq!(
+            apply_key(&mut s, Key::CloseCurlyBracket, Modifiers::NONE, now()),
+            Some(Action::NextParagraph)
+        );
+        // Vim repeats `}`/`{` while held, stepping one block per repeat.
+        assert_eq!(
+            apply_key_event(&mut s, Key::CloseCurlyBracket, Modifiers::NONE, true, now()),
+            Some(Action::NextParagraph)
+        );
+        assert_eq!(
+            apply_key_event(&mut s, Key::OpenCurlyBracket, Modifiers::NONE, true, now()),
+            Some(Action::PrevParagraph)
         );
     }
 

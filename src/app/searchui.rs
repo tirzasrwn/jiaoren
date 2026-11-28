@@ -10,6 +10,9 @@ use crate::search::SearchState;
 
 use super::selection::{hit_test_distance, SelPoint, SelectionState};
 
+/// Committed queries kept for Up/Down browsing.
+const HISTORY_MAX: usize = 20;
+
 /// Search state backing the `/` command line, the status line and `n`/`N`.
 pub(crate) struct SearchUi {
     /// Confirmed pattern and its hits.
@@ -18,8 +21,17 @@ pub(crate) struct SearchUi {
     pub(crate) selection: SelectionState,
     /// `Some(query)` while the command line is open.
     pub(crate) input: Option<String>,
+    /// Committed non-empty queries, newest first.
+    history: Vec<String>,
+    /// Index into `history` while Up/Down browses it; `None` is the draft.
+    history_index: Option<usize>,
+    /// The draft saved when history browsing began.
+    history_draft: String,
     /// State to restore when `/` input is cancelled with Esc/Ctrl+C.
     backup: Option<SearchState>,
+    /// Block under the viewport when `/` opened; live matches start here so a
+    /// search never jumps backwards to the top of the document.
+    origin: Option<usize>,
     /// Visible text per placeholder id, shared with every frame. The renderers
     /// build it once (markdown is stripped inline-wise, which is expensive) and
     /// `texts` then only clones the `Rc`.
@@ -48,6 +60,9 @@ pub(crate) struct SearchUi {
     anchors: std::collections::HashMap<String, usize>,
     /// Heading id → block index, for the index overlay jump.
     heading_blocks: std::collections::HashMap<String, usize>,
+    /// Recompute hits from the next frame's block texts, after a reload kept
+    /// the committed pattern.
+    recompute_after_frame: bool,
 }
 
 impl SearchUi {
@@ -56,7 +71,11 @@ impl SearchUi {
             state: SearchState::default(),
             selection: SelectionState::default(),
             input: None,
+            history: Vec::new(),
+            history_index: None,
+            history_draft: String::new(),
             backup: None,
+            origin: None,
             cache: HashMap::new(),
             texts: Vec::new(),
             tops: Vec::new(),
@@ -68,6 +87,7 @@ impl SearchUi {
             controls: Vec::new(),
             anchors: std::collections::HashMap::new(),
             heading_blocks: std::collections::HashMap::new(),
+            recompute_after_frame: false,
         }
     }
 
@@ -100,6 +120,18 @@ impl SearchUi {
         self.controls.clear();
         self.anchors.clear();
         self.heading_blocks.clear();
+        self.origin = None;
+        self.recompute_after_frame = false;
+    }
+
+    /// Drop per-document state but keep the committed search pattern. Hits are
+    /// recomputed from the next frame's freshly recorded block texts, so a live
+    /// reload does not silently clear the search.
+    pub(crate) fn reset_keeping_pattern(&mut self) {
+        let pattern = self.state.pattern.take();
+        self.reset();
+        self.recompute_after_frame = pattern.is_some();
+        self.state.pattern = pattern;
     }
 
     /// Visible text for a placeholder id, built once and shared by every frame.
@@ -299,6 +331,13 @@ impl SearchUi {
             .extend(self.tops.iter().map(|top| offset_y + top - viewport_top));
         self.hs.clear();
         self.hs.extend_from_slice(&self.heights);
+        if std::mem::take(&mut self.recompute_after_frame) {
+            if let Some(pattern) = self.state.pattern.clone() {
+                // Reset to the first hit; the reader can step from there.
+                self.state
+                    .set_pattern(self.texts.iter().map(|text| &**text), &pattern);
+            }
+        }
     }
 
     /// Block texts of the last completed frame, in document order.
@@ -316,6 +355,26 @@ impl SearchUi {
         self.hs.get(index).copied()
     }
 
+    /// Block under content offset `y`, or the next one when `y` falls in a gap.
+    /// `None` past the last block (the search then wraps).
+    pub(crate) fn block_at(&self, y: f32) -> Option<usize> {
+        self.ys
+            .iter()
+            .zip(&self.hs)
+            .position(|(&top, &height)| top + height.max(0.0) > y)
+    }
+
+    /// Block index at the next (`dir > 0`) or previous block start relative to
+    /// content offset `from`. One-point slack keeps the block the viewport is
+    /// already showing from counting as the next one.
+    pub(crate) fn block_after(&self, from: f32, dir: isize) -> Option<usize> {
+        if dir > 0 {
+            self.ys.iter().position(|&y| y > from + 0.5)
+        } else {
+            self.ys.iter().rposition(|&y| y < from - 0.5)
+        }
+    }
+
     /// Block-local highlight ranges and the current-hit index, if the current
     /// hit belongs to `block`.
     pub(crate) fn highlights(&self, block: usize) -> (Vec<(usize, usize)>, Option<usize>) {
@@ -329,11 +388,16 @@ impl SearchUi {
     }
 
     /// Open the command line with an empty query, remembering the committed
-    /// search so Esc/Ctrl+C can restore it.
-    pub(crate) fn open(&mut self) {
+    /// search so Esc/Ctrl+C can restore it. `origin` is the block under the
+    /// viewport, so the first match is searched forward from where the reader
+    /// is; `None` starts from the top.
+    pub(crate) fn open_from(&mut self, origin: Option<usize>) {
         self.backup = Some(self.state.clone());
         self.input = Some(String::new());
+        self.history_index = None;
+        self.history_draft.clear();
         self.state.clear();
+        self.origin = origin;
     }
 
     /// Close the command line and restore the pre-`/` search state. Returns the
@@ -343,13 +407,68 @@ impl SearchUi {
             self.state = state;
         }
         self.input = None;
+        self.origin = None;
+        self.history_index = None;
+        self.history_draft.clear();
         self.state.current_block()
     }
 
-    /// Keep the live search and leave input mode.
+    /// Keep the live search and leave input mode. A non-empty query joins the
+    /// history; only Enter commits, so live previews are not remembered.
     pub(crate) fn commit(&mut self) {
-        self.input = None;
+        if let Some(query) = self.input.take() {
+            if !query.is_empty() && self.history.first() != Some(&query) {
+                self.history.insert(0, query);
+                self.history.truncate(HISTORY_MAX);
+            }
+        }
         self.backup = None;
+        self.origin = None;
+        self.history_index = None;
+        self.history_draft.clear();
+    }
+
+    /// Walk to an older history entry (`Up`), saving the draft first.
+    pub(crate) fn history_older(&mut self) {
+        let Some(input) = self.input.as_mut() else {
+            return;
+        };
+        match self.history_index {
+            None if !self.history.is_empty() => {
+                self.history_draft = std::mem::take(input);
+                self.history_index = Some(0);
+                *input = self.history[0].clone();
+            }
+            Some(index) if index + 1 < self.history.len() => {
+                self.history_index = Some(index + 1);
+                *input = self.history[index + 1].clone();
+            }
+            _ => {}
+        }
+    }
+
+    /// Leaving a recalled history entry for a typed edit ends history browsing.
+    pub(crate) fn history_abandon(&mut self) {
+        self.history_index = None;
+        self.history_draft.clear();
+    }
+
+    /// Walk to a newer history entry (`Down`); past the newest, restore the draft.
+    pub(crate) fn history_newer(&mut self) {
+        let Some(input) = self.input.as_mut() else {
+            return;
+        };
+        match self.history_index {
+            Some(0) => {
+                self.history_index = None;
+                *input = std::mem::take(&mut self.history_draft);
+            }
+            Some(index) => {
+                self.history_index = Some(index - 1);
+                *input = self.history[index - 1].clone();
+            }
+            None => {}
+        }
     }
 
     /// Current query text while input mode is open.
@@ -389,6 +508,9 @@ impl SearchUi {
         let pattern = self.query().to_string();
         self.state
             .set_pattern(self.texts.iter().map(|text| &**text), &pattern);
+        if let Some(origin) = self.origin {
+            self.state.start_at(origin);
+        }
     }
 
     /// Whether the command line owns the keyboard.
@@ -423,6 +545,51 @@ mod tests {
         }
 
         #[test]
+        fn block_at_finds_the_block_under_the_viewport_top() {
+            let mut s = SearchUi::new();
+            s.ys = vec![100.0, 200.0, 300.0];
+            s.hs = vec![50.0, 50.0, 50.0];
+            assert_eq!(s.block_at(100.0), Some(0));
+            assert_eq!(s.block_at(149.0), Some(0));
+            assert_eq!(s.block_at(150.0), Some(1));
+            assert_eq!(s.block_at(310.0), Some(2));
+            assert_eq!(s.block_at(400.0), None);
+        }
+
+        #[test]
+        fn open_from_searches_forward_from_the_viewport() {
+            let mut s = SearchUi::new();
+            s.texts = rc(&["alpha", "beta", "alpha"]);
+            s.ys = vec![100.0, 200.0, 300.0];
+            s.hs = vec![50.0, 50.0, 50.0];
+            s.open_from(Some(1));
+            s.type_text("alpha");
+            // The hit in block 0 is above the reader; block 2 is the next one.
+            assert_eq!(s.state.current_block(), Some(2));
+            // Past the last match, the search wraps to the first one.
+            s.open_from(Some(2));
+            s.type_text("beta");
+            assert_eq!(s.state.current_block(), Some(1));
+            // Without an origin (a direct open) the first match still wins.
+            s.open_from(None);
+            s.type_text("alpha");
+            assert_eq!(s.state.current_block(), Some(0));
+        }
+
+        #[test]
+        fn block_after_steps_over_blocks_in_content_order() {
+            let mut s = SearchUi::new();
+            s.ys = vec![100.0, 200.0, 300.0];
+            assert_eq!(s.block_after(100.0, 1), Some(1));
+            assert_eq!(s.block_after(200.0, 1), Some(2));
+            assert_eq!(s.block_after(300.0, 1), None);
+            assert_eq!(s.block_after(300.0, -1), Some(1));
+            assert_eq!(s.block_after(100.0, -1), None);
+            assert_eq!(s.block_after(150.0, -1), Some(0));
+            assert_eq!(s.block_after(150.0, 1), Some(1));
+        }
+
+        #[test]
         fn anchors_live_for_one_frame() {
             let mut s = SearchUi::new();
             s.record_anchor("intro", 4);
@@ -439,7 +606,7 @@ mod tests {
             // Previous committed search to restore on cancel.
             s.state.set_pattern(s.texts.iter().map(|t| &**t), "two");
             assert_eq!(s.state.pattern.as_deref(), Some("two"));
-            s.open();
+            s.open_from(None);
             assert!(s.is_open());
             assert_eq!(s.query(), "");
             assert!(s.state.pattern.is_none(), "opening clears live state");
@@ -465,14 +632,14 @@ mod tests {
         fn enter_commit_keeps_live_search_and_empty_query_clears_hits() {
             let mut s = SearchUi::new();
             s.texts = rc(&["hello world"]);
-            s.open();
+            s.open_from(None);
             s.type_text("world");
             assert_eq!(s.state.status_text().as_deref(), Some("/world [1/1]"));
             s.commit();
             assert!(!s.is_open());
             assert_eq!(s.state.pattern.as_deref(), Some("world"));
 
-            s.open();
+            s.open_from(None);
             s.type_text("x");
             s.backspace();
             assert_eq!(s.query(), "");
@@ -483,10 +650,39 @@ mod tests {
         }
 
         #[test]
+        fn reload_keeps_pattern_and_recomputes_from_new_texts() {
+            let mut s = SearchUi::new();
+            s.texts = rc(&["old needle", "plain"]);
+            s.state.set_pattern(s.texts.iter().map(|t| &**t), "needle");
+            assert_eq!(s.state.current_block(), Some(0));
+            s.reset_keeping_pattern();
+            assert_eq!(s.state.pattern.as_deref(), Some("needle"));
+            assert!(s.state.hits.is_empty(), "stale hits are dropped");
+            assert!(!s.is_open());
+            s.texts = rc(&["intro", "new needle here"]);
+            s.tops = vec![0.0, 40.0];
+            s.heights = vec![10.0, 10.0];
+            s.finish_frame(0.0, 0.0);
+            assert_eq!(s.state.pattern.as_deref(), Some("needle"));
+            assert_eq!(s.state.hits.len(), 1);
+            assert_eq!(s.state.current_block(), Some(1));
+        }
+
+        #[test]
+        fn full_reset_still_clears_the_pattern() {
+            let mut s = SearchUi::new();
+            s.texts = rc(&["needle"]);
+            s.state.set_pattern(s.texts.iter().map(|t| &**t), "needle");
+            s.reset();
+            assert!(s.state.pattern.is_none());
+            assert!(s.state.hits.is_empty());
+        }
+
+        #[test]
         fn cancel_without_prior_search_has_no_jump_target() {
             let mut s = SearchUi::new();
             s.texts = rc(&["abc"]);
-            s.open();
+            s.open_from(None);
             s.type_text("abc");
             assert_eq!(s.cancel(), None);
             assert!(s.state.pattern.is_none());
@@ -496,7 +692,7 @@ mod tests {
         fn backspace_is_one_unicode_char() {
             let mut s = SearchUi::new();
             s.texts = rc(&["é東"]);
-            s.open();
+            s.open_from(None);
             s.type_text("é東");
             assert_eq!(s.query(), "é東");
             s.backspace();
@@ -505,6 +701,106 @@ mod tests {
             assert_eq!(s.query(), "");
             s.backspace();
             assert_eq!(s.query(), "");
+        }
+    }
+
+    mod history {
+        use super::super::SearchUi;
+        use std::rc::Rc;
+
+        fn rc(texts: &[&str]) -> Vec<Rc<str>> {
+            texts.iter().map(|text| Rc::from(*text)).collect()
+        }
+
+        fn commit(s: &mut SearchUi, query: &str) {
+            s.open_from(None);
+            s.type_text(query);
+            s.commit();
+        }
+
+        #[test]
+        fn commit_remembers_non_empty_queries_newest_first() {
+            let mut s = SearchUi::new();
+            s.texts = rc(&["one two"]);
+            commit(&mut s, "one");
+            commit(&mut s, "two");
+            assert_eq!(s.history, vec!["two".to_string(), "one".to_string()]);
+        }
+
+        #[test]
+        fn consecutive_duplicates_and_empty_queries_are_not_stored() {
+            let mut s = SearchUi::new();
+            s.texts = rc(&["one two"]);
+            commit(&mut s, "one");
+            commit(&mut s, "one");
+            commit(&mut s, "");
+            assert_eq!(s.history, vec!["one".to_string()]);
+        }
+
+        #[test]
+        fn history_is_capped_at_twenty() {
+            let mut s = SearchUi::new();
+            s.texts = rc(&["one two"]);
+            for i in 0..25 {
+                commit(&mut s, &format!("q{i}"));
+            }
+            assert_eq!(s.history.len(), 20);
+            assert_eq!(s.history.first().map(String::as_str), Some("q24"));
+            assert_eq!(s.history.last().map(String::as_str), Some("q5"));
+        }
+
+        #[test]
+        fn up_and_down_walk_history_and_restore_the_draft() {
+            let mut s = SearchUi::new();
+            s.texts = rc(&["alpha beta gamma"]);
+            commit(&mut s, "alpha");
+            commit(&mut s, "beta");
+            s.open_from(None);
+            s.type_text("draft");
+            s.history_older();
+            assert_eq!(s.query(), "beta");
+            s.history_older();
+            assert_eq!(s.query(), "alpha");
+            // At the oldest entry Up stays put.
+            s.history_older();
+            assert_eq!(s.query(), "alpha");
+            s.history_newer();
+            assert_eq!(s.query(), "beta");
+            s.history_newer();
+            assert_eq!(s.query(), "draft");
+            // Back on the draft, Down is a no-op.
+            s.history_newer();
+            assert_eq!(s.query(), "draft");
+        }
+
+        #[test]
+        fn typing_after_a_recalled_query_ends_history_browsing() {
+            let mut s = SearchUi::new();
+            s.texts = rc(&["alpha"]);
+            commit(&mut s, "alpha");
+            s.open_from(None);
+            s.history_older();
+            assert_eq!(s.query(), "alpha");
+            s.history_abandon();
+            s.type_text("x");
+            assert_eq!(s.query(), "alphax");
+            s.history_newer();
+            assert_eq!(s.query(), "alphax");
+        }
+
+        #[test]
+        fn opening_slash_starts_a_fresh_draft_after_a_cancel() {
+            let mut s = SearchUi::new();
+            s.texts = rc(&["alpha"]);
+            commit(&mut s, "alpha");
+            s.open_from(None);
+            s.type_text("draft");
+            s.history_older();
+            s.cancel();
+            s.open_from(None);
+            assert_eq!(s.query(), "");
+            s.history_older();
+            assert_eq!(s.query(), "alpha");
         }
     }
 

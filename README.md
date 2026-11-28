@@ -6,7 +6,7 @@ fences drawn as real diagrams.
 
 Keyboard-first, almost no chrome, live-reloads when the file changes on disk.
 
-![Opening examples/demo.md: justified prose with inline code and links, dragging a phrase and releasing it to copy, a vim-style `/` live search that highlights matches as you type with Enter and `n` jumping between matches, hovering a table row and clicking the table icon to copy CSV, opening the diagram in the zoomable popup and switching its theme with `t` while it is open, the heading index with `h`/`l` folding and Enter jumping, the `ctrl+g` path status and the `?` shortcut overlay, zooming and panning with `+` and `h`/`l`, `yy` copying the document, `]` opening the next note, and the Catppuccin dark and light themes](docs/assets/demo.gif)
+![Opening examples/demo.md: justified prose with inline code and links, dragging a phrase and releasing it to copy, hovering a link for its destination tooltip, a vim-style `/` search starting at the current section with `n`/`N` and `↑`/`↓` history, hovering a table row and clicking the table icon to copy CSV, opening the diagram in the zoomable popup and switching its theme with `t`, holding `}` and pressing `{` to step blocks, `ctrl+o`/`ctrl+i` walking the jump list, the heading index opening at the current section with `h`/`l` folding and Enter jumping, a live reload holding that section while text is inserted above it, image captions and a tall image capped to the viewport, the bottom-right reading progress, `]` then `G` then `[` returning to the previous file's position, the `ctrl+g` path status and the `?` overlay, zooming and panning with `+` and `h`/`l`, `yy` copying the document, and the Catppuccin dark and light themes](docs/assets/demo.gif)
 
 ## Why "jiaoren"?
 
@@ -90,26 +90,34 @@ Mermaid diagram labels still need `FiraCode Nerd Font` installed system-wide.
 | `t` | toggle light/dark theme |
 | `r` | reload from disk |
 | `]` / `[` | next / previous Markdown file in the same folder (wraps) |
+| `}` / `{` | jump to the next / previous block start (paragraph, heading, list, table, code, image) |
+| `ctrl+o` / `ctrl+i` | jump back / forward through index, anchor, search and `}`/`{` jumps |
 | `o` | open the link under the pointer in the browser |
 | `yy` | copy the whole document as Markdown |
 | drag | select text across blocks; releasing the drag copies it |
 | `y` | copy the text selection; with no selection the first `y` arms `yy` |
-| `Tab` | heading index (depth 3): `j`/`k` move, `h`/`l` fold, `gg`/`G` first/last, `Enter`/`Space` jump, `t` theme |
-| `/` | search: type a pattern, `Enter` confirms and jumps to the first match |
+| `Tab` | heading index (depth 3), opening at the section being read: `j`/`k` move, `h`/`l` fold, `gg`/`G` first/last, `Enter`/`Space` jump, `t` theme |
+| `/` | search from the current section: type a pattern, `Enter` confirms; `↑`/`↓` walk committed queries |
 | `n` / `N` | next / previous match, wrapping |
 | `ctrl+g` | show the open file's path in the status line |
 | `?` | keyboard-shortcut overlay; `esc`, `q`, `?`, `ctrl+c` or a click closes it |
 | `esc` / `ctrl+c` | copy the selection, else cancel the prompt, else clear the search, else quit |
 | `q` | quit |
 
-`o` opens the hovered `http(s)`/`mailto` link with `$BROWSER`, else `xdg-open`,
+Hovering a link shows its destination in a tooltip. `o` opens the hovered
+`http(s)`/`mailto` link with `$BROWSER`, else `xdg-open`,
 `gio open` or `sensible-browser`; other schemes stay inert. `]` and `[` step
 through the `.md`/`.markdown` files in the open document's folder, wrapping at
 both ends, and land at the top of the next file.
 
 Zoom and theme are saved to `$XDG_CONFIG_HOME/jiaoren/state.toml` (else
 `~/.config/jiaoren/state.toml`) whenever they change, so the next launch starts
-with the same view; `--dark` still wins over a saved light theme.
+with the same view; `--dark` still wins over a saved light theme. Every
+document's scroll position is saved on quit and when stepping with `]`/`[`, so
+switching back to a file returns to where you left it (the 32 most recent files
+are kept). A live reload (`r`, or an external save) keeps the committed search
+pattern and the heading index's folds, and holds the heading at the top of the
+viewport in place when text above it changes.
 
 `jr --keys` prints the same list to stdout, so the shortcuts are reachable
 without opening a document, and the in-viewer `?` overlay reads the same text.
@@ -117,7 +125,10 @@ without opening a document, and the in-viewer `?` overlay reads the same text.
 `/` opens a plain vim-style command line at the bottom-left on the same solid
 chip as the status line: matches update live as you type, Backspace edits,
 Ctrl+W deletes a word, Esc/Ctrl+C restores the previous search, and
-Enter commits. Search indexes the text `justify` paints: soft-wrapped source
+Enter commits. Matching starts at the block under the viewport and wraps, so a
+search moves forward from where you are instead of jumping to the top. Enter
+remembers the query; `↑`/`↓` walk the last 20 committed queries, returning to
+the draft when you go past the newest. Search indexes the text `justify` paints: soft-wrapped source
 lines join with one space, emphasis markup is dropped, link labels and code text
 are kept, and code blocks are literal. Library-routed blocks are not searchable — blockquotes, and
 paragraphs or table cells containing inline images or raw HTML. Inline-image
@@ -156,6 +167,8 @@ stripped from cells, fields quoted when they contain commas, quotes or line
 breaks). Code blocks have the same icon over their top-right corner (tooltip
 “Copy code”) and copy the block verbatim, with the trailing newline stripped.
 Copy buttons show a 1.5-second bottom-left status line and never steal focus.
+When the document is scrolled, a separate chip in the bottom-right corner shows
+reading progress (`42%`); it stays hidden at the top.
 
 Code blocks soft-wrap to the reading column and show a right-aligned line
 number per source line. A wrapped line continues on the next row with an empty
@@ -231,8 +244,9 @@ A paragraph that contains only one local image is drawn as an image block:
 ![alt text](pics/cat.png "optional title")
 ```
 
-Relative paths resolve against the document directory; the title is ignored
-and the alt text is kept. A destination with spaces can be bracketed:
+Relative paths resolve against the document directory. A `"title"` is drawn as
+one weak centred caption line under the image; without one the alt text is
+used, and empty alt text draws no caption. A destination with spaces can be bracketed:
 `![alt](<a b.png>)`. Document image paths are passed literally to the file
 loader: `%20` is part of the filename, not an escape for a space.
 **PNG, JPEG, GIF (first frame) and WebP** are decoded locally by the `image`
@@ -244,8 +258,9 @@ images inside tables, lists or blockquotes, also stay on the library path and
 are not clickable.
 
 An image is drawn at its intrinsic pixel size (centred when narrower than the
-text column) and capped to the column width when wider, with the same vertical
-spacing above and below as a table. Decoding runs on a background worker with
+text column), capped to the column width when wider and to 75% of the window
+height when taller, keeping its aspect ratio, with the same vertical spacing
+above and below as a table. Decoding runs on a background worker with
 bounded dimensions/allocation; the pixels are downscaled to the display size
 before upload, so a 4000×3000 photo does not keep a full-resolution texture.
 The zoom popup re-resizes from the decoded source when zooming in, so `+` stays
@@ -289,6 +304,9 @@ document cannot exfiltrate data or load remote resources during rendering.
 
 ## Known limitations
 
+- Table columns are always left-aligned. `:---:`, `---:` and `:---` alignment
+  markers are accepted and intentionally ignored; the flush-left grid is the
+  owner's design choice, not a rendering gap.
 - Wide tables wrap instead of getting a horizontal scrollbar, and code lines
   wrap at the reading column (a long token breaks at any character). Use `+` to
   zoom in when the text is hard to read.

@@ -702,7 +702,7 @@ fn render_cell(
         // inset leaves a gutter rather than shrinking the table.
         ui.set_width(w);
         let w = (w - right_inset).max(20.0);
-        if let Some((_alt, target)) = crate::doc::parse_standalone_image(cell_md) {
+        if let Some((_alt, target, _title)) = crate::doc::parse_standalone_image(cell_md) {
             if target.starts_with("file://") {
                 let box_size = egui::vec2(w, (w * 0.6).clamp(40.0, 240.0));
                 let image = egui::Image::new(target.as_str()).fit_to_exact_size(box_size);

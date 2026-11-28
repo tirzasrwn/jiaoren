@@ -51,13 +51,15 @@ a / 0            reset zoom (a also pans back left)
 t                toggle light/dark theme
 r                reload from disk
 ] / [            next / previous Markdown file in this folder
+} / {            next / previous block start
+ctrl+o / ctrl+i  jump back / forward
 o                open the link under the pointer in the browser
 ctrl+g           show the file path
 drag             select text (releasing copies; on empty space it pans)
 y                copy the selection, yy copies the whole file
-/                search, Enter confirms
+/                search from here, Enter confirms (up/down history)
 n / N            next / previous match
-tab              heading index (depth 3): j/k move, h/l fold, enter jumps
+tab              heading index at this section: j/k move, h/l fold, enter jumps
 ?                this list (esc, q or ctrl+c closes it)
 esc / ctrl+c     copy selection, else cancel prompt, else clear search, else quit
 q                quit";

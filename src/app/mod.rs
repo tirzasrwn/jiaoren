@@ -20,6 +20,7 @@ mod diagram;
 mod geometry;
 mod heading;
 mod image;
+mod jumplist;
 mod keys;
 mod list;
 mod paragraph;
@@ -36,10 +37,11 @@ use code::CodeUi;
 use diagram::DiagramUi;
 use geometry::{
     bottom_pad, content_column, edge_scroll, frame_scroll_x, home_scroll, home_target,
-    jump_scroll_top, overscroll_pad, scroll_by_columns, scroll_by_lines,
+    jump_scroll_top, overscroll_pad, reading_progress, scroll_by_columns, scroll_by_lines,
 };
 use heading::HeadingUi;
 use image::ImageUi;
+use jumplist::JumpList;
 use keys::{
     apply_key_event, cancel_action, quit_suppressed, Action, CancelAction, CopyGuard, KeyState,
 };
@@ -138,6 +140,10 @@ const STATUS_DURATION: Duration = Duration::from_millis(1500);
 /// How long `Ctrl+G`'s file path stays on screen; a path needs longer to read
 /// than a one-word clipboard confirmation.
 const PATH_STATUS_DURATION: Duration = Duration::from_millis(4000);
+
+/// How many document positions the state file remembers. `]`/`[` restores the
+/// files it has seen, oldest entries fall off first.
+pub(crate) const MAX_POSITIONS: usize = 32;
 
 /// Whether a link click this frame asked for the `link copied` chip.
 fn take_link_copied(ctx: &egui::Context) -> bool {
@@ -250,36 +256,54 @@ fn font_failure_status() -> &'static str {
     }
 }
 
-/// Bottom-left status overlay, shared by copy messages and the search status.
-fn status_area(ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui)) {
-    egui::Area::new(egui::Id::new("jiaoren-status"))
+/// Solid one-line chip in a window corner, shared by the left status and the
+/// right reading-progress indicator.
+fn chip_area(ctx: &egui::Context, id: &str, anchor: egui::Align2, offset: egui::Vec2, text: &str) {
+    egui::Area::new(egui::Id::new(id))
         .order(egui::Order::Middle)
-        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
+        .anchor(anchor, offset)
         .interactable(false)
         .show(ctx, |ui| {
-            // Solid chip: the status sits over the document and must stay legible.
+            // Solid chip: the chip sits over the document and must stay legible.
             // `panel_fill` is the page colour here, so use the faint fill
             // (Catppuccin mantle) for contrast.
             egui::Frame::new()
                 .fill(ui.visuals().faint_bg_color)
                 .inner_margin(egui::Margin::symmetric(4, 2))
-                .show(ui, add);
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(text)
+                                .monospace()
+                                .size(12.0)
+                                .color(ui.visuals().text_color()),
+                        )
+                        .wrap_mode(egui::TextWrapMode::Extend),
+                    );
+                });
         });
 }
 
 /// One-line status chip in the bottom-left corner.
 fn show_status(ctx: &egui::Context, text: &str) {
-    status_area(ctx, |ui| {
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(text)
-                    .monospace()
-                    .size(12.0)
-                    .color(ui.visuals().text_color()),
-            )
-            .wrap_mode(egui::TextWrapMode::Extend),
-        );
-    });
+    chip_area(
+        ctx,
+        "jiaoren-status",
+        egui::Align2::LEFT_BOTTOM,
+        egui::vec2(8.0, -8.0),
+        text,
+    );
+}
+
+/// Reading progress chip in the bottom-right corner.
+fn show_progress(ctx: &egui::Context, text: &str) {
+    chip_area(
+        ctx,
+        "jiaoren-progress",
+        egui::Align2::RIGHT_BOTTOM,
+        egui::vec2(-8.0, -8.0),
+        text,
+    );
 }
 
 /// Plain bottom-left `/query` line: monospace, on the same solid chip as the
@@ -393,6 +417,10 @@ enum SearchEdit {
     Backspace,
     /// `Ctrl+W`: delete the trailing word (vim's insert-mode word erase).
     DeleteWord,
+    /// `Up`: an older committed query.
+    HistoryOlder,
+    /// `Down`: a newer committed query, or the draft.
+    HistoryNewer,
 }
 
 /// Erase one trailing word plus the whitespace before it: `"foo bar "` and
@@ -490,6 +518,18 @@ fn read_search_batch(events: &[egui::Event]) -> SearchBatch {
                 ..
             } => batch.edits.push(SearchEdit::Backspace),
             egui::Event::Key {
+                key: egui::Key::ArrowUp,
+                modifiers,
+                pressed: true,
+                ..
+            } if !modifiers.any() => batch.edits.push(SearchEdit::HistoryOlder),
+            egui::Event::Key {
+                key: egui::Key::ArrowDown,
+                modifiers,
+                pressed: true,
+                ..
+            } if !modifiers.any() => batch.edits.push(SearchEdit::HistoryNewer),
+            egui::Event::Key {
                 key: egui::Key::Enter,
                 pressed: true,
                 ..
@@ -524,6 +564,38 @@ fn read_search_batch(events: &[egui::Event]) -> SearchBatch {
     batch
 }
 
+/// A heading to keep at the viewport top across a reload, plus how far below
+/// its top the reader was.
+#[derive(Clone, Debug, PartialEq)]
+struct ReadingAnchor {
+    heading: String,
+    offset: f32,
+}
+
+/// Capture the last heading at/above `scroll_y` with its viewport offset.
+/// Headings come in document order. `navigating` documents that `]`/`[` already
+/// picked a saved position, so the anchor must stay unarmed.
+fn reading_anchor<'a>(
+    navigating: bool,
+    headings: impl IntoIterator<Item = (&'a str, f32)>,
+    scroll_y: f32,
+) -> Option<ReadingAnchor> {
+    if navigating {
+        return None;
+    }
+    let mut anchor = None;
+    for (heading, y) in headings {
+        if y > scroll_y {
+            break;
+        }
+        anchor = Some(ReadingAnchor {
+            heading: heading.to_string(),
+            offset: scroll_y - y,
+        });
+    }
+    anchor
+}
+
 /// The jiaoren window: document state, theme/zoom, scrolling, and the HTML
 /// render hook.
 pub(crate) struct App {
@@ -553,6 +625,13 @@ pub(crate) struct App {
     html_fn: HtmlFn,
     scroll_y: f32,
     scroll_x: f32,
+    /// Vertical offset to apply once after the first layout, from a saved
+    /// position or from stepping to another document with `]`/`[`.
+    restore_scroll: Option<f32>,
+    /// Heading anchor to restore after a reload's first layout.
+    reload_anchor: Option<ReadingAnchor>,
+    /// Remembered scroll offsets per document, most recent first.
+    positions: Vec<(std::path::PathBuf, f32)>,
     /// Content scroll limits from the last layout. Key scrolls clamp to these
     /// first, so pressing down at the bottom cannot hand egui an offset past
     /// the end for one bouncing frame.
@@ -576,6 +655,11 @@ pub(crate) struct App {
     /// and swapped into the panel for the duration of a frame.
     styles: std::collections::BTreeMap<egui::TextStyle, egui::FontId>,
     keys: KeyState,
+    /// Vim jumplist for `Ctrl+O` / `Ctrl+I`.
+    jumps: JumpList,
+    /// Scroll position when `/` opened, so Enter records the pre-search place
+    /// rather than the live-preview position it already jumped to.
+    search_origin: Option<f32>,
     /// One Ctrl+C Copy event per Ctrl hold; autorepeats are ignored.
     copy_guard: CopyGuard,
     /// Screen position where a selection drag started, for plain-click detection.
@@ -630,6 +714,8 @@ impl App {
         // relative to the shell would otherwise be shown and re-read relative to
         // whatever directory the viewer happens to be in.
         let path = std::fs::canonicalize(&path).unwrap_or(path);
+        let restore_scroll = prefs.resume_scroll(&path);
+        let positions = prefs.positions;
         // A cached FiraCode is installed before the first frame. On a fresh
         // cache, start with the system font (or egui's defaults) and download
         // in the background so the window still opens immediately.
@@ -785,6 +871,9 @@ impl App {
             html_fn,
             scroll_y: 0.0,
             scroll_x: 0.0,
+            restore_scroll,
+            reload_anchor: None,
+            positions,
             scroll_max: egui::Vec2::ZERO,
             jump_to: None,
             pad: None,
@@ -794,6 +883,8 @@ impl App {
             styles_key: None,
             styles: std::collections::BTreeMap::new(),
             keys: KeyState::default(),
+            jumps: JumpList::default(),
+            search_origin: None,
             copy_guard: CopyGuard::default(),
             select_press: None,
             select_moved: false,
@@ -828,6 +919,14 @@ impl App {
 
     /// Reload the document and rebuild every placeholder cache.
     pub fn reload(&mut self) {
+        self.reload_from_disk(false);
+    }
+
+    /// Reload and rebuild the caches. `navigating` skips the reading anchor:
+    /// `]`/`[` supply a saved position instead.
+    fn reload_from_disk(&mut self, navigating: bool) {
+        self.reload_anchor = self.capture_anchor(navigating);
+        let old_toc = self.prepared.toc.clone();
         self.load();
         crate::justify::clear_inline_cache();
         self.cache = CommonMarkCache::default();
@@ -844,15 +943,33 @@ impl App {
             .borrow_mut()
             .reset(self.prepared.headings.clone());
         self.code.borrow_mut().reset(self.prepared.code.clone());
-        // Old hits point into blocks that no longer exist.
-        self.search.borrow_mut().reset();
-        self.toc.reset();
+        // Old hits point into blocks that no longer exist; the pattern stays and
+        // is recomputed after the next draw records the new block texts. Folds
+        // and the selection follow heading ids across shifted indices.
+        self.search.borrow_mut().reset_keeping_pattern();
+        self.toc.remap(&old_toc, &self.prepared.toc);
         self.jump_to = None;
     }
 
-    /// Remember the current zoom and theme for the next session.
-    fn save_prefs(&self) {
-        crate::prefs::save(self.zoom, self.theme);
+    /// The heading at/above the viewport top from the last completed frame.
+    fn capture_anchor(&self, navigating: bool) -> Option<ReadingAnchor> {
+        let search = self.search.borrow();
+        reading_anchor(
+            navigating,
+            self.prepared.toc.iter().filter_map(|entry| {
+                let block = search.heading_block(&entry.id)?;
+                Some((entry.id.as_str(), search.block_y(block)?))
+            }),
+            self.scroll_y,
+        )
+    }
+
+    /// Remember the current zoom, theme and this document's reading position.
+    fn save_prefs(&mut self) {
+        self.positions.retain(|(path, _)| path != &self.path);
+        self.positions.insert(0, (self.path.clone(), self.scroll_y));
+        self.positions.truncate(MAX_POSITIONS);
+        crate::prefs::save(self.zoom, self.theme, &self.positions);
     }
 
     /// Open the next/previous Markdown file in this document's directory,
@@ -864,6 +981,8 @@ impl App {
             self.set_status("no other markdown files in this folder");
             return;
         };
+        // Remember where this document was left before switching away.
+        self.save_prefs();
         let position = files
             .iter()
             .position(|file| file == &next)
@@ -875,10 +994,21 @@ impl App {
         self.path = next;
         self.scroll_y = 0.0;
         self.scroll_x = 0.0;
+        // `]`/`[` returns to a document where it was left; a first visit starts
+        // at the top. `restore_scroll` overrides the first-frame home anchoring.
+        self.restore_scroll = Some(
+            self.positions
+                .iter()
+                .find(|(path, _)| path == &self.path)
+                .map_or(0.0, |(_, scroll)| *scroll),
+        );
         self.pad = None;
         self.scroll_bottom = false;
         self.autoscroll = 0.0;
-        self.reload();
+        self.reload_from_disk(true);
+        // A different document starts with no search and a fresh index.
+        self.search.borrow_mut().reset();
+        self.toc.reset();
         self.last_mtime = std::fs::metadata(&self.path)
             .and_then(|m| m.modified())
             .ok();
@@ -953,6 +1083,16 @@ impl App {
     /// never takes layout from the reading column; the document's bottom
     /// padding keeps text clear of it.
     fn draw_status(&mut self, ctx: &egui::Context) {
+        // Reading progress has its own bottom-right chip, so it never competes
+        // with the left prompt/status. Hidden at the top of the document and
+        // when nothing scrolls.
+        if let Some(pct) = reading_progress(
+            self.scroll_y,
+            self.scroll_max.y,
+            self.pad.map_or(0.0, |p| p.y),
+        ) {
+            show_progress(ctx, &format!("{pct}%"));
+        }
         if self.search.borrow().is_open() {
             let line = format!("/{}", self.search.borrow().query());
             prompt_area(ctx, line);
@@ -996,6 +1136,7 @@ impl App {
         };
         let id = entry.id.clone();
         if let Some(block) = self.search.borrow().heading_block(&id) {
+            self.jumps.record(self.scroll_y);
             self.jump_to = Some(block);
         }
         self.toc.close();
@@ -1268,7 +1409,24 @@ impl App {
         let target = s.state.current_block();
         self.jump_to = target;
         if target.is_some() {
+            self.jumps.record(self.scroll_y);
             ctx.request_repaint();
+        }
+    }
+
+    /// Jump to the next (`dir > 0`) or previous block start, vim `}`/`{`.
+    /// Blocks are the recorded top-level units, so paragraphs, headings, lists,
+    /// tables, code and images all count.
+    fn step_paragraph(&mut self, dir: isize) {
+        let target = {
+            let search = self.search.borrow();
+            search
+                .block_after(self.scroll_y, dir)
+                .and_then(|block| search.block_y(block))
+        };
+        if let Some(y) = target {
+            self.jump_to = None;
+            self.scroll_y = y;
         }
     }
 
@@ -1314,6 +1472,10 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_prefs();
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_downloads(ctx);
         self.diagrams.borrow_mut().poll(ctx);
@@ -1382,6 +1544,7 @@ impl eframe::App for App {
             .data_mut(|d| d.remove_temp::<String>(egui::Id::new("jiaoren-anchor")))
         {
             if let Some(block) = self.search.borrow().anchor_block(&slug) {
+                self.jumps.record(self.scroll_y);
                 self.jump_to = Some(block);
                 ui.ctx().request_repaint();
             }
@@ -1505,14 +1668,23 @@ impl eframe::App for App {
                 let changed = !batch.edits.is_empty();
                 if changed || batch.enter {
                     let mut s = self.search.borrow_mut();
-                    if let Some(query) = s.input.as_mut() {
-                        for edit in &batch.edits {
-                            match edit {
-                                SearchEdit::Text(text) => query.push_str(text),
-                                SearchEdit::Backspace => {
-                                    query.pop();
+                    for edit in &batch.edits {
+                        match edit {
+                            SearchEdit::HistoryOlder => s.history_older(),
+                            SearchEdit::HistoryNewer => s.history_newer(),
+                            _ => {
+                                s.history_abandon();
+                                let Some(query) = s.input.as_mut() else {
+                                    continue;
+                                };
+                                match edit {
+                                    SearchEdit::Text(text) => query.push_str(text),
+                                    SearchEdit::Backspace => {
+                                        query.pop();
+                                    }
+                                    SearchEdit::DeleteWord => truncate_word_tail(query),
+                                    SearchEdit::HistoryOlder | SearchEdit::HistoryNewer => {}
                                 }
-                                SearchEdit::DeleteWord => truncate_word_tail(query),
                             }
                         }
                     }
@@ -1525,6 +1697,12 @@ impl eframe::App for App {
                         s.commit();
                     }
                     drop(s);
+                    // Enter confirms the jump that live editing already made:
+                    // remember where the search started, not the preview.
+                    if batch.enter && target.is_some() {
+                        self.jumps
+                            .record(self.search_origin.take().unwrap_or(self.scroll_y));
+                    }
                     // A live edit jumps to its match; Enter keeps it. Cancelling
                     // already returned through cancel_search above.
                     self.jump_to = target;
@@ -1626,6 +1804,8 @@ impl eframe::App for App {
                     }) * self.zoom;
                     self.scroll_x = scroll_by_columns(self.scroll_x, f, advance, self.scroll_max.x);
                 }
+                Action::NextParagraph => self.step_paragraph(1),
+                Action::PrevParagraph => self.step_paragraph(-1),
                 Action::Top => {
                     let home = home_target(self.pad);
                     self.scroll_x = home.x;
@@ -1659,13 +1839,33 @@ impl eframe::App for App {
                 Action::NextFile => self.navigate(1),
                 Action::PrevFile => self.navigate(-1),
                 Action::OpenLink => self.open_hovered_link(ui.ctx()),
+                Action::JumpBack => {
+                    if let Some(y) = self.jumps.take_back(self.scroll_y) {
+                        self.jump_to = None;
+                        self.scroll_y = y;
+                        ui.ctx().request_repaint();
+                    } else {
+                        self.set_status("no earlier position");
+                    }
+                }
+                Action::JumpForward => {
+                    if let Some(y) = self.jumps.take_forward(self.scroll_y) {
+                        self.jump_to = None;
+                        self.scroll_y = y;
+                        ui.ctx().request_repaint();
+                    } else {
+                        self.set_status("no later position");
+                    }
+                }
                 Action::Reload => self.reload(),
                 Action::CopyDocument => {
                     ui.ctx().copy_text(self.source.clone());
                     self.set_status("copied markdown");
                 }
                 Action::SearchOpen => {
-                    self.search.borrow_mut().open();
+                    self.search_origin = Some(self.scroll_y);
+                    let origin = self.search.borrow().block_at(self.scroll_y);
+                    self.search.borrow_mut().open_from(origin);
                     ui.ctx().request_repaint();
                 }
                 Action::SearchNext => self.step_search(1, ui.ctx()),
@@ -1690,7 +1890,19 @@ impl eframe::App for App {
                     self.keys_help = !self.keys_help;
                 }
                 Action::ToggleToc => {
-                    self.toc.toggle_open(&self.prepared.toc);
+                    let ys: Vec<Option<f32>> = {
+                        let search = self.search.borrow();
+                        self.prepared
+                            .toc
+                            .iter()
+                            .map(|entry| {
+                                search
+                                    .heading_block(&entry.id)
+                                    .and_then(|block| search.block_y(block))
+                            })
+                            .collect()
+                    };
+                    self.toc.toggle_open(&self.prepared.toc, &ys, self.scroll_y);
                     ui.ctx().request_repaint();
                 }
                 // Esc/Ctrl+C: prompt, search, selection, then quit.
@@ -1748,6 +1960,11 @@ impl eframe::App for App {
             let current = egui::vec2(self.scroll_x, self.scroll_y);
             let home = home_scroll(current, self.pad, pad);
             self.scroll_y = home.y;
+            // A resumed document starts at its saved offset instead of the
+            // automatic home-to-pad, so the first frame never flashes the top.
+            if let Some(y) = self.restore_scroll.take() {
+                self.scroll_y = y;
+            }
             // Keep the content that was in the middle of the viewport in the
             // middle after a resize; a fresh document homes on the pad. See
             // [`frame_scroll_x`].
@@ -1812,7 +2029,7 @@ impl eframe::App for App {
                         self.headings.borrow_mut().begin_frame(col);
                         self.code.borrow_mut().begin_frame(ui, col);
                         self.diagrams.borrow_mut().begin_frame(col);
-                        self.images.borrow_mut().begin_frame(col, z);
+                        self.images.borrow_mut().begin_frame(col, z, viewport_h);
                         self.search.borrow_mut().begin_frame();
                         // The document paint re-records the hovered link below;
                         // clearing first keeps `o` from using a stale one.
@@ -1848,6 +2065,20 @@ impl eframe::App for App {
             self.search
                 .borrow_mut()
                 .finish_frame(output.state.offset.y, output.inner_rect.top());
+            // A reload keeps the heading that was at the viewport top in place,
+            // now that the new layout knows its content position.
+            if let Some(anchor) = self.reload_anchor.take() {
+                let top = {
+                    let search = self.search.borrow();
+                    search
+                        .heading_block(&anchor.heading)
+                        .and_then(|block| search.block_y(block))
+                };
+                if let Some(top) = top {
+                    self.scroll_y = (top + anchor.offset).clamp(0.0, max_y);
+                    ui.ctx().request_repaint();
+                }
+            }
             if adjust != 0.0 || jump_bottom {
                 // Re-lay out next frame at the corrected offset.
                 ui.ctx().request_repaint();
@@ -2004,6 +2235,23 @@ mod tests {
         }
 
         #[test]
+        fn plain_arrows_walk_history_and_modified_arrows_do_not() {
+            let batch = read_search_batch(&[pressed(Key::ArrowUp), pressed(Key::ArrowDown)]);
+            assert_eq!(
+                batch.edits,
+                vec![SearchEdit::HistoryOlder, SearchEdit::HistoryNewer]
+            );
+            let modified = read_search_batch(&[Event::Key {
+                key: Key::ArrowUp,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::CTRL,
+            }]);
+            assert!(modified.edits.is_empty());
+        }
+
+        #[test]
         fn ctrl_w_is_a_delete_word_edit_not_a_typed_w() {
             let batch = read_search_batch(&[Event::Key {
                 key: Key::W,
@@ -2014,6 +2262,51 @@ mod tests {
             }]);
             assert_eq!(batch.edits, vec![SearchEdit::DeleteWord]);
             assert!(!batch.cancel);
+        }
+    }
+
+    mod reload_anchor {
+        use super::super::{reading_anchor, ReadingAnchor};
+
+        fn headings() -> Vec<(&'static str, f32)> {
+            vec![("intro", 100.0), ("body", 400.0), ("tail", 900.0)]
+        }
+
+        #[test]
+        fn picks_the_last_heading_at_or_above_the_viewport_top() {
+            assert_eq!(
+                reading_anchor(false, headings(), 450.0),
+                Some(ReadingAnchor {
+                    heading: "body".to_string(),
+                    offset: 50.0,
+                })
+            );
+            // A heading exactly at the top is the anchor, with no offset.
+            assert_eq!(
+                reading_anchor(false, headings(), 400.0),
+                Some(ReadingAnchor {
+                    heading: "body".to_string(),
+                    offset: 0.0,
+                })
+            );
+        }
+
+        #[test]
+        fn no_heading_at_or_above_yields_no_anchor() {
+            assert_eq!(reading_anchor(false, headings(), 99.0), None);
+            assert_eq!(reading_anchor(false, std::iter::empty(), 10.0), None);
+        }
+
+        #[test]
+        fn offset_is_the_distance_below_the_heading_top() {
+            let anchor = reading_anchor(false, headings(), 725.0).unwrap();
+            assert_eq!(anchor.heading, "body");
+            assert_eq!(anchor.offset, 325.0);
+        }
+
+        #[test]
+        fn navigation_does_not_arm_the_anchor() {
+            assert_eq!(reading_anchor(true, headings(), 450.0), None);
         }
     }
 
