@@ -97,6 +97,11 @@ fn open_at(path: &Path) -> rusqlite::Result<Connection> {
 }
 
 fn open() -> Option<Connection> {
+    // Unit tests exercise `open_at` directly; public calls must never touch the
+    // developer's real state while `cargo test` runs.
+    #[cfg(test)]
+    return None;
+    #[cfg(not(test))]
     open_at(&db_path()?).ok()
 }
 
