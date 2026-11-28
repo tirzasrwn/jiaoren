@@ -96,8 +96,8 @@ Mermaid diagram labels still need `FiraCode Nerd Font` installed system-wide.
 | `yy` | copy the whole document as Markdown |
 | drag | select text across blocks; releasing the drag copies it |
 | `y` | copy the text selection; with no selection the first `y` arms `yy` |
-| `Tab` | heading index (depth 3): `j`/`k` move, `h`/`l` fold, `gg`/`G` first/last, `Enter`/`Space` jump, `t` theme |
-| `/` | search: type a pattern, `Enter` confirms and jumps to the first match |
+| `Tab` | heading index (depth 3), opening at the section being read: `j`/`k` move, `h`/`l` fold, `gg`/`G` first/last, `Enter`/`Space` jump, `t` theme |
+| `/` | search from the current section: type a pattern, `Enter` confirms; `↑`/`↓` walk committed queries |
 | `n` / `N` | next / previous match, wrapping |
 | `ctrl+g` | show the open file's path in the status line |
 | `?` | keyboard-shortcut overlay; `esc`, `q`, `?`, `ctrl+c` or a click closes it |
@@ -116,7 +116,8 @@ with the same view; `--dark` still wins over a saved light theme. Every
 document's scroll position is saved on quit and when stepping with `]`/`[`, so
 switching back to a file returns to where you left it (the 32 most recent files
 are kept). A live reload (`r`, or an external save) keeps the committed search
-pattern and the heading index's folds.
+pattern and the heading index's folds, and holds the heading at the top of the
+viewport in place when text above it changes.
 
 `jr --keys` prints the same list to stdout, so the shortcuts are reachable
 without opening a document, and the in-viewer `?` overlay reads the same text.
@@ -124,7 +125,10 @@ without opening a document, and the in-viewer `?` overlay reads the same text.
 `/` opens a plain vim-style command line at the bottom-left on the same solid
 chip as the status line: matches update live as you type, Backspace edits,
 Ctrl+W deletes a word, Esc/Ctrl+C restores the previous search, and
-Enter commits. Search indexes the text `justify` paints: soft-wrapped source
+Enter commits. Matching starts at the block under the viewport and wraps, so a
+search moves forward from where you are instead of jumping to the top. Enter
+remembers the query; `↑`/`↓` walk the last 20 committed queries, returning to
+the draft when you go past the newest. Search indexes the text `justify` paints: soft-wrapped source
 lines join with one space, emphasis markup is dropped, link labels and code text
 are kept, and code blocks are literal. Library-routed blocks are not searchable — blockquotes, and
 paragraphs or table cells containing inline images or raw HTML. Inline-image

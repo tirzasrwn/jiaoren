@@ -57,9 +57,9 @@ o                open the link under the pointer in the browser
 ctrl+g           show the file path
 drag             select text (releasing copies; on empty space it pans)
 y                copy the selection, yy copies the whole file
-/                search, Enter confirms
+/                search from here, Enter confirms (up/down history)
 n / N            next / previous match
-tab              heading index (depth 3): j/k move, h/l fold, enter jumps
+tab              heading index at this section: j/k move, h/l fold, enter jumps
 ?                this list (esc, q or ctrl+c closes it)
 esc / ctrl+c     copy selection, else cancel prompt, else clear search, else quit
 q                quit";
