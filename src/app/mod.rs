@@ -753,6 +753,9 @@ impl App {
         }
         apply_theme(ctx, theme);
         let renderer = Renderer::new();
+        // A deleted or first-run database is repopulated from the cache files;
+        // the files stay authoritative and a failed store call is a no-op.
+        crate::store::rebuild_cache_index(&cache_root);
         // First-run Chromium and mermaid.js downloads run in the background so
         // the window opens immediately and the same status line that reports
         // font progress also reports these. Diagram work waits for them.
