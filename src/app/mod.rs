@@ -262,6 +262,7 @@ fn chip_area(ctx: &egui::Context, id: &str, anchor: egui::Align2, offset: egui::
     egui::Area::new(egui::Id::new(id))
         .order(egui::Order::Middle)
         .anchor(anchor, offset)
+        .fade_in(false)
         .interactable(false)
         .show(ctx, |ui| {
             // Solid chip: the chip sits over the document and must stay legible.
@@ -314,6 +315,7 @@ fn prompt_area(ctx: &egui::Context, text: String) {
     egui::Area::new(egui::Id::new("jiaoren-search-line"))
         .order(egui::Order::Middle)
         .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
+        .fade_in(false)
         .interactable(false)
         .show(ctx, |ui| {
             // Same chip as the committed search status, for the same reason.
@@ -703,6 +705,9 @@ impl App {
         // `+`/`-` zoom the document only. egui's own Ctrl+Plus zoom would also
         // scale overlays like the heading index, so keep it off.
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        // No fade-in/out or hover transitions anywhere: overlays and tooltips
+        // appear immediately.
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
         // Saved zoom/theme apply to every document; `--dark` still wins.
         let prefs = crate::prefs::load();
         let theme = if dark {
@@ -1247,6 +1252,7 @@ impl App {
         egui::Area::new(egui::Id::new("jiaoren-keys-help"))
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .fade_in(false)
             .interactable(false)
             .show(ctx, |ui| {
                 egui::Frame::new()

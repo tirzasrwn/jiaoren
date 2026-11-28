@@ -11,7 +11,8 @@ All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 
 ### Fixed
 
-- The heading index appears immediately instead of fading in.
+- All overlays, chips and tooltips appear immediately: egui's animation time
+  is zero and every overlay sets `fade_in(false)`.
 - Persisted state and cache metadata in one SQLite database at
   `$XDG_DATA_HOME/jiaoren/jiaoren.db` (else
   `~/.local/share/jiaoren/jiaoren.db`): zoom, theme, per-document positions and
