@@ -48,6 +48,9 @@ pub(crate) struct SearchUi {
     anchors: std::collections::HashMap<String, usize>,
     /// Heading id → block index, for the index overlay jump.
     heading_blocks: std::collections::HashMap<String, usize>,
+    /// Recompute hits from the next frame's block texts, after a reload kept
+    /// the committed pattern.
+    recompute_after_frame: bool,
 }
 
 impl SearchUi {
@@ -68,6 +71,7 @@ impl SearchUi {
             controls: Vec::new(),
             anchors: std::collections::HashMap::new(),
             heading_blocks: std::collections::HashMap::new(),
+            recompute_after_frame: false,
         }
     }
 
@@ -100,6 +104,17 @@ impl SearchUi {
         self.controls.clear();
         self.anchors.clear();
         self.heading_blocks.clear();
+        self.recompute_after_frame = false;
+    }
+
+    /// Drop per-document state but keep the committed search pattern. Hits are
+    /// recomputed from the next frame's freshly recorded block texts, so a live
+    /// reload does not silently clear the search.
+    pub(crate) fn reset_keeping_pattern(&mut self) {
+        let pattern = self.state.pattern.take();
+        self.reset();
+        self.recompute_after_frame = pattern.is_some();
+        self.state.pattern = pattern;
     }
 
     /// Visible text for a placeholder id, built once and shared by every frame.
@@ -299,6 +314,13 @@ impl SearchUi {
             .extend(self.tops.iter().map(|top| offset_y + top - viewport_top));
         self.hs.clear();
         self.hs.extend_from_slice(&self.heights);
+        if std::mem::take(&mut self.recompute_after_frame) {
+            if let Some(pattern) = self.state.pattern.clone() {
+                // Reset to the first hit; the reader can step from there.
+                self.state
+                    .set_pattern(self.texts.iter().map(|text| &**text), &pattern);
+            }
+        }
     }
 
     /// Block texts of the last completed frame, in document order.
@@ -480,6 +502,35 @@ mod tests {
             assert!(s.is_open(), "empty query stays in input mode");
             s.commit();
             assert_eq!(s.state.pattern, None);
+        }
+
+        #[test]
+        fn reload_keeps_pattern_and_recomputes_from_new_texts() {
+            let mut s = SearchUi::new();
+            s.texts = rc(&["old needle", "plain"]);
+            s.state.set_pattern(s.texts.iter().map(|t| &**t), "needle");
+            assert_eq!(s.state.current_block(), Some(0));
+            s.reset_keeping_pattern();
+            assert_eq!(s.state.pattern.as_deref(), Some("needle"));
+            assert!(s.state.hits.is_empty(), "stale hits are dropped");
+            assert!(!s.is_open());
+            s.texts = rc(&["intro", "new needle here"]);
+            s.tops = vec![0.0, 40.0];
+            s.heights = vec![10.0, 10.0];
+            s.finish_frame(0.0, 0.0);
+            assert_eq!(s.state.pattern.as_deref(), Some("needle"));
+            assert_eq!(s.state.hits.len(), 1);
+            assert_eq!(s.state.current_block(), Some(1));
+        }
+
+        #[test]
+        fn full_reset_still_clears_the_pattern() {
+            let mut s = SearchUi::new();
+            s.texts = rc(&["needle"]);
+            s.state.set_pattern(s.texts.iter().map(|t| &**t), "needle");
+            s.reset();
+            assert!(s.state.pattern.is_none());
+            assert!(s.state.hits.is_empty());
         }
 
         #[test]

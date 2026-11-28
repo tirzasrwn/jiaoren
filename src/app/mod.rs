@@ -553,6 +553,9 @@ pub(crate) struct App {
     html_fn: HtmlFn,
     scroll_y: f32,
     scroll_x: f32,
+    /// Vertical offset to apply once after the first layout, from the last
+    /// session when this document was open.
+    restore_scroll: Option<f32>,
     /// Content scroll limits from the last layout. Key scrolls clamp to these
     /// first, so pressing down at the bottom cannot hand egui an offset past
     /// the end for one bouncing frame.
@@ -630,6 +633,7 @@ impl App {
         // relative to the shell would otherwise be shown and re-read relative to
         // whatever directory the viewer happens to be in.
         let path = std::fs::canonicalize(&path).unwrap_or(path);
+        let restore_scroll = prefs.resume_scroll(&path);
         // A cached FiraCode is installed before the first frame. On a fresh
         // cache, start with the system font (or egui's defaults) and download
         // in the background so the window still opens immediately.
@@ -785,6 +789,7 @@ impl App {
             html_fn,
             scroll_y: 0.0,
             scroll_x: 0.0,
+            restore_scroll,
             scroll_max: egui::Vec2::ZERO,
             jump_to: None,
             pad: None,
@@ -828,6 +833,7 @@ impl App {
 
     /// Reload the document and rebuild every placeholder cache.
     pub fn reload(&mut self) {
+        let old_toc = self.prepared.toc.clone();
         self.load();
         crate::justify::clear_inline_cache();
         self.cache = CommonMarkCache::default();
@@ -844,15 +850,17 @@ impl App {
             .borrow_mut()
             .reset(self.prepared.headings.clone());
         self.code.borrow_mut().reset(self.prepared.code.clone());
-        // Old hits point into blocks that no longer exist.
-        self.search.borrow_mut().reset();
-        self.toc.reset();
+        // Old hits point into blocks that no longer exist; the pattern stays and
+        // is recomputed after the next draw records the new block texts. Folds
+        // and the selection follow heading ids across shifted indices.
+        self.search.borrow_mut().reset_keeping_pattern();
+        self.toc.remap(&old_toc, &self.prepared.toc);
         self.jump_to = None;
     }
 
-    /// Remember the current zoom and theme for the next session.
+    /// Remember the current zoom, theme and reading position for the next session.
     fn save_prefs(&self) {
-        crate::prefs::save(self.zoom, self.theme);
+        crate::prefs::save(self.zoom, self.theme, Some(&self.path), self.scroll_y);
     }
 
     /// Open the next/previous Markdown file in this document's directory,
@@ -864,6 +872,8 @@ impl App {
             self.set_status("no other markdown files in this folder");
             return;
         };
+        // Remember where this document was left before switching away.
+        self.save_prefs();
         let position = files
             .iter()
             .position(|file| file == &next)
@@ -879,6 +889,9 @@ impl App {
         self.scroll_bottom = false;
         self.autoscroll = 0.0;
         self.reload();
+        // A different document starts with no search and a fresh index.
+        self.search.borrow_mut().reset();
+        self.toc.reset();
         self.last_mtime = std::fs::metadata(&self.path)
             .and_then(|m| m.modified())
             .ok();
@@ -1314,6 +1327,10 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_prefs();
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_downloads(ctx);
         self.diagrams.borrow_mut().poll(ctx);
@@ -1748,6 +1765,11 @@ impl eframe::App for App {
             let current = egui::vec2(self.scroll_x, self.scroll_y);
             let home = home_scroll(current, self.pad, pad);
             self.scroll_y = home.y;
+            // A resumed document starts at its saved offset instead of the
+            // automatic home-to-pad, so the first frame never flashes the top.
+            if let Some(y) = self.restore_scroll.take() {
+                self.scroll_y = y;
+            }
             // Keep the content that was in the middle of the viewport in the
             // middle after a resize; a fresh document homes on the pad. See
             // [`frame_scroll_x`].

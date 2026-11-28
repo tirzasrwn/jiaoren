@@ -55,6 +55,29 @@ impl TocState {
         *self = TocState::default();
     }
 
+    /// Keep folds and the selected heading across a reload by heading id, since
+    /// edits elsewhere in the document can shift indices. Removed headings drop
+    /// their fold, and a removed selection falls back to the first row.
+    pub(crate) fn remap(&mut self, old: &[TocEntry], new: &[TocEntry]) {
+        let selected = old.get(self.selected).map(|entry| entry.id.as_str());
+        let collapsed: HashSet<&str> = self
+            .collapsed
+            .iter()
+            .filter_map(|&index| old.get(index))
+            .map(|entry| entry.id.as_str())
+            .collect();
+        self.collapsed = new
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| collapsed.contains(entry.id.as_str()))
+            .map(|(index, _)| index)
+            .collect();
+        self.selected = selected
+            .and_then(|id| new.iter().position(|entry| entry.id == id))
+            .unwrap_or(0);
+        self.clamp_selected(new);
+    }
+
     fn reveal_selected(&mut self, toc: &[TocEntry]) {
         let Some(entry) = toc.get(self.selected) else {
             self.selected = 0;
@@ -449,6 +472,48 @@ mod tests {
             state.fold(&[], false);
             state.fold(&[], true);
             assert!(state.selected_entry(&[]).is_none());
+        }
+
+        #[test]
+        fn remap_follows_heading_ids_across_shifted_indices() {
+            let old = doc();
+            let mut state = TocState {
+                open: true,
+                initialized: true,
+                ..TocState::default()
+            };
+            state.collapsed.insert(1); // one-a
+            state.selected = 5; // two
+            let new = vec![
+                entry(1, "zero"),
+                entry(1, "one"),
+                entry(2, "one-a"),
+                entry(3, "one-a-i"),
+                entry(4, "too-deep"),
+                entry(2, "one-b"),
+                entry(1, "two"),
+            ];
+            state.remap(&old, &new);
+            assert_eq!(state.selected, 6, "two moved to index 6");
+            assert_eq!(state.visible(&new), vec![0, 1, 2, 5, 6]);
+            assert!(state.collapsed.contains(&2), "one-a is still collapsed");
+            assert!(!state.collapsed.contains(&1));
+        }
+
+        #[test]
+        fn remap_drops_removed_folds_and_clamps_a_removed_selection() {
+            let old = doc();
+            let mut state = TocState {
+                open: true,
+                initialized: true,
+                ..TocState::default()
+            };
+            state.collapsed.insert(0); // one
+            state.selected = 2; // one-a-i, removed below
+            let new = vec![entry(1, "two"), entry(1, "three")];
+            state.remap(&old, &new);
+            assert!(state.collapsed.is_empty());
+            assert_eq!(state.selected, 0);
         }
 
         #[test]
