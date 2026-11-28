@@ -1,8 +1,8 @@
 #!/bin/bash
 # Record docs/assets/demo.gif: start a private Xvfb display, place one jr window,
 # record it with ffmpeg x11grab, then build a 15 fps Catppuccin GIF.
-# Requires Xvfb, ffmpeg, xdotool. No desktop or window manager needed, so it
-# never touches the real session.
+# Requires Xvfb, ffmpeg, xdotool, ImageMagick. No desktop or window manager
+# needed, so it never touches the real session.
 # Usage: scripts/record-demo-gif.sh
 set -euo pipefail
 
@@ -13,9 +13,28 @@ TMP_GIF="$OUT_GIF.tmp.gif"
 WIDTH=900
 HEIGHT=540
 FPS=15
-DURATION=55
+DURATION=89
 
 cd "$REPO"
+
+# A private copy of the demo folder: the reload step inserts a paragraph above
+# the reader, and the image step needs a tall generated picture, so the tracked
+# examples/ files stay untouched.
+TMP_DIR=$(mktemp -d /tmp/jiaoren-demo.XXXXXX)
+DEMO_MD="$TMP_DIR/demo.md"
+cp examples/demo.md examples/demo-2.md docs/assets/demo-image.png "$TMP_DIR/"
+convert -size 600x1600 gradient:'#89b4fa-#1e1e2e' "$TMP_DIR/tall-test.png"
+python3 - "$DEMO_MD" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+text = text.replace(
+    "![local image](../docs/assets/demo-image.png)",
+    '![local image](demo-image.png "A local image from the document folder")\n\n'
+    '![tall test image](tall-test.png "Tall image capped at 75% of the viewport height")',
+)
+open(path, "w").write(text)
+PY
 
 # Private headless display: -displayfd lets Xvfb pick a free number.
 DISP_FILE=$(mktemp)
@@ -28,7 +47,7 @@ cleanup() {
   [ -n "${JR_PID:-}" ] && kill "$JR_PID" 2>/dev/null || true
   kill "$XVFB_PID" 2>/dev/null || true
   rm -f "$DISP_FILE"
-  rm -rf "$CFG_DIR"
+  rm -rf "$CFG_DIR" "$TMP_DIR"
 }
 trap cleanup EXIT
 for _ in $(seq 1 50); do
@@ -46,7 +65,7 @@ rm -f "$DISP_FILE"
 export XDG_CONFIG_HOME="$CFG_DIR"
 echo "display=$DISPLAY"
 
-./target/debug/jr examples/demo.md >/tmp/jr-gif.log 2>&1 </dev/null &
+./target/debug/jr "$DEMO_MD" >/tmp/jr-gif.log 2>&1 </dev/null &
 JR_PID=$!
 
 W=""
@@ -147,16 +166,16 @@ if ! kill -0 "$REC" 2>/dev/null; then
   exit 1
 fi
 
-# 1. select the intro phrase and copy it
+# 1. select a phrase, release to copy it, then hover a link for its tooltip
 ensure_focus
-mx 72 112
+mx 60 161
 sleep 0.15
 xdotool mousedown 1
 sleep 0.2
-for x in 140 210 280 350 420 455; do mx "$x" 112; sleep 0.1; done
+for x in 130 220 320 430 540 650 760 850; do mx "$x" 174; sleep 0.12; done
 xdotool mouseup 1
 # Releasing the drag already copies; keep the pause so the chip is visible.
-sleep 1.2
+sleep 1.3
 if ! kill -0 "$JR_PID" 2>/dev/null; then
   echo "jr exited during selection" >&2
   exit 1
@@ -164,43 +183,62 @@ fi
 # Esc clears the kept selection; a second Esc would quit.
 xdotool key --clearmodifiers Escape
 sleep 0.4
+mx 660 204
+sleep 2.2
 
-# 2. search with a space, then a nested quote
+# 2. scroll into the Quote section, then search forward from that viewport
 ensure_focus
-xdotool key --clearmodifiers slash
-sleep 0.3
-xdotool type --clearmodifiers --delay 80 "markdown viewer"
-sleep 0.9
-xdotool key Return
-sleep 0.8
-xdotool key --clearmodifiers Escape
-sleep 0.3
-xdotool key --clearmodifiers slash
-sleep 0.2
-xdotool type --clearmodifiers --delay 80 "Quote"
-sleep 0.4
-xdotool key Return
-sleep 1.2
-xdotool key --clearmodifiers Escape
-sleep 0.3
-
-# 3. table: hover a row, then click the copy icon in the header
-ensure_focus
-xdotool key --clearmodifiers slash
-sleep 0.2
-xdotool type --clearmodifiers --delay 70 "Copy table"
-sleep 0.4
-xdotool key Return
-sleep 0.6
-mx 300 288
+xdotool key --clearmodifiers d
+sleep 0.5
+xdotool key --clearmodifiers d
 sleep 1.0
+xdotool key --clearmodifiers slash
+sleep 0.3
+xdotool type --clearmodifiers --delay 80 "table"
+sleep 0.8
+xdotool key Return
+sleep 0.9
+xdotool key n
+sleep 0.9
+xdotool key N
+sleep 0.9
+xdotool key --clearmodifiers Escape
+sleep 0.4
+
+# 3. a query with a space, then browse the committed history with Up/Down
+ensure_focus
+xdotool key --clearmodifiers slash
+sleep 0.2
+xdotool type --clearmodifiers --delay 80 "copy table"
+sleep 0.8
+xdotool key Return
+sleep 1.1
+# Clear the highlight so the row tint and the CSV chip are easy to see.
+xdotool key --clearmodifiers Escape
+sleep 0.4
+
+# 4. table: hover a row, then click the CSV copy icon in the header
+ensure_focus
+mx 300 288
+sleep 1.2
 mx 845 247
 xdotool click 1
-sleep 1.2
-xdotool key --clearmodifiers Escape
-sleep 0.3
+sleep 1.8
 
-# 4. diagram popup and zoom
+# 5. search history: Up shows "copy table", Up again "table", Down back
+ensure_focus
+xdotool key --clearmodifiers slash
+sleep 0.2
+xdotool key Up
+sleep 1.1
+xdotool key Up
+sleep 1.1
+xdotool key Down
+sleep 1.1
+xdotool key --clearmodifiers Escape
+sleep 0.4
+
+# 6. diagram popup, theme toggle inside it, wheel zoom
 ensure_focus
 xdotool key --clearmodifiers slash
 sleep 0.2
@@ -208,61 +246,111 @@ xdotool type --clearmodifiers --delay 70 "diagram"
 sleep 0.4
 xdotool key Return
 sleep 0.4
-xdotool key n
-sleep 0.9
 mx 430 395
 xdotool click 1
 sleep 0.8
-# Theme toggle stays live inside the overlay (0.5.0), then zoom.
 xdotool key --clearmodifiers t
 sleep 1.2
 xdotool click 4; sleep 0.25; xdotool click 4; sleep 0.25; xdotool click 4
 sleep 1.2
 xdotool key --clearmodifiers q
-sleep 0.6
+sleep 0.4
+# q only closes the popup; clear the committed search before the next steps.
+xdotool key --clearmodifiers Escape
+sleep 0.5
 
-# 5. bottom code block: hover a wrapped source line (both visual rows)
+# 7. reading progress chip in the bottom-right while scrolled to the end
 ensure_focus
 xdotool key --clearmodifiers G
-sleep 1.0
-mx 400 201
-sleep 1.5
-
-# 6. next/previous document in the folder
-ensure_focus
-xdotool key --clearmodifiers bracketright
-sleep 2.2
-xdotool key --clearmodifiers bracketleft
 sleep 1.6
-
-# 7. heading index: fold, unfold and jump
-ensure_focus
-xdotool key --clearmodifiers Tab
-sleep 1.0
-xdotool key --clearmodifiers g g
-sleep 0.5
-xdotool key --clearmodifiers h
-sleep 1.8
-xdotool key --clearmodifiers l
-sleep 1.8
-for _ in 1 2 3; do xdotool key --clearmodifiers j; sleep 0.25; done
-sleep 0.6
-xdotool key Return
+mx 400 201
 sleep 1.2
 
-# 8. file path / progress status line
+# 8. block jumps with } and {, including a held } that repeats
 ensure_focus
-xdotool key --clearmodifiers ctrl+g
+xdotool key --clearmodifiers g g
+sleep 0.8
+xdotool key --clearmodifiers braceright
+sleep 1.0
+xdotool keydown braceright
+sleep 1.5
+xdotool keyup braceright
+sleep 1.2
+xdotool key --clearmodifiers braceleft
+sleep 0.6
+xdotool key --clearmodifiers braceleft
+sleep 1.4
+
+# 9. jump history: ctrl+o back, ctrl+i forward
+ensure_focus
+xdotool key --clearmodifiers ctrl+o
+sleep 2.0
+xdotool key --clearmodifiers ctrl+i
+sleep 2.0
+
+# 10. heading index opens at the section being read, then fold/unfold and jump
+ensure_focus
+xdotool key --clearmodifiers Tab
+sleep 3.2
+xdotool key --clearmodifiers g
+sleep 0.2
+xdotool key --clearmodifiers g
+sleep 0.8
+xdotool key --clearmodifiers h
+sleep 1.2
+xdotool key --clearmodifiers l
+sleep 1.2
+for _ in 1 2 3 4; do xdotool key --clearmodifiers j; sleep 0.3; done
+sleep 1.0
+xdotool key Return
+sleep 2.0
+
+# 11. live reload keeps the reading anchor while text is inserted above it
+ensure_focus
+for _ in 1 2 3; do xdotool key --clearmodifiers j; sleep 0.2; done
+sleep 0.8
+python3 - "$DEMO_MD" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+text = text.replace(
+    "## Image\n",
+    "## Image\n\n"
+    "A live reload keeps this section in place while text is inserted above the reader.\n",
+    1,
+)
+open(path, "w").write(text)
+PY
+sleep 3.2
+xdotool key --clearmodifiers d
+sleep 2.0
+xdotool key --clearmodifiers d
+sleep 2.0
+xdotool key --clearmodifiers d
 sleep 2.4
 
-# 9. keyboard-shortcut overlay
+# 12. next/previous file with per-file position memory: ] then G then [ ...
+ensure_focus
+xdotool key --clearmodifiers bracketright
+sleep 2.0
+xdotool key --clearmodifiers G
+sleep 2.0
+xdotool key --clearmodifiers bracketleft
+sleep 2.4
+
+# 13. file path status line
+ensure_focus
+xdotool key --clearmodifiers ctrl+g
+sleep 2.2
+
+# 14. keyboard-shortcut overlay
 ensure_focus
 xdotool key --clearmodifiers shift+slash
 sleep 2.4
 xdotool key --clearmodifiers Escape
-sleep 0.6
+sleep 0.5
 
-# 10. zoom and horizontal pan
+# 15. zoom and horizontal pan
 ensure_focus
 xdotool key --clearmodifiers plus
 sleep 0.3
@@ -281,14 +369,14 @@ sleep 1.0
 xdotool key --clearmodifiers a
 sleep 1.0
 
-# 11. yy copies the whole document
+# 16. yy copies the whole document
 ensure_focus
 xdotool key --clearmodifiers y
 sleep 0.2
 xdotool key --clearmodifiers y
-sleep 2.4
+sleep 2.2
 
-# 12. back to the light theme
+# 17. back to the light theme
 xdotool key --clearmodifiers t
 sleep 2.2
 
