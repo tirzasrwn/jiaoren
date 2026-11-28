@@ -3,7 +3,6 @@
 //! Every public call is best effort: a missing, locked or broken database
 //! yields defaults, `false` or a no-op, never a panic. Each call opens its own
 //! connection so concurrent `jr` instances cannot corrupt shared state.
-#![allow(dead_code)] // Wired into prefs and the cache modules by later tasks.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -68,6 +67,7 @@ INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1');
 
 /// `$XDG_DATA_HOME/jiaoren/jiaoren.db`, else
 /// `$HOME/.local/share/jiaoren/jiaoren.db`, else `None`.
+#[cfg(not(test))]
 fn db_path() -> Option<PathBuf> {
     let base = if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
         PathBuf::from(xdg)
@@ -96,13 +96,16 @@ fn open_at(path: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
+#[cfg(not(test))]
 fn open() -> Option<Connection> {
-    // Unit tests exercise `open_at` directly; public calls must never touch the
-    // developer's real state while `cargo test` runs.
-    #[cfg(test)]
-    return None;
-    #[cfg(not(test))]
     open_at(&db_path()?).ok()
+}
+
+/// Unit tests exercise `open_at` directly; public calls must never touch the
+/// developer's real state while `cargo test` runs.
+#[cfg(test)]
+fn open() -> Option<Connection> {
+    None
 }
 
 fn now_secs() -> i64 {
@@ -205,6 +208,13 @@ fn clear_artifacts_at(conn: &Connection, kinds: &[CacheKind]) -> rusqlite::Resul
 }
 
 fn rebuild_cache_index_at(conn: &Connection, cache_root: &Path) -> rusqlite::Result<()> {
+    // The index is only rebuilt when there is none: normal writes and prunes
+    // keep it current, so a startup must not rewrite rows every launch.
+    let existing: i64 =
+        conn.query_row("SELECT count(*) FROM cache_artifacts", [], |row| row.get(0))?;
+    if existing > 0 {
+        return Ok(());
+    }
     let Ok(entries) = std::fs::read_dir(cache_root) else {
         return Ok(());
     };
@@ -422,6 +432,19 @@ mod tests {
 
         clear_artifacts_at(&conn, &[CacheKind::MermaidJs]).unwrap();
         assert_eq!(artifact_count(&conn), 0);
+    }
+
+    #[test]
+    fn index_rebuild_leaves_an_existing_index_alone() {
+        let (dir, conn) = temp_db();
+        let root = dir.0.join("cache");
+        std::fs::create_dir_all(&root).unwrap();
+        let svg = root.join("kept.svg");
+        std::fs::write(&svg, b"svg").unwrap();
+        record_artifact_at(&conn, CacheKind::Svg, "v", "", &svg).unwrap();
+        std::fs::write(root.join("other.svg"), b"svg").unwrap();
+        rebuild_cache_index_at(&conn, &root).unwrap();
+        assert_eq!(artifact_count(&conn), 1);
     }
 
     #[test]
