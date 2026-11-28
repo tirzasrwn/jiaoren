@@ -44,9 +44,10 @@ jr --clean-cache --all    # also Chromium and cached fonts (~132 MB)
 - `--dark` — start with the dark theme.
 - `--clean-cache` — delete cached diagram renders and the downloaded
   `mermaid.min.js`, then exit. The managed Chromium and downloaded fonts are
-  kept (a re-download is expensive); add `--all` to remove those too. Startup
-  prunes renders from older Mermaid/Chromium versions and font versions other
-  than the pinned one, and is safe while other `jr` instances are running.
+  kept (a re-download is expensive); add `--all` to remove those too. The state
+  database is not a cache and is never removed. Startup prunes renders from
+  older Mermaid/Chromium versions and font versions other than the pinned one,
+  and is safe while other `jr` instances are running.
 
 Colors are [Catppuccin](https://catppuccin.com/palette/): Latte for the light
 theme, Macchiato for the dark theme. Window chrome and mermaid diagrams use the
@@ -110,12 +111,16 @@ Hovering a link shows its destination in a tooltip. `o` opens the hovered
 through the `.md`/`.markdown` files in the open document's folder, wrapping at
 both ends, and land at the top of the next file.
 
-Zoom and theme are saved to `$XDG_CONFIG_HOME/jiaoren/state.toml` (else
-`~/.config/jiaoren/state.toml`) whenever they change, so the next launch starts
-with the same view; `--dark` still wins over a saved light theme. Every
+Zoom, theme and per-document reading positions are saved in one SQLite database
+at `$XDG_DATA_HOME/jiaoren/jiaoren.db` (else
+`~/.local/share/jiaoren/jiaoren.db`, or a private per-UID directory when neither
+`XDG_DATA_HOME` nor `HOME` is set) whenever they change, so the next launch
+starts with the same view; `--dark` still wins over a saved light theme. Every
 document's scroll position is saved on quit and when stepping with `]`/`[`, so
 switching back to a file returns to where you left it (the 32 most recent files
-are kept). A live reload (`r`, or an external save) keeps the committed search
+are kept). An existing `state.toml` is imported once on first launch and then
+deleted, and jiaoren writes no TOML after that. A live reload (`r`, or an
+external save) keeps the committed search
 pattern and the heading index's folds, and holds the heading at the top of the
 viewport in place when text above it changes.
 
@@ -279,10 +284,13 @@ line naming the path.
 
 Everything managed lives under `~/.cache/jiaoren/`: versioned FiraCode faces,
 chromium, `mermaid-<version>.min.js`, and the diagram SVGs (keyed by diagram
-content, theme and render version). If neither `XDG_CACHE_HOME` nor `HOME` is
-set, the cache goes in a per-UID directory under the system temp dir, created
-with mode `0700` and checked for ownership. Reopening a document is instant and
-diagrams stay sharp at any zoom.
+content, theme and render version). The SQLite database at the data path holds
+zoom, theme, per-document positions and an index of these cache payload files;
+the files stay the source of truth, so a missing database is rebuilt from the
+cache and changes no render. If neither `XDG_CACHE_HOME` nor `HOME` is set, the
+cache goes in a per-UID directory under the system temp dir, created with mode
+`0700` and checked for ownership. Reopening a document is instant and diagrams
+stay sharp at any zoom.
 
 First-run downloads (fonts, Chromium, mermaid.js) run in the background while
 the window is already usable; their phase is shown in the bottom-left status
@@ -296,7 +304,9 @@ jr --clean-cache          # diagram renders + mermaid.js
 jr --clean-cache --all    # also the managed Chromium and downloaded fonts
 ```
 
-Startup also prunes renders and scripts from older Mermaid/Chromium versions.
+`--clean-cache` clears the matching index rows and never removes the state
+database, which is not a cache. Startup also prunes renders and scripts from
+older Mermaid/Chromium versions.
 
 ## Trust boundary
 
