@@ -9,6 +9,7 @@ mod justify;
 mod mermaid;
 mod prefs;
 mod search;
+mod store;
 mod theme;
 
 use std::path::PathBuf;
