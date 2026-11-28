@@ -8,13 +8,6 @@ All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 
 - `0` resets the zoom overlay to 1× and `a` resets and centres the picture, for
   both diagrams and images.
-
-### Fixed
-
-- All overlays, chips and tooltips appear immediately: egui's animation time
-  is zero and every overlay sets `fade_in(false)`.
-- Tooltips, the `?` shortcut overlay, the heading index and the zoom panels are
-  plain square surfaces: no rounded corners, border or shadow.
 - Persisted state and cache metadata in one SQLite database at
   `$XDG_DATA_HOME/jiaoren/jiaoren.db` (else
   `~/.local/share/jiaoren/jiaoren.db`): zoom, theme, per-document positions and
@@ -22,10 +15,18 @@ All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 - One-time import of the legacy `state.toml` zoom, theme and positions on first
   launch; the file is deleted after a successful import.
 
+### Fixed
+
+- All overlays, chips and tooltips appear immediately: egui's animation time
+  is zero and every overlay sets `fade_in(false)`.
+- Tooltips, the `?` shortcut overlay, the heading index and the zoom overlay are
+  plain square surfaces: no rounded corners, border or shadow.
+- The zoom overlay fills the window with zero margin and padding, so a picture
+  is clipped only at the window edges with no white frame behind it. A click on
+  the dim letterbox still closes it.
+
 ### Changed
 
-- The zoom overlay uses a 10 px margin instead of 24 px, so it covers almost
-  the whole window.
 - State is no longer written to `state.toml`; the database is the only store.
 - `--clean-cache` and startup pruning update the cache index, while cache
   payload files (SVG, `mermaid.min.js`, fonts, Chromium) stay on disk. The
