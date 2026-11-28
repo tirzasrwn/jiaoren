@@ -255,6 +255,7 @@ pub(crate) fn draw(
     egui::Area::new(egui::Id::new("jiaoren-toc"))
         .order(egui::Order::Foreground)
         .fixed_pos(screen.left_top())
+        .fade_in(false)
         .interactable(true)
         .show(ctx, |ui| {
             // Area sizing follows content; paint the whole window first so no

@@ -8,6 +8,10 @@ All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 
 - `0` resets the zoom overlay to 1× and `a` resets and centres the picture, for
   both diagrams and images.
+
+### Fixed
+
+- The heading index appears immediately instead of fading in.
 - Persisted state and cache metadata in one SQLite database at
   `$XDG_DATA_HOME/jiaoren/jiaoren.db` (else
   `~/.local/share/jiaoren/jiaoren.db`): zoom, theme, per-document positions and
