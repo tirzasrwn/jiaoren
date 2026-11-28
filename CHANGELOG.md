@@ -2,10 +2,12 @@
 
 All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 
-## Unreleased
+## 0.7.0 — 2026-11-28
 
 ### Added
 
+- `0` resets the zoom overlay to 1× and `a` resets and centres the picture, for
+  both diagrams and images.
 - Persisted state and cache metadata in one SQLite database at
   `$XDG_DATA_HOME/jiaoren/jiaoren.db` (else
   `~/.local/share/jiaoren/jiaoren.db`): zoom, theme, per-document positions and
@@ -15,6 +17,8 @@ All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 
 ### Changed
 
+- The zoom overlay uses a 10 px margin instead of 24 px, so it covers almost
+  the whole window.
 - State is no longer written to `state.toml`; the database is the only store.
 - `--clean-cache` and startup pruning update the cache index, while cache
   payload files (SVG, `mermaid.min.js`, fonts, Chromium) stay on disk. The
