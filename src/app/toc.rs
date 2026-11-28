@@ -26,13 +26,15 @@ pub(crate) struct TocState {
 }
 
 impl TocState {
-    pub(crate) fn toggle_open(&mut self, toc: &[TocEntry]) {
+    /// Open or close the index. `ys` holds the content y of each TOC entry's
+    /// heading block, parallel to `toc`; `top` is the viewport's content
+    /// offset. Every open selects the section being read, not the last one.
+    pub(crate) fn toggle_open(&mut self, toc: &[TocEntry], ys: &[Option<f32>], top: f32) {
         self.open = !self.open;
         if self.open {
             self.last_g = None;
             if !self.initialized {
                 self.initialized = true;
-                self.selected = 0;
                 // Level-one sections start open; deeper parents start collapsed
                 // so the first view is the H1/H2 outline.
                 self.collapsed = (0..toc.len())
@@ -40,14 +42,31 @@ impl TocState {
                         toc[i].level > 1 && toc[i].level <= MAX_DEPTH && self.has_children(toc, i)
                     })
                     .collect();
-            } else {
-                // Reopening keeps the last selection and folds; reveal it if a
-                // collapsed ancestor hides it.
-                self.reveal_selected(toc);
             }
+            self.select_current(toc, ys, top);
+            // Keep the choice on screen: unfold only the ancestors that hide it.
+            self.reveal_selected(toc);
             self.clamp_selected(toc);
             self.scroll_to_selected = true;
         }
+    }
+
+    /// Select the nearest visible heading at or above `top`; when the viewport
+    /// starts before every heading, the first visible one.
+    fn select_current(&mut self, toc: &[TocEntry], ys: &[Option<f32>], top: f32) {
+        let current = toc
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.level <= MAX_DEPTH)
+            .filter_map(|(index, _)| {
+                let y = ys.get(index).copied().flatten()?;
+                (y <= top).then_some((index, y))
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        self.selected = current
+            .map(|(index, _)| index)
+            .or_else(|| toc.iter().position(|entry| entry.level <= MAX_DEPTH))
+            .unwrap_or(self.selected);
     }
 
     /// Drop index state when a different document is loaded.
@@ -380,6 +399,99 @@ mod tests {
             ]
         }
 
+        fn ys(values: &[f32]) -> Vec<Option<f32>> {
+            values.iter().map(|&y| Some(y)).collect()
+        }
+
+        #[test]
+        fn opening_selects_heading_at_viewport_top() {
+            let toc = doc();
+            let mut state = TocState::default();
+            state.toggle_open(&toc, &ys(&[0.0, 100.0, 200.0, 250.0, 300.0, 400.0]), 200.0);
+            assert_eq!(state.selected, 2);
+        }
+
+        #[test]
+        fn opening_selects_heading_above_mid_viewport() {
+            let toc = doc();
+            let mut state = TocState::default();
+            state.toggle_open(&toc, &ys(&[0.0, 100.0, 200.0, 250.0, 300.0, 400.0]), 250.0);
+            assert_eq!(state.selected, 2);
+        }
+
+        #[test]
+        fn opening_selects_heading_at_bottom() {
+            let toc = doc();
+            let mut state = TocState::default();
+            state.toggle_open(&toc, &ys(&[0.0, 100.0, 200.0, 250.0, 300.0, 400.0]), 900.0);
+            assert_eq!(state.selected, 5);
+        }
+
+        #[test]
+        fn opening_without_a_heading_above_top_selects_first_visible() {
+            let toc = doc();
+            let mut state = TocState::default();
+            state.toggle_open(&toc, &ys(&[10.0, 100.0, 200.0, 250.0, 300.0, 400.0]), 5.0);
+            assert_eq!(state.selected, 0);
+        }
+
+        #[test]
+        fn opening_unfolds_the_chosen_headings_ancestors() {
+            let toc = vec![
+                entry(1, "a"),
+                entry(2, "a-1"),
+                entry(3, "a-1-i"),
+                entry(1, "b"),
+            ];
+            let mut state = TocState {
+                initialized: true,
+                collapsed: [1].into_iter().collect(),
+                ..TocState::default()
+            };
+            state.toggle_open(&toc, &ys(&[0.0, 10.0, 20.0, 30.0]), 20.0);
+            assert_eq!(state.selected, 2);
+            assert!(!state.collapsed.contains(&1));
+            assert!(state.visible(&toc).contains(&2));
+        }
+
+        #[test]
+        fn opening_preserves_unrelated_folds() {
+            let toc = vec![
+                entry(1, "a"),
+                entry(2, "a-1"),
+                entry(3, "a-1-i"),
+                entry(1, "b"),
+                entry(2, "b-1"),
+                entry(3, "b-1-i"),
+            ];
+            let mut state = TocState {
+                initialized: true,
+                collapsed: [1, 4].into_iter().collect(),
+                ..TocState::default()
+            };
+            state.toggle_open(&toc, &ys(&[0.0, 10.0, 20.0, 30.0, 40.0, 50.0]), 20.0);
+            assert_eq!(state.selected, 2);
+            assert!(!state.collapsed.contains(&1));
+            assert!(state.collapsed.contains(&4));
+            assert!(!state.visible(&toc).contains(&5));
+        }
+
+        #[test]
+        fn empty_toc_stays_empty_when_opened() {
+            let mut state = TocState::default();
+            state.toggle_open(&[], &[], 0.0);
+            assert!(state.visible(&[]).is_empty());
+            assert!(state.selected_entry(&[]).is_none());
+        }
+
+        #[test]
+        fn headings_deeper_than_three_are_ignored_for_the_current_section() {
+            let toc = vec![entry(1, "a"), entry(4, "deep")];
+            let mut state = TocState::default();
+            state.toggle_open(&toc, &ys(&[0.0, 100.0]), 150.0);
+            assert_eq!(state.selected, 0);
+        }
+
         #[test]
         fn only_depth_three_is_visible() {
             let state = TocState::default();
@@ -408,21 +520,20 @@ mod tests {
         fn opening_expands_level_one_and_collapses_deeper_parents() {
             let toc = doc();
             let mut state = TocState::default();
-            state.toggle_open(&toc);
+            state.toggle_open(&toc, &[], 0.0);
             assert!(state.open);
             assert_eq!(state.visible(&toc), vec![0, 1, 4, 5]);
         }
 
         #[test]
-        fn reopening_keeps_selection_and_folds() {
+        fn reopening_selects_the_current_section_and_keeps_folds() {
             let toc = doc();
+            let positions = ys(&[0.0, 100.0, 200.0, 250.0, 300.0, 400.0]);
             let mut state = TocState::default();
-            state.toggle_open(&toc);
-            state.selected = 1; // One A is hidden by the initial minimise
-            state.fold(&toc, true); // expand One
-            state.selected = 2; // One A I
-            state.toggle_open(&toc); // close
-            state.toggle_open(&toc); // reopen
+            state.toggle_open(&toc, &positions, 200.0);
+            state.fold(&toc, true); // expand One A
+            state.toggle_open(&toc, &positions, 200.0); // close
+            state.toggle_open(&toc, &positions, 200.0); // reopen
             assert_eq!(state.selected, 2);
             assert!(state.visible(&toc).contains(&2));
         }
@@ -458,7 +569,7 @@ mod tests {
         fn enter_has_no_target_when_no_heading_is_visible() {
             let toc = vec![entry(4, "too deep for the index")];
             let mut state = TocState::default();
-            state.toggle_open(&toc);
+            state.toggle_open(&toc, &[], 0.0);
             assert!(state.visible(&toc).is_empty());
             // `selected_entry` is what Enter jumps with: no visible row, no jump.
             assert!(state.selected_entry(&toc).is_none());
@@ -468,7 +579,7 @@ mod tests {
         #[test]
         fn empty_index_fold_is_a_noop_instead_of_a_panic() {
             let mut state = TocState::default();
-            state.toggle_open(&[]);
+            state.toggle_open(&[], &[], 0.0);
             state.fold(&[], false);
             state.fold(&[], true);
             assert!(state.selected_entry(&[]).is_none());
@@ -520,7 +631,7 @@ mod tests {
         fn folding_clamps_a_hidden_selection_to_a_visible_row() {
             let toc = doc();
             let mut state = TocState::default();
-            state.toggle_open(&toc);
+            state.toggle_open(&toc, &[], 0.0);
             assert_eq!(state.visible(&toc), vec![0, 1, 4, 5]);
             state.selected = 3; // hidden under the collapsed One A (index 1)
             state.fold(&toc, true);
