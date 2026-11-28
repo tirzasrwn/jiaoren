@@ -90,6 +90,8 @@ Mermaid diagram labels still need `FiraCode Nerd Font` installed system-wide.
 | `t` | toggle light/dark theme |
 | `r` | reload from disk |
 | `]` / `[` | next / previous Markdown file in the same folder (wraps) |
+| `}` / `{` | jump to the next / previous block start (paragraph, heading, list, table, code, image) |
+| `ctrl+o` / `ctrl+i` | jump back / forward through index, anchor, search and `}`/`{` jumps |
 | `o` | open the link under the pointer in the browser |
 | `yy` | copy the whole document as Markdown |
 | drag | select text across blocks; releasing the drag copies it |
@@ -109,7 +111,10 @@ both ends, and land at the top of the next file.
 
 Zoom and theme are saved to `$XDG_CONFIG_HOME/jiaoren/state.toml` (else
 `~/.config/jiaoren/state.toml`) whenever they change, so the next launch starts
-with the same view; `--dark` still wins over a saved light theme.
+with the same view; `--dark` still wins over a saved light theme. The last
+document's scroll position is saved on quit and when stepping with `]`/`[`, and
+restored only when that same file is opened again. A live reload (`r`, or an
+external save) keeps the committed search pattern and the heading index's folds.
 
 `jr --keys` prints the same list to stdout, so the shortcuts are reachable
 without opening a document, and the in-viewer `?` overlay reads the same text.
