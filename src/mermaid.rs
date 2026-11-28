@@ -8,6 +8,8 @@ use std::process::{Command, Output, Stdio};
 use std::sync::Once;
 use std::time::{Duration, Instant};
 
+use crate::store::{self, CacheKind};
+
 /// Wall-clock limit for one Chromium render. `--virtual-time-budget` bounds the
 /// page, not the process: a hung browser would otherwise burn a worker forever.
 const RENDER_TIMEOUT: Duration = Duration::from_secs(20);
@@ -111,6 +113,17 @@ pub fn clean_cache(all: bool) -> std::io::Result<(u64, usize)> {
 }
 
 fn clean_cache_dir(dir: &Path, all: bool) -> std::io::Result<(u64, usize)> {
+    let kinds: &[CacheKind] = if all {
+        &[
+            CacheKind::Svg,
+            CacheKind::MermaidJs,
+            CacheKind::Font,
+            CacheKind::Chromium,
+        ]
+    } else {
+        &[CacheKind::Svg, CacheKind::MermaidJs]
+    };
+    store::clear_artifacts(kinds);
     let Ok(entries) = fs::read_dir(dir) else {
         return Ok((0, 0));
     };
@@ -138,6 +151,7 @@ fn clean_cache_dir(dir: &Path, all: bool) -> std::io::Result<(u64, usize)> {
         } else {
             fs::remove_file(&path)?;
         }
+        store::forget_artifact(&path);
         bytes += entry_bytes;
         files += entry_files;
     }
@@ -184,8 +198,8 @@ fn prune_cache(dir: &Path) {
             name.starts_with("mermaid") && name.ends_with(".min.js") && name != current_js;
         let stale_tmp = name.ends_with(".tmp")
             && older_than(meta.and_then(|m| m.modified().ok()), now, TMP_GRACE);
-        if stale_render || stale_js || stale_tmp {
-            let _ = fs::remove_file(&path);
+        if (stale_render || stale_js || stale_tmp) && fs::remove_file(&path).is_ok() {
+            store::forget_artifact(&path);
         }
     }
 }
@@ -198,7 +212,10 @@ fn prune_chromium_versions(dir: &Path, now: std::time::SystemTime) {
         let old_version = entry.file_name().to_string_lossy() != MANAGED_VERSION;
         let modified = entry.metadata().ok().and_then(|m| m.modified().ok());
         if old_version && entry.path().is_dir() && older_than(modified, now, CHROMIUM_GRACE) {
-            let _ = fs::remove_dir_all(entry.path());
+            let path = entry.path();
+            if fs::remove_dir_all(&path).is_ok() {
+                store::forget_artifact(&path);
+            }
         }
     }
 }
@@ -399,6 +416,7 @@ impl Renderer {
 
         self.atomic_write(&svg, svg_text.as_bytes())
             .map_err(|e| RenderError::Raster(e.to_string()))?;
+        store::record_artifact(CacheKind::Svg, RENDER_VERSION, theme.as_str(), &svg);
         Ok(svg)
     }
 
@@ -475,6 +493,7 @@ impl Renderer {
             .map_err(RenderError::MermaidJs)?;
         fs::rename(&tmp, &self.mermaid_js)
             .map_err(|e| RenderError::MermaidJs(format!("rename mermaid js: {e}")))?;
+        store::record_artifact(CacheKind::MermaidJs, MERMAID_VERSION, "", &self.mermaid_js);
         progress("mermaid: ready");
         Ok(())
     }
@@ -792,6 +811,7 @@ fn install_chromium_with(
     if let Err(e) = fs::rename(tmp_dir.join("chrome-headless-shell-linux64"), &final_dir) {
         return Err(fail("rename into place", e.to_string()));
     }
+    store::record_artifact(CacheKind::Chromium, MANAGED_VERSION, "", &version_dir);
     let _ = fs::remove_dir_all(&tmp_dir);
     progress("chromium: installed");
     Ok(final_bin)
@@ -1220,6 +1240,28 @@ mod tests {
                 format!("abc-dark-{RENDER_VERSION}.svg")
             );
             assert_ne!(p, r.svg_path("abc", Theme::Light));
+        }
+
+        #[test]
+        fn render_reuses_an_existing_svg_without_chromium() {
+            let d = std::env::temp_dir().join(format!(
+                "jiaoren-reuse-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&d).unwrap();
+            let r = test_renderer(&d);
+            let svg = r.svg_path("k", Theme::Light);
+            fs::write(&svg, b"<svg/>").unwrap();
+            // A second launch reads the cached SVG instead of needing Chromium.
+            assert_eq!(
+                r.render("k", "graph TD; A-->B;", Theme::Light).unwrap(),
+                svg
+            );
+            let _ = fs::remove_dir_all(&d);
         }
 
         #[test]

@@ -3,6 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::store::{self, CacheKind};
+
 /// Font family name as reported by `fc-list`; reused by the mermaid `fontFamily`
 /// setting so diagrams and the window chrome agree.
 pub const FAMILY: &str = "FiraCode Nerd Font";
@@ -127,7 +129,10 @@ pub fn prune(cache_root: &Path) {
     };
     for entry in entries.flatten() {
         if entry.file_name() != FONT_VERSION {
-            let _ = std::fs::remove_dir_all(entry.path());
+            let path = entry.path();
+            if std::fs::remove_dir_all(&path).is_ok() {
+                store::forget_artifact(&path);
+            }
         }
     }
 }
@@ -215,6 +220,7 @@ fn store_face(dir: &Path, dest: &Path, bytes: &[u8]) -> Result<(), String> {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("rename {}: {e}", dest.display()));
     }
+    store::record_artifact(CacheKind::Font, FONT_VERSION, "", dir);
     Ok(())
 }
 
