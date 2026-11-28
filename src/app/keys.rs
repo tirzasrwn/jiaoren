@@ -155,10 +155,10 @@ pub fn quit_suppressed(now: f64, closed_at: Option<f64>) -> bool {
     closed_at.is_some_and(|t| now - t < QUIT_SUPPRESS_WINDOW)
 }
 
-/// Keys whose action may repeat while held: scrolling only. Every other key
-/// (`yy`, `gg`, `G`, `r`, `t`, `]`, `[`, Tab, quit) must wait for a fresh press;
-/// otherwise holding the key copies the document, reloads it in a loop, or
-/// cycles files.
+/// Keys whose action may repeat while held: scrolling and the vim `}`/`{` block
+/// motions. Every other key (`yy`, `gg`, `G`, `r`, `t`, `]`, `[`, Tab, quit)
+/// must wait for a fresh press; otherwise holding the key copies the document,
+/// reloads it in a loop, or cycles files.
 pub(crate) fn repeats_while_held(key: Key) -> bool {
     matches!(
         key,
@@ -170,6 +170,8 @@ pub(crate) fn repeats_while_held(key: Key) -> bool {
             | Key::U
             | Key::B
             | Key::Space
+            | Key::OpenCurlyBracket
+            | Key::CloseCurlyBracket
             | Key::ArrowUp
             | Key::ArrowDown
             | Key::ArrowLeft
@@ -858,10 +860,14 @@ mod modifier_guard {
             apply_key(&mut s, Key::CloseCurlyBracket, Modifiers::NONE, now()),
             Some(Action::NextParagraph)
         );
+        // Vim repeats `}`/`{` while held, stepping one block per repeat.
         assert_eq!(
             apply_key_event(&mut s, Key::CloseCurlyBracket, Modifiers::NONE, true, now()),
-            None,
-            "a held brace must not keep jumping"
+            Some(Action::NextParagraph)
+        );
+        assert_eq!(
+            apply_key_event(&mut s, Key::OpenCurlyBracket, Modifiers::NONE, true, now()),
+            Some(Action::PrevParagraph)
         );
     }
 

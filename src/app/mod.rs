@@ -252,36 +252,54 @@ fn font_failure_status() -> &'static str {
     }
 }
 
-/// Bottom-left status overlay, shared by copy messages and the search status.
-fn status_area(ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui)) {
-    egui::Area::new(egui::Id::new("jiaoren-status"))
+/// Solid one-line chip in a window corner, shared by the left status and the
+/// right reading-progress indicator.
+fn chip_area(ctx: &egui::Context, id: &str, anchor: egui::Align2, offset: egui::Vec2, text: &str) {
+    egui::Area::new(egui::Id::new(id))
         .order(egui::Order::Middle)
-        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
+        .anchor(anchor, offset)
         .interactable(false)
         .show(ctx, |ui| {
-            // Solid chip: the status sits over the document and must stay legible.
+            // Solid chip: the chip sits over the document and must stay legible.
             // `panel_fill` is the page colour here, so use the faint fill
             // (Catppuccin mantle) for contrast.
             egui::Frame::new()
                 .fill(ui.visuals().faint_bg_color)
                 .inner_margin(egui::Margin::symmetric(4, 2))
-                .show(ui, add);
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(text)
+                                .monospace()
+                                .size(12.0)
+                                .color(ui.visuals().text_color()),
+                        )
+                        .wrap_mode(egui::TextWrapMode::Extend),
+                    );
+                });
         });
 }
 
 /// One-line status chip in the bottom-left corner.
 fn show_status(ctx: &egui::Context, text: &str) {
-    status_area(ctx, |ui| {
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(text)
-                    .monospace()
-                    .size(12.0)
-                    .color(ui.visuals().text_color()),
-            )
-            .wrap_mode(egui::TextWrapMode::Extend),
-        );
-    });
+    chip_area(
+        ctx,
+        "jiaoren-status",
+        egui::Align2::LEFT_BOTTOM,
+        egui::vec2(8.0, -8.0),
+        text,
+    );
+}
+
+/// Reading progress chip in the bottom-right corner.
+fn show_progress(ctx: &egui::Context, text: &str) {
+    chip_area(
+        ctx,
+        "jiaoren-progress",
+        egui::Align2::RIGHT_BOTTOM,
+        egui::vec2(-8.0, -8.0),
+        text,
+    );
 }
 
 /// Plain bottom-left `/query` line: monospace, on the same solid chip as the
@@ -975,6 +993,16 @@ impl App {
     /// never takes layout from the reading column; the document's bottom
     /// padding keeps text clear of it.
     fn draw_status(&mut self, ctx: &egui::Context) {
+        // Reading progress has its own bottom-right chip, so it never competes
+        // with the left prompt/status. Hidden at the top of the document and
+        // when nothing scrolls.
+        if let Some(pct) = reading_progress(
+            self.scroll_y,
+            self.scroll_max.y,
+            self.pad.map_or(0.0, |p| p.y),
+        ) {
+            show_progress(ctx, &format!("{pct}%"));
+        }
         if self.search.borrow().is_open() {
             let line = format!("/{}", self.search.borrow().query());
             prompt_area(ctx, line);
@@ -1005,19 +1033,7 @@ impl App {
             } else {
                 show_status(ctx, &status.message);
                 ctx.request_repaint_after(remaining);
-                return;
             }
-        }
-        // Final fallback: reading progress. Anything above (search prompt or
-        // status, downloads, font progress, a live transient message) owns the
-        // chip; the top of the document and a non-scrolling document stay
-        // blank.
-        if let Some(pct) = reading_progress(
-            self.scroll_y,
-            self.scroll_max.y,
-            self.pad.map_or(0.0, |p| p.y),
-        ) {
-            show_status(ctx, &format!("{pct}%"));
         }
     }
 
@@ -1319,7 +1335,6 @@ impl App {
                 .and_then(|block| search.block_y(block))
         };
         if let Some(y) = target {
-            self.jumps.record(self.scroll_y);
             self.jump_to = None;
             self.scroll_y = y;
         }

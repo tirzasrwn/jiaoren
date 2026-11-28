@@ -161,9 +161,8 @@ stripped from cells, fields quoted when they contain commas, quotes or line
 breaks). Code blocks have the same icon over their top-right corner (tooltip
 “Copy code”) and copy the block verbatim, with the trailing newline stripped.
 Copy buttons show a 1.5-second bottom-left status line and never steal focus.
-When that chip is otherwise idle and the document is scrolled, it shows reading
-progress (`42%`); it stays hidden at the top and whenever a search, download,
-font progress or transient message owns it.
+When the document is scrolled, a separate chip in the bottom-right corner shows
+reading progress (`42%`); it stays hidden at the top.
 
 Code blocks soft-wrap to the reading column and show a right-aligned line
 number per source line. A wrapped line continues on the next row with an empty
