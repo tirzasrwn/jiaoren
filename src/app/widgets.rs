@@ -36,7 +36,7 @@ fn paint_copy_button(
     tooltip: &str,
     backdrop: Color32,
 ) -> bool {
-    let response = response.on_hover_text(tooltip);
+    let response = crate::justify::plain_tooltip(response, tooltip);
     let hovered = response.hovered() || response.has_focus();
     let visuals = ui.visuals();
     let hover_bg = visuals.widgets.hovered.weak_bg_fill;

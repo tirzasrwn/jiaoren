@@ -1681,6 +1681,24 @@ pub(crate) const LINK_COPIED: &str = "jiaoren-link-copied";
 /// One-frame handoff: URL of the link under the pointer, read by `o`.
 pub(crate) const HOVER_LINK: &str = "jiaoren-hover-link";
 
+/// A tooltip drawn as a plain square box: no rounded corners, no border, no
+/// shadow. Used for every tooltip in the viewer.
+pub(crate) fn plain_tooltip(response: egui::Response, text: &str) -> egui::Response {
+    let mut tooltip = egui::Tooltip::for_enabled(&response);
+    let style = response.ctx.global_style();
+    let frame = egui::Frame::new()
+        .fill(style.visuals.faint_bg_color)
+        .stroke(egui::Stroke::NONE)
+        .corner_radius(0)
+        .shadow(egui::epaint::Shadow::NONE)
+        .inner_margin(egui::Margin::symmetric(6, 4));
+    tooltip.popup = tooltip.popup.frame(frame);
+    tooltip.show(|ui| {
+        ui.label(text);
+    });
+    response
+}
+
 /// Copy a safe link and leave the status flag. Inert schemes copy nothing.
 fn click_link(ctx: &egui::Context, url: &str) -> bool {
     if !link_is_safe(url) {
@@ -1717,7 +1735,7 @@ fn paint_frag(ui: &egui::Ui, painter: &egui::Painter, pos: Pos2, frag: &Frag) {
                 .data_mut(|d| d.insert_temp(Id::new(HOVER_LINK), url.to_string()));
         }
         // Show the destination so a homoglyph link cannot hide where it goes.
-        let response = response.on_hover_text(url);
+        let response = plain_tooltip(response, url);
         if safe {
             let _ = response.on_hover_cursor(egui::CursorIcon::PointingHand);
         }
