@@ -23,6 +23,10 @@ pub enum Action {
     ScrollPages(f32),
     /// Scroll horizontally by that many columns.
     ScrollCols(f32),
+    /// Jump to the next block start (`}`).
+    NextParagraph,
+    /// Jump to the previous block start (`{`).
+    PrevParagraph,
     /// Jump to the top of the document.
     Top,
     /// Jump to the bottom of the document.
@@ -218,6 +222,17 @@ pub fn apply_key(
         Key::Num0 if !modifiers.any() => Some(Action::ResetZoom),
         Key::T if !modifiers.any() => Some(Action::ToggleTheme),
         Key::R if !modifiers.any() => Some(Action::Reload),
+        // `}` / `{` are Shift+]/[ on most layouts, so accept the shift.
+        Key::CloseCurlyBracket
+            if modifiers.is_none() || modifiers.matches_exact(Modifiers::SHIFT) =>
+        {
+            Some(Action::NextParagraph)
+        }
+        Key::OpenCurlyBracket
+            if modifiers.is_none() || modifiers.matches_exact(Modifiers::SHIFT) =>
+        {
+            Some(Action::PrevParagraph)
+        }
         Key::CloseBracket if !modifiers.any() => Some(Action::NextFile),
         Key::OpenBracket if !modifiers.any() => Some(Action::PrevFile),
         Key::O if !modifiers.any() => Some(Action::OpenLink),
@@ -792,6 +807,28 @@ mod modifier_guard {
         assert_eq!(
             apply_key(&mut s, Key::Equals, Modifiers::NONE, now()),
             Some(Action::ZoomIn)
+        );
+    }
+
+    #[test]
+    fn curly_braces_jump_paragraphs() {
+        let mut s = KeyState::default();
+        assert_eq!(
+            apply_key(&mut s, Key::CloseCurlyBracket, Modifiers::SHIFT, now()),
+            Some(Action::NextParagraph)
+        );
+        assert_eq!(
+            apply_key(&mut s, Key::OpenCurlyBracket, Modifiers::SHIFT, now()),
+            Some(Action::PrevParagraph)
+        );
+        assert_eq!(
+            apply_key(&mut s, Key::CloseCurlyBracket, Modifiers::NONE, now()),
+            Some(Action::NextParagraph)
+        );
+        assert_eq!(
+            apply_key_event(&mut s, Key::CloseCurlyBracket, Modifiers::NONE, true, now()),
+            None,
+            "a held brace must not keep jumping"
         );
     }
 

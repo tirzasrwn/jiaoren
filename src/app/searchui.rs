@@ -316,6 +316,17 @@ impl SearchUi {
         self.hs.get(index).copied()
     }
 
+    /// Block index at the next (`dir > 0`) or previous block start relative to
+    /// content offset `from`. One-point slack keeps the block the viewport is
+    /// already showing from counting as the next one.
+    pub(crate) fn block_after(&self, from: f32, dir: isize) -> Option<usize> {
+        if dir > 0 {
+            self.ys.iter().position(|&y| y > from + 0.5)
+        } else {
+            self.ys.iter().rposition(|&y| y < from - 0.5)
+        }
+    }
+
     /// Block-local highlight ranges and the current-hit index, if the current
     /// hit belongs to `block`.
     pub(crate) fn highlights(&self, block: usize) -> (Vec<(usize, usize)>, Option<usize>) {
@@ -420,6 +431,19 @@ mod tests {
             assert_eq!(s.block_height(0), Some(32.0));
             assert_eq!(s.block_height(1), Some(10.0));
             assert_eq!(s.block_height(2), None);
+        }
+
+        #[test]
+        fn block_after_steps_over_blocks_in_content_order() {
+            let mut s = SearchUi::new();
+            s.ys = vec![100.0, 200.0, 300.0];
+            assert_eq!(s.block_after(100.0, 1), Some(1));
+            assert_eq!(s.block_after(200.0, 1), Some(2));
+            assert_eq!(s.block_after(300.0, 1), None);
+            assert_eq!(s.block_after(300.0, -1), Some(1));
+            assert_eq!(s.block_after(100.0, -1), None);
+            assert_eq!(s.block_after(150.0, -1), Some(0));
+            assert_eq!(s.block_after(150.0, 1), Some(1));
         }
 
         #[test]

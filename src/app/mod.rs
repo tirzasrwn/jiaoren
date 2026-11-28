@@ -1272,6 +1272,22 @@ impl App {
         }
     }
 
+    /// Jump to the next (`dir > 0`) or previous block start, vim `}`/`{`.
+    /// Blocks are the recorded top-level units, so paragraphs, headings, lists,
+    /// tables, code and images all count.
+    fn step_paragraph(&mut self, dir: isize) {
+        let target = {
+            let search = self.search.borrow();
+            search
+                .block_after(self.scroll_y, dir)
+                .and_then(|block| search.block_y(block))
+        };
+        if let Some(y) = target {
+            self.jump_to = None;
+            self.scroll_y = y;
+        }
+    }
+
     /// Drive live reload: drain watcher events (or poll mtime when the watcher
     /// is unavailable), debounce 100 ms, then reload once.
     fn watch_tick(&mut self, ctx: &egui::Context) {
@@ -1626,6 +1642,8 @@ impl eframe::App for App {
                     }) * self.zoom;
                     self.scroll_x = scroll_by_columns(self.scroll_x, f, advance, self.scroll_max.x);
                 }
+                Action::NextParagraph => self.step_paragraph(1),
+                Action::PrevParagraph => self.step_paragraph(-1),
                 Action::Top => {
                     let home = home_target(self.pad);
                     self.scroll_x = home.x;
