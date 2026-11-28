@@ -1,13 +1,13 @@
 //! Persisted view preferences: zoom and theme plus each document's reading
 //! position.
 //!
-//! Plain `key = value` lines, so no config crate is needed. Unknown keys and
-//! malformed values are ignored, and a missing or unreadable file just means
-//! defaults.
+//! State lives in the SQLite store. The legacy `state.toml` is parsed once for
+//! migration and then removed; nothing writes TOML any more.
 
 use std::path::{Path, PathBuf};
 
 use crate::mermaid::Theme;
+use crate::store::{self, State};
 
 /// Zoom range the app itself enforces; a hand-edited file cannot escape it.
 const MIN_ZOOM: f32 = 0.5;
@@ -44,9 +44,45 @@ impl Prefs {
     }
 }
 
-/// `$XDG_CONFIG_HOME/jiaoren/state.toml`, else `$HOME/.config/...`. `None` when
-/// neither variable is set, in which case preferences are simply not persisted.
-fn state_path() -> Option<PathBuf> {
+impl From<State> for Prefs {
+    fn from(state: State) -> Self {
+        Self {
+            zoom: clamp_zoom(state.zoom),
+            theme: state.theme.as_deref().and_then(theme_from_token),
+            positions: state.positions,
+        }
+    }
+}
+
+impl From<&Prefs> for State {
+    fn from(prefs: &Prefs) -> Self {
+        Self {
+            zoom: clamp_zoom(prefs.zoom),
+            theme: prefs.theme.map(|theme| theme.as_str().to_owned()),
+            positions: prefs.positions.clone(),
+        }
+    }
+}
+
+fn clamp_zoom(zoom: f32) -> f32 {
+    if zoom.is_finite() {
+        zoom.clamp(MIN_ZOOM, MAX_ZOOM)
+    } else {
+        1.0
+    }
+}
+
+fn theme_from_token(token: &str) -> Option<Theme> {
+    match token {
+        "light" => Some(Theme::Light),
+        "dark" => Some(Theme::Dark),
+        _ => None,
+    }
+}
+
+/// `$XDG_CONFIG_HOME/jiaoren/state.toml`, else `$HOME/.config/...`. Only read
+/// during migration; `None` when neither variable is set.
+fn legacy_path() -> Option<PathBuf> {
     let base = if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         PathBuf::from(xdg)
     } else {
@@ -55,36 +91,34 @@ fn state_path() -> Option<PathBuf> {
     Some(base.join("jiaoren").join("state.toml"))
 }
 
-/// The saved preferences, or defaults when there is no file.
+/// The saved preferences, or defaults when there is no database and no legacy
+/// file.
 pub fn load() -> Prefs {
-    let Some(path) = state_path() else {
+    if let Some(state) = store::load_state() {
+        return Prefs::from(state);
+    }
+    let Some(path) = legacy_path() else {
         return Prefs::default();
     };
-    match std::fs::read_to_string(path) {
-        Ok(text) => parse(&text),
-        Err(_) => Prefs::default(),
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Prefs::default();
+    };
+    let prefs = parse(&text);
+    if store::save_state(&State::from(&prefs)) {
+        let _ = std::fs::remove_file(&path);
     }
+    prefs
 }
 
 /// Persist `zoom`, `theme` and every remembered document position.
-/// Best effort: a read-only config dir must never break the viewer.
+/// Best effort: an unwritable database must never break the viewer.
 pub fn save(zoom: f32, theme: Theme, positions: &[(PathBuf, f32)]) {
-    let Some(path) = state_path() else {
-        return;
+    let prefs = Prefs {
+        zoom,
+        theme: Some(theme),
+        positions: positions.to_vec(),
     };
-    if let Some(dir) = path.parent() {
-        if std::fs::create_dir_all(dir).is_err() {
-            return;
-        }
-    }
-    let tmp = PathBuf::from(format!("{}.{}.tmp", path.display(), std::process::id()));
-    if std::fs::write(&tmp, render(zoom, theme, positions)).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        return;
-    }
-    if std::fs::rename(&tmp, &path).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
+    store::save_state(&State::from(&prefs));
 }
 
 fn parse(text: &str) -> Prefs {
@@ -105,11 +139,9 @@ fn parse(text: &str) -> Prefs {
                 }
             }
             "theme" => {
-                prefs.theme = match value {
-                    "light" => Some(Theme::Light),
-                    "dark" => Some(Theme::Dark),
-                    _ => prefs.theme,
-                };
+                if let Some(theme) = theme_from_token(value) {
+                    prefs.theme = Some(theme);
+                }
             }
             "pos" => {
                 // `pos = <scroll> <path>`; the path may contain spaces.
@@ -151,46 +183,80 @@ fn parse(text: &str) -> Prefs {
     prefs
 }
 
-fn render(zoom: f32, theme: Theme, positions: &[(PathBuf, f32)]) -> String {
-    let mut text = format!(
-        "zoom = {:.3}\ntheme = {}\n",
-        zoom.clamp(MIN_ZOOM, MAX_ZOOM),
-        theme.as_str()
-    );
-    for (path, scroll) in positions {
-        text.push_str(&format!(
-            "pos = {:.1} {}\n",
-            scroll.max(0.0),
-            path.to_string_lossy()
-        ));
-    }
-    text
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{parse, render, Prefs, MAX_ZOOM, MIN_ZOOM};
+    use super::{parse, Prefs, MAX_ZOOM, MIN_ZOOM};
     use crate::mermaid::Theme;
+    use crate::store::State;
+    use std::path::PathBuf;
 
     #[test]
-    fn round_trips_zoom_and_theme() {
-        let text = render(1.25, Theme::Dark, &[]);
-        let prefs = parse(&text);
+    fn legacy_toml_parses_into_store_state() {
+        let text = "zoom = 1.5\ntheme = dark\npos = 123.5 /tmp/notes.md\n\
+                    last_path = /tmp/old.md\nlast_scroll = 42\n";
+        let prefs = parse(text);
+        let state = State::from(&prefs);
+        assert_eq!(state.zoom, 1.5);
+        assert_eq!(state.theme.as_deref(), Some("dark"));
+        assert_eq!(state.positions, prefs.positions);
+        assert_eq!(state.positions.len(), 2);
+    }
+
+    #[test]
+    fn state_conversion_preserves_theme_zoom_and_positions() {
+        for theme in [None, Some(Theme::Light), Some(Theme::Dark)] {
+            let prefs = Prefs {
+                zoom: 1.25,
+                theme,
+                positions: vec![
+                    (PathBuf::from("/a.md"), 10.0),
+                    (PathBuf::from("/b.md"), 20.0),
+                ],
+            };
+            let state = State::from(&prefs);
+            assert_eq!(state.zoom, 1.25);
+            assert_eq!(state.theme.as_deref(), theme.map(Theme::as_str));
+            assert_eq!(Prefs::from(state), prefs);
+        }
+    }
+
+    #[test]
+    fn state_conversion_clamps_zoom_and_drops_unknown_theme() {
+        let prefs = Prefs::from(State {
+            zoom: MAX_ZOOM * 10.0,
+            theme: Some("sepia".into()),
+            positions: Vec::new(),
+        });
+        assert_eq!(prefs.zoom, MAX_ZOOM);
+        assert_eq!(prefs.theme, None);
+        let prefs = Prefs::from(State {
+            zoom: f32::NAN,
+            theme: None,
+            positions: Vec::new(),
+        });
+        assert_eq!(prefs.zoom, 1.0);
+    }
+
+    #[test]
+    fn legacy_toml_parses_zoom_and_theme() {
+        let prefs = parse("zoom = 1.25\ntheme = dark\n");
         assert_eq!(prefs.zoom, 1.25);
         assert_eq!(prefs.theme, Some(Theme::Dark));
         assert_eq!(
-            parse(&render(0.8, Theme::Light, &[])).theme,
+            parse("zoom = 0.8\ntheme = light\n").theme,
             Some(Theme::Light)
         );
     }
 
     #[test]
-    fn round_trips_every_document_position() {
+    fn legacy_toml_parses_every_document_position() {
         let positions = vec![
             (std::path::PathBuf::from("/tmp/notes.md"), 123.5),
             (std::path::PathBuf::from("/tmp/with space.md"), 9.0),
         ];
-        let prefs = parse(&render(1.0, Theme::Dark, &positions));
+        let prefs = parse(
+            "zoom = 1\ntheme = dark\npos = 123.5 /tmp/notes.md\npos = 9 /tmp/with space.md\n",
+        );
         assert_eq!(prefs.positions, positions);
         assert_eq!(
             prefs.resume_scroll(std::path::Path::new("/tmp/notes.md")),
