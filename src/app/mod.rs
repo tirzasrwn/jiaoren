@@ -1809,7 +1809,19 @@ impl eframe::App for App {
                     self.keys_help = !self.keys_help;
                 }
                 Action::ToggleToc => {
-                    self.toc.toggle_open(&self.prepared.toc);
+                    let ys: Vec<Option<f32>> = {
+                        let search = self.search.borrow();
+                        self.prepared
+                            .toc
+                            .iter()
+                            .map(|entry| {
+                                search
+                                    .heading_block(&entry.id)
+                                    .and_then(|block| search.block_y(block))
+                            })
+                            .collect()
+                    };
+                    self.toc.toggle_open(&self.prepared.toc, &ys, self.scroll_y);
                     ui.ctx().request_repaint();
                 }
                 // Esc/Ctrl+C: prompt, search, selection, then quit.
