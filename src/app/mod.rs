@@ -1257,11 +1257,6 @@ impl App {
             .show(ctx, |ui| {
                 egui::Frame::new()
                     .fill(ui.visuals().faint_bg_color)
-                    .stroke(egui::Stroke::new(
-                        1.0,
-                        ui.visuals().widgets.noninteractive.bg_stroke.color,
-                    ))
-                    .corner_radius(egui::CornerRadius::same(4))
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
                         ui.add(
