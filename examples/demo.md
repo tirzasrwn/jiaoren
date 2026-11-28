@@ -46,6 +46,13 @@ https://example.com/autolink work too.
 
 ![local image](../docs/assets/demo-image.png)
 
+## Tall image
+
+A 800×2000 screenshot is capped to 75% of the window height, so it cannot
+swallow several viewports; click it to see the full picture in the zoom popup.
+
+![tall screenshot](../docs/assets/demo-tall.png "Tall image capped to 75% of the viewport height")
+
 ## Diagram
 
 ```mermaid
