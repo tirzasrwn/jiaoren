@@ -161,6 +161,9 @@ stripped from cells, fields quoted when they contain commas, quotes or line
 breaks). Code blocks have the same icon over their top-right corner (tooltip
 “Copy code”) and copy the block verbatim, with the trailing newline stripped.
 Copy buttons show a 1.5-second bottom-left status line and never steal focus.
+When that chip is otherwise idle and the document is scrolled, it shows reading
+progress (`42%`); it stays hidden at the top and whenever a search, download,
+font progress or transient message owns it.
 
 Code blocks soft-wrap to the reading column and show a right-aligned line
 number per source line. A wrapped line continues on the next row with an empty
@@ -236,8 +239,9 @@ A paragraph that contains only one local image is drawn as an image block:
 ![alt text](pics/cat.png "optional title")
 ```
 
-Relative paths resolve against the document directory; the title is ignored
-and the alt text is kept. A destination with spaces can be bracketed:
+Relative paths resolve against the document directory. A `"title"` is drawn as
+one weak centred caption line under the image; without one the alt text is
+used, and empty alt text draws no caption. A destination with spaces can be bracketed:
 `![alt](<a b.png>)`. Document image paths are passed literally to the file
 loader: `%20` is part of the filename, not an escape for a space.
 **PNG, JPEG, GIF (first frame) and WebP** are decoded locally by the `image`
@@ -249,8 +253,9 @@ images inside tables, lists or blockquotes, also stay on the library path and
 are not clickable.
 
 An image is drawn at its intrinsic pixel size (centred when narrower than the
-text column) and capped to the column width when wider, with the same vertical
-spacing above and below as a table. Decoding runs on a background worker with
+text column), capped to the column width when wider and to 75% of the window
+height when taller, keeping its aspect ratio, with the same vertical spacing
+above and below as a table. Decoding runs on a background worker with
 bounded dimensions/allocation; the pixels are downscaled to the display size
 before upload, so a 4000×3000 photo does not keep a full-resolution texture.
 The zoom popup re-resizes from the decoded source when zooming in, so `+` stays
