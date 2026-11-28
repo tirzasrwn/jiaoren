@@ -1294,6 +1294,7 @@ impl App {
                 .and_then(|block| search.block_y(block))
         };
         if let Some(y) = target {
+            self.jumps.record(self.scroll_y);
             self.jump_to = None;
             self.scroll_y = y;
         }
