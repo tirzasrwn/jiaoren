@@ -417,6 +417,10 @@ enum SearchEdit {
     Backspace,
     /// `Ctrl+W`: delete the trailing word (vim's insert-mode word erase).
     DeleteWord,
+    /// `Up`: an older committed query.
+    HistoryOlder,
+    /// `Down`: a newer committed query, or the draft.
+    HistoryNewer,
 }
 
 /// Erase one trailing word plus the whitespace before it: `"foo bar "` and
@@ -514,6 +518,18 @@ fn read_search_batch(events: &[egui::Event]) -> SearchBatch {
                 ..
             } => batch.edits.push(SearchEdit::Backspace),
             egui::Event::Key {
+                key: egui::Key::ArrowUp,
+                modifiers,
+                pressed: true,
+                ..
+            } if !modifiers.any() => batch.edits.push(SearchEdit::HistoryOlder),
+            egui::Event::Key {
+                key: egui::Key::ArrowDown,
+                modifiers,
+                pressed: true,
+                ..
+            } if !modifiers.any() => batch.edits.push(SearchEdit::HistoryNewer),
+            egui::Event::Key {
                 key: egui::Key::Enter,
                 pressed: true,
                 ..
@@ -548,6 +564,38 @@ fn read_search_batch(events: &[egui::Event]) -> SearchBatch {
     batch
 }
 
+/// A heading to keep at the viewport top across a reload, plus how far below
+/// its top the reader was.
+#[derive(Clone, Debug, PartialEq)]
+struct ReadingAnchor {
+    heading: String,
+    offset: f32,
+}
+
+/// Capture the last heading at/above `scroll_y` with its viewport offset.
+/// Headings come in document order. `navigating` documents that `]`/`[` already
+/// picked a saved position, so the anchor must stay unarmed.
+fn reading_anchor<'a>(
+    navigating: bool,
+    headings: impl IntoIterator<Item = (&'a str, f32)>,
+    scroll_y: f32,
+) -> Option<ReadingAnchor> {
+    if navigating {
+        return None;
+    }
+    let mut anchor = None;
+    for (heading, y) in headings {
+        if y > scroll_y {
+            break;
+        }
+        anchor = Some(ReadingAnchor {
+            heading: heading.to_string(),
+            offset: scroll_y - y,
+        });
+    }
+    anchor
+}
+
 /// The jiaoren window: document state, theme/zoom, scrolling, and the HTML
 /// render hook.
 pub(crate) struct App {
@@ -580,6 +628,8 @@ pub(crate) struct App {
     /// Vertical offset to apply once after the first layout, from a saved
     /// position or from stepping to another document with `]`/`[`.
     restore_scroll: Option<f32>,
+    /// Heading anchor to restore after a reload's first layout.
+    reload_anchor: Option<ReadingAnchor>,
     /// Remembered scroll offsets per document, most recent first.
     positions: Vec<(std::path::PathBuf, f32)>,
     /// Content scroll limits from the last layout. Key scrolls clamp to these
@@ -822,6 +872,7 @@ impl App {
             scroll_y: 0.0,
             scroll_x: 0.0,
             restore_scroll,
+            reload_anchor: None,
             positions,
             scroll_max: egui::Vec2::ZERO,
             jump_to: None,
@@ -868,6 +919,13 @@ impl App {
 
     /// Reload the document and rebuild every placeholder cache.
     pub fn reload(&mut self) {
+        self.reload_from_disk(false);
+    }
+
+    /// Reload and rebuild the caches. `navigating` skips the reading anchor:
+    /// `]`/`[` supply a saved position instead.
+    fn reload_from_disk(&mut self, navigating: bool) {
+        self.reload_anchor = self.capture_anchor(navigating);
         let old_toc = self.prepared.toc.clone();
         self.load();
         crate::justify::clear_inline_cache();
@@ -891,6 +949,19 @@ impl App {
         self.search.borrow_mut().reset_keeping_pattern();
         self.toc.remap(&old_toc, &self.prepared.toc);
         self.jump_to = None;
+    }
+
+    /// The heading at/above the viewport top from the last completed frame.
+    fn capture_anchor(&self, navigating: bool) -> Option<ReadingAnchor> {
+        let search = self.search.borrow();
+        reading_anchor(
+            navigating,
+            self.prepared.toc.iter().filter_map(|entry| {
+                let block = search.heading_block(&entry.id)?;
+                Some((entry.id.as_str(), search.block_y(block)?))
+            }),
+            self.scroll_y,
+        )
     }
 
     /// Remember the current zoom, theme and this document's reading position.
@@ -934,7 +1005,7 @@ impl App {
         self.pad = None;
         self.scroll_bottom = false;
         self.autoscroll = 0.0;
-        self.reload();
+        self.reload_from_disk(true);
         // A different document starts with no search and a fresh index.
         self.search.borrow_mut().reset();
         self.toc.reset();
@@ -1597,14 +1668,22 @@ impl eframe::App for App {
                 let changed = !batch.edits.is_empty();
                 if changed || batch.enter {
                     let mut s = self.search.borrow_mut();
-                    if let Some(query) = s.input.as_mut() {
-                        for edit in &batch.edits {
-                            match edit {
-                                SearchEdit::Text(text) => query.push_str(text),
-                                SearchEdit::Backspace => {
-                                    query.pop();
+                    for edit in &batch.edits {
+                        match edit {
+                            SearchEdit::HistoryOlder => s.history_older(),
+                            SearchEdit::HistoryNewer => s.history_newer(),
+                            _ => {
+                                let Some(query) = s.input.as_mut() else {
+                                    continue;
+                                };
+                                match edit {
+                                    SearchEdit::Text(text) => query.push_str(text),
+                                    SearchEdit::Backspace => {
+                                        query.pop();
+                                    }
+                                    SearchEdit::DeleteWord => truncate_word_tail(query),
+                                    SearchEdit::HistoryOlder | SearchEdit::HistoryNewer => {}
                                 }
-                                SearchEdit::DeleteWord => truncate_word_tail(query),
                             }
                         }
                     }
@@ -1972,6 +2051,20 @@ impl eframe::App for App {
             self.search
                 .borrow_mut()
                 .finish_frame(output.state.offset.y, output.inner_rect.top());
+            // A reload keeps the heading that was at the viewport top in place,
+            // now that the new layout knows its content position.
+            if let Some(anchor) = self.reload_anchor.take() {
+                let top = {
+                    let search = self.search.borrow();
+                    search
+                        .heading_block(&anchor.heading)
+                        .and_then(|block| search.block_y(block))
+                };
+                if let Some(top) = top {
+                    self.scroll_y = (top + anchor.offset).clamp(0.0, max_y);
+                    ui.ctx().request_repaint();
+                }
+            }
             if adjust != 0.0 || jump_bottom {
                 // Re-lay out next frame at the corrected offset.
                 ui.ctx().request_repaint();
@@ -2128,6 +2221,23 @@ mod tests {
         }
 
         #[test]
+        fn plain_arrows_walk_history_and_modified_arrows_do_not() {
+            let batch = read_search_batch(&[pressed(Key::ArrowUp), pressed(Key::ArrowDown)]);
+            assert_eq!(
+                batch.edits,
+                vec![SearchEdit::HistoryOlder, SearchEdit::HistoryNewer]
+            );
+            let modified = read_search_batch(&[Event::Key {
+                key: Key::ArrowUp,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::CTRL,
+            }]);
+            assert!(modified.edits.is_empty());
+        }
+
+        #[test]
         fn ctrl_w_is_a_delete_word_edit_not_a_typed_w() {
             let batch = read_search_batch(&[Event::Key {
                 key: Key::W,
@@ -2138,6 +2248,51 @@ mod tests {
             }]);
             assert_eq!(batch.edits, vec![SearchEdit::DeleteWord]);
             assert!(!batch.cancel);
+        }
+    }
+
+    mod reload_anchor {
+        use super::super::{reading_anchor, ReadingAnchor};
+
+        fn headings() -> Vec<(&'static str, f32)> {
+            vec![("intro", 100.0), ("body", 400.0), ("tail", 900.0)]
+        }
+
+        #[test]
+        fn picks_the_last_heading_at_or_above_the_viewport_top() {
+            assert_eq!(
+                reading_anchor(false, headings(), 450.0),
+                Some(ReadingAnchor {
+                    heading: "body".to_string(),
+                    offset: 50.0,
+                })
+            );
+            // A heading exactly at the top is the anchor, with no offset.
+            assert_eq!(
+                reading_anchor(false, headings(), 400.0),
+                Some(ReadingAnchor {
+                    heading: "body".to_string(),
+                    offset: 0.0,
+                })
+            );
+        }
+
+        #[test]
+        fn no_heading_at_or_above_yields_no_anchor() {
+            assert_eq!(reading_anchor(false, headings(), 99.0), None);
+            assert_eq!(reading_anchor(false, std::iter::empty(), 10.0), None);
+        }
+
+        #[test]
+        fn offset_is_the_distance_below_the_heading_top() {
+            let anchor = reading_anchor(false, headings(), 725.0).unwrap();
+            assert_eq!(anchor.heading, "body");
+            assert_eq!(anchor.offset, 325.0);
+        }
+
+        #[test]
+        fn navigation_does_not_arm_the_anchor() {
+            assert_eq!(reading_anchor(true, headings(), 450.0), None);
         }
     }
 
