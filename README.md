@@ -225,8 +225,10 @@ If Chromium cannot be found or installed, the document still opens and a
 warning banner names the failing step; diagrams simply won't render.
 
 A diagram is drawn at its intrinsic size (centred when narrower than the text
-column) and capped to the column width when wider, with the same vertical
-spacing above and below as a table. Click a diagram to open it in a dimmed
+column), capped to the column width when wider and to 75% of the window height
+when taller, keeping its aspect ratio, with the same vertical spacing above and
+below as a table. A tall diagram therefore shrinks inline; click it to see the
+whole picture in the overlay. Click a diagram to open it in a dimmed
 overlay: `+`/`-` or the wheel zoom (1×–3×), `h`/`l`/`j`/`k` and mouse drag pan
 (both axes, with half a frame of overscroll past every edge), `t` switches the
 theme and redraws the diagram in it, and `Esc`, `q`,

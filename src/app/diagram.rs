@@ -9,7 +9,7 @@ use std::thread;
 use crate::mermaid::{parse_svg_size, Renderer, Theme};
 
 use super::geometry::{
-    bucket_for_scale, bucket_scale, clamp_pan, diagram_display_size, keep_bucket, popup_fit_size,
+    bucket_for_scale, bucket_scale, clamp_pan, diagram_inline_size, keep_bucket, popup_fit_size,
     popup_zoom_step, raster_key, reanchor, zoom_anchored, RasterKey,
 };
 use super::raster::{rasterize, Raster, RasterJob};
@@ -101,6 +101,9 @@ pub(crate) struct DiagramUi {
     /// Reading column in effect this frame, set from the same `col` the viewer
     /// is given via `ui.set_width(col)`.
     column: f32,
+    /// Viewport height in effect this frame; inline diagrams cap their display
+    /// height to 75% of it.
+    viewport_h: f32,
     /// Intrinsic SVG size per diagram id (keyed `id-theme`); `None` when the
     /// file has no parsable size, and absent until first read succeeds.
     sizes: HashMap<String, Option<(f32, f32)>>,
@@ -151,6 +154,7 @@ impl DiagramUi {
             theme,
             zoom: 1.0,
             column: 0.0,
+            viewport_h: 0.0,
             sizes: HashMap::new(),
             inflight: HashSet::new(),
             failures: HashMap::new(),
@@ -204,8 +208,9 @@ impl DiagramUi {
 
     /// Record the document's reading column once per frame, before the viewer
     /// runs. `ui.available_width()` inside the html hook is not that column.
-    pub(crate) fn begin_frame(&mut self, column: f32) {
+    pub(crate) fn begin_frame(&mut self, column: f32, viewport_h: f32) {
         self.column = column;
+        self.viewport_h = viewport_h;
     }
 
     /// Draw a diagram inline, with the same vertical breathing room as a table
@@ -459,7 +464,7 @@ impl DiagramUi {
 
     fn draw_svg(&mut self, ui: &mut egui::Ui, id: &str, svg: &Path, theme: Theme) {
         let (iw, ih) = self.intrinsic(id, theme, svg).unwrap_or((640.0, 320.0));
-        let (dw, dh) = diagram_display_size((iw, ih), self.column, self.zoom);
+        let (dw, dh) = diagram_inline_size((iw, ih), self.column, self.zoom, self.viewport_h);
         let (draw, bucket) = self.raster_for(ui.ctx(), id, svg, theme, (iw, ih), dw);
         // The popup prunes this diagram's union of buckets; doing it here too
         // would evict the sharper texture the popup is about to draw.
@@ -624,7 +629,7 @@ impl DiagramUi {
         // Keep both the popup's bucket and the inline diagram's (the document
         // is still laid out behind the overlay), each with one below.
         let ppp = ctx.pixels_per_point();
-        let inline_w = diagram_display_size((iw, ih), column, self.zoom).0;
+        let inline_w = diagram_inline_size((iw, ih), column, self.zoom, self.viewport_h).0;
         let inline_bucket = bucket_for_scale(inline_w / iw, iw, ih, ppp);
         self.prune_rasters(&id, raster_theme, &[bucket, inline_bucket]);
 
@@ -761,7 +766,7 @@ impl DiagramUi {
             .intrinsic(id, self.theme, &path)
             .or_else(|| self.intrinsic(id, other, &other_path))
             .unwrap_or((640.0, 320.0));
-        let (w, h) = diagram_display_size((w, h), self.column, self.zoom);
+        let (w, h) = diagram_inline_size((w, h), self.column, self.zoom, self.viewport_h);
         let viewport_top = ui.clip_rect().top();
         let (rect, _) = ui
             .allocate_ui_with_layout(

@@ -360,6 +360,18 @@ pub(crate) fn diagram_display_size(intrinsic: (f32, f32), column: f32, zoom: f32
     (w, w * ih / iw)
 }
 
+/// Inline diagram size: the same rule as an inline image, including the 75%
+/// viewport-height cap, so a very tall mermaid diagram cannot swallow several
+/// viewports. The popup fits the whole diagram against its own viewport.
+pub(crate) fn diagram_inline_size(
+    intrinsic: (f32, f32),
+    column: f32,
+    zoom: f32,
+    viewport_h: f32,
+) -> (f32, f32) {
+    image_display_size(intrinsic, column, zoom, viewport_h)
+}
+
 /// Inline image size: the diagram rule (intrinsic × zoom, capped to the column)
 /// with an extra cap to 75% of the viewport height. The height cap preserves the
 /// aspect ratio and never upscales a small image. The zoom popup does not use
@@ -848,6 +860,22 @@ mod tests {
             // The intrinsic fallback still applies.
             let (w, h) = image_display_size((0.0, f32::NAN), 900.0, 1.0, 600.0);
             assert_eq!((w, h), (320.0, 160.0));
+        }
+
+        #[test]
+        fn diagram_inline_caps_tall_diagrams_to_three_quarters_of_the_viewport() {
+            let (w, h) = diagram_inline_size((400.0, 2000.0), 900.0, 1.0, 600.0);
+            assert_eq!(h, 450.0);
+            assert!((w - 400.0 * 450.0 / 2000.0).abs() < 0.01);
+            // Wide diagrams keep the column cap and small ones stay intrinsic.
+            assert_eq!(
+                diagram_inline_size((1400.0, 300.0), 900.0, 1.0, 600.0).0,
+                900.0
+            );
+            assert_eq!(
+                diagram_inline_size((87.0, 160.0), 900.0, 1.0, 600.0),
+                (87.0, 160.0)
+            );
         }
 
         #[test]

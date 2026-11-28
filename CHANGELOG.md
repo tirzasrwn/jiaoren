@@ -19,8 +19,8 @@ All notable changes to jiaoren. Versions follow [SemVer](https://semver.org/).
 - A bottom-right chip shows reading progress while scrolled.
 - Standalone images draw their Markdown title, falling back to alt text, as a
   caption.
-- Inline images are capped to 75% of the viewport height, keeping their aspect
-  ratio.
+- Inline images and mermaid diagrams are capped to 75% of the viewport height,
+  keeping their aspect ratio; click opens the full picture.
 
 ### Changed
 

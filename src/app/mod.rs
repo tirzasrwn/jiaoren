@@ -2028,7 +2028,7 @@ impl eframe::App for App {
                         self.quotes.borrow_mut().begin_frame(col);
                         self.headings.borrow_mut().begin_frame(col);
                         self.code.borrow_mut().begin_frame(ui, col);
-                        self.diagrams.borrow_mut().begin_frame(col);
+                        self.diagrams.borrow_mut().begin_frame(col, viewport_h);
                         self.images.borrow_mut().begin_frame(col, z, viewport_h);
                         self.search.borrow_mut().begin_frame();
                         // The document paint re-records the hovered link below;
